@@ -148,6 +148,25 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             report.normalize_polymarket_trade(trade, "0x" + "a" * 64)
 
+    def test_normalize_polymarket_position_requires_wallet_and_condition(self):
+        condition_id = "0x" + "a" * 64
+        position = {
+            "proxyWallet": "0x0000000000000000000000000000000000000001",
+            "conditionId": condition_id,
+            "asset": "123",
+            "outcome": "Up",
+            "outcomeIndex": 0,
+            "totalBought": 12.5,
+        }
+        normalized = report.normalize_polymarket_position(position, condition_id)
+        self.assertEqual(normalized["wallet"], "0x0000000000000000000000000000000000000001")
+        self.assertEqual(normalized["condition_id"], condition_id)
+        self.assertEqual(normalized["total_bought"], Decimal("12.5"))
+
+        position["conditionId"] = "0x" + "b" * 64
+        with self.assertRaises(ValueError):
+            report.normalize_polymarket_position(position, condition_id)
+
     def test_fetch_polymarket_trades_for_market_dedupes_and_sets_taker_only(self):
         condition_id = "0x" + "a" * 64
         calls = []
@@ -303,6 +322,65 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(calls, [",".join(condition_ids), condition_ids[0], condition_ids[1]])
         self.assertEqual(grouped[condition_ids[0]]["status"], "complete")
         self.assertEqual(grouped[condition_ids[1]]["status"], "complete")
+
+    def test_fetch_polymarket_positions_for_market_paginates_per_outcome(self):
+        condition_id = "0x" + "a" * 64
+        calls = []
+        original_limit = report.POLYMARKET_POSITIONS_LIMIT
+        original_get = report.get_json_list
+        report.POLYMARKET_POSITIONS_LIMIT = 2
+
+        def fake_get(base_url, path, params):
+            calls.append((base_url, path, params.copy()))
+            offset = params["offset"]
+            if offset == 0:
+                return [
+                    {
+                        "positions": [
+                            {
+                                "proxyWallet": "0x0000000000000000000000000000000000000001",
+                                "conditionId": condition_id,
+                                "asset": "up",
+                                "outcomeIndex": 0,
+                                "totalBought": "1",
+                            },
+                            {
+                                "proxyWallet": "0x0000000000000000000000000000000000000002",
+                                "conditionId": condition_id,
+                                "asset": "up",
+                                "outcomeIndex": 0,
+                                "totalBought": "2",
+                            },
+                        ]
+                    },
+                    {"positions": []},
+                ]
+            return [
+                {
+                    "positions": [
+                        {
+                            "proxyWallet": "0x0000000000000000000000000000000000000003",
+                            "conditionId": condition_id,
+                            "asset": "up",
+                            "outcomeIndex": 0,
+                            "totalBought": "3",
+                        }
+                    ]
+                }
+            ]
+
+        report.get_json_list = fake_get
+        try:
+            fetched = report.fetch_polymarket_positions_for_market(condition_id)
+        finally:
+            report.get_json_list = original_get
+            report.POLYMARKET_POSITIONS_LIMIT = original_limit
+
+        self.assertEqual([call[2]["offset"] for call in calls], [0, 2])
+        self.assertEqual(calls[0][0], report.POLYMARKET_DATA_API_BASE)
+        self.assertEqual(calls[0][1], "/v1/market-positions")
+        self.assertEqual(fetched["status"], "positions_complete")
+        self.assertEqual([position["wallet"] for position in fetched["positions"]], ["0x0000000000000000000000000000000000000001", "0x0000000000000000000000000000000000000002", "0x0000000000000000000000000000000000000003"])
 
     def test_normalize_event_validates_title_outcomes_and_window(self):
         event = {
@@ -767,6 +845,72 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(wallet_market_rows[0]["data_status"], "not_generated")
         self.assertEqual(wallet_daily_rows[0]["data_status"], "not_generated")
         self.assertEqual(raw_wallet_lines, [])
+
+    def test_collect_polymarket_wallet_positions_streams_raw_and_aggregates(self):
+        detail_rows = [
+            {
+                "platform": "polymarket",
+                "month_utc": "2026-02",
+                "date_utc": "2026-02-01",
+                "market_type": "hourly",
+                "platform_series": "btc-up-or-down-hourly",
+                "platform_market_id": "0x" + "a" * 64,
+                "title": "Bitcoin Up or Down - February 1",
+                "volume": "20",
+            }
+        ]
+
+        def fake_fetch(condition_id):
+            return {
+                "positions": [
+                    {
+                        "wallet": "0x1",
+                        "condition_id": condition_id,
+                        "asset": "up",
+                        "outcome_index": "0",
+                        "total_bought": Decimal("5"),
+                        "raw": {"conditionId": condition_id},
+                    },
+                    {
+                        "wallet": "0x2",
+                        "condition_id": condition_id,
+                        "asset": "down",
+                        "outcome_index": "1",
+                        "total_bought": Decimal("10"),
+                        "raw": {"conditionId": condition_id},
+                    },
+                ],
+                "status": "positions_complete",
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_path = report.POLYMARKET_TRADES_RAW_PATH
+            original_fetch = report.fetch_polymarket_positions_for_market
+            original_workers = report.POLYMARKET_POSITIONS_WORKERS
+            report.POLYMARKET_TRADES_RAW_PATH = Path(tmpdir) / "wallet_raw.jsonl.gz"
+            report.fetch_polymarket_positions_for_market = fake_fetch
+            report.POLYMARKET_POSITIONS_WORKERS = 1
+            try:
+                market_rows, daily_rows, monthly_rows, anomalies = report.collect_polymarket_wallet_positions(
+                    detail_rows
+                )
+            finally:
+                report.POLYMARKET_TRADES_RAW_PATH = original_path
+                report.fetch_polymarket_positions_for_market = original_fetch
+                report.POLYMARKET_POSITIONS_WORKERS = original_workers
+
+            with gzip.open(Path(tmpdir) / "wallet_raw.jsonl.gz", "rt", encoding="utf-8") as input_file:
+                raw_records = [json.loads(line) for line in input_file]
+
+        self.assertEqual(market_rows[0]["active_wallet_count"], "2")
+        self.assertEqual(market_rows[0]["participant_trade_count"], "2")
+        self.assertEqual(market_rows[0]["trade_history_volume"], "15")
+        self.assertEqual(market_rows[0]["top10_wallet_volume_share"], "1")
+        self.assertEqual(market_rows[0]["data_status"], "positions_complete")
+        self.assertEqual(daily_rows[0]["active_wallet_count"], "2")
+        self.assertEqual(monthly_rows[0]["trade_history_volume"], "15")
+        self.assertEqual(raw_records[0]["source"], "market_positions")
+        self.assertEqual(anomalies, [])
 
     def test_collect_polymarket_wallet_activity_streams_raw_and_aggregates(self):
         detail_rows = [
