@@ -11,6 +11,7 @@ import http.client
 import io
 import json
 import re
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -141,6 +142,7 @@ COMBINED_MONTHLY_PATH: Path
 REPORT_PATH: Path
 DISCOVERY_REPORT_PATH: Path
 POLYMARKET_TRADES_RAW_PATH: Path
+WALLET_POSITIONS_STATE_PATH: Path
 WALLET_MARKET_PATH: Path
 WALLET_DAILY_PATH: Path
 WALLET_MONTHLY_PATH: Path
@@ -236,7 +238,7 @@ def configure_asset(asset_key: str) -> None:
     global RAW_PATH, LEGACY_POLYMARKET_DETAIL_PATH, DETAIL_PATH
     global PLATFORM_DAILY_PATH, PLATFORM_MONTHLY_PATH, COMBINED_DAILY_PATH, COMBINED_MONTHLY_PATH
     global REPORT_PATH, DISCOVERY_REPORT_PATH
-    global POLYMARKET_TRADES_RAW_PATH, WALLET_MARKET_PATH, WALLET_DAILY_PATH, WALLET_MONTHLY_PATH
+    global POLYMARKET_TRADES_RAW_PATH, WALLET_POSITIONS_STATE_PATH, WALLET_MARKET_PATH, WALLET_DAILY_PATH, WALLET_MONTHLY_PATH
 
     ASSET_KEY = asset_key
     ASSET_DISPLAY = str(config["display"])
@@ -259,6 +261,7 @@ def configure_asset(asset_key: str) -> None:
     REPORT_PATH = ROOT / "reports" / f"{output_prefix}_cross_platform_volume_summary_{DATA_RANGE_LABEL}.md"
     DISCOVERY_REPORT_PATH = ROOT / "reports" / f"kalshi_{asset_key}_series_discovery_{DATA_RANGE_LABEL}.md"
     POLYMARKET_TRADES_RAW_PATH = ROOT / "data" / "raw" / f"{output_prefix}_polymarket_trades_{DATA_RANGE_LABEL}.jsonl.gz"
+    WALLET_POSITIONS_STATE_PATH = ROOT / "outputs" / f"{output_prefix}_wallet_positions_state_{DATA_RANGE_LABEL}.sqlite3"
     WALLET_MARKET_PATH = ROOT / "outputs" / f"{output_prefix}_wallet_activity_by_market_{DATA_RANGE_LABEL}.csv"
     WALLET_DAILY_PATH = ROOT / "outputs" / f"{output_prefix}_wallet_activity_daily_by_platform_{DATA_RANGE_LABEL}.csv"
     WALLET_MONTHLY_PATH = ROOT / "outputs" / f"{output_prefix}_wallet_activity_monthly_by_platform_{DATA_RANGE_LABEL}.csv"
@@ -1138,8 +1141,9 @@ def fetch_polymarket_trade_batch(condition_ids: list[str]) -> tuple[dict[str, di
 
 
 def fetch_polymarket_positions_for_market(condition_id: str) -> dict:
-    positions = []
+    wallet_sizes: dict[str, Decimal] = defaultdict(Decimal)
     seen_keys: set[tuple[str, str, str]] = set()
+    position_count = 0
     offset = 0
     status = "positions_complete"
     while True:
@@ -1162,7 +1166,8 @@ def fetch_polymarket_positions_for_market(condition_id: str) -> dict:
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-                positions.append(position)
+                position_count += 1
+                wallet_sizes[position["wallet"]] += position["total_bought"]
 
         if max_group_count < POLYMARKET_POSITIONS_LIMIT:
             break
@@ -1171,7 +1176,92 @@ def fetch_polymarket_positions_for_market(condition_id: str) -> dict:
             break
         offset += POLYMARKET_POSITIONS_LIMIT
         time.sleep(REQUEST_SLEEP_SECONDS)
-    return {"positions": positions, "status": status}
+    return {"wallet_sizes": dict(wallet_sizes), "position_count": position_count, "status": status}
+
+
+def initialize_wallet_positions_state(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS completed_markets (
+            platform_market_id TEXT PRIMARY KEY,
+            date_utc TEXT NOT NULL,
+            month_utc TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            active_wallet_count INTEGER NOT NULL,
+            position_count INTEGER NOT NULL,
+            position_total REAL NOT NULL,
+            top10_wallet_volume REAL NOT NULL,
+            platform_reported_volume REAL NOT NULL,
+            data_status TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS daily_wallets (
+            date_utc TEXT NOT NULL,
+            month_utc TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            wallet TEXT NOT NULL,
+            total_bought REAL NOT NULL,
+            PRIMARY KEY (date_utc, month_utc, market_type, wallet)
+        );
+        CREATE TABLE IF NOT EXISTS monthly_wallets (
+            month_utc TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            wallet TEXT NOT NULL,
+            total_bought REAL NOT NULL,
+            PRIMARY KEY (month_utc, market_type, wallet)
+        );
+        """
+    )
+
+
+def store_wallet_position_aggregate(connection: sqlite3.Connection, row: dict, group: dict) -> None:
+    wallet_sizes = group["wallet_sizes"]
+    position_total = sum(wallet_sizes.values(), Decimal("0"))
+    top10_total = sum(sorted(wallet_sizes.values(), reverse=True)[:10], Decimal("0"))
+    platform_total = decimal_from_value(row["volume"], "detail.volume")
+    with connection:
+        connection.execute(
+            """
+            INSERT INTO completed_markets (
+                platform_market_id, date_utc, month_utc, market_type, active_wallet_count, position_count,
+                position_total, top10_wallet_volume, platform_reported_volume, data_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["platform_market_id"],
+                row["date_utc"],
+                row["month_utc"],
+                row["market_type"],
+                len(wallet_sizes),
+                group["position_count"],
+                float(position_total),
+                float(top10_total),
+                float(platform_total),
+                group["status"],
+            ),
+        )
+        for wallet, total_bought in wallet_sizes.items():
+            connection.execute(
+                """
+                INSERT INTO daily_wallets (date_utc, month_utc, market_type, wallet, total_bought)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(date_utc, month_utc, market_type, wallet)
+                DO UPDATE SET total_bought = total_bought + excluded.total_bought
+                """,
+                (row["date_utc"], row["month_utc"], row["market_type"], wallet, float(total_bought)),
+            )
+            connection.execute(
+                """
+                INSERT INTO monthly_wallets (month_utc, market_type, wallet, total_bought)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(month_utc, market_type, wallet)
+                DO UPDATE SET total_bought = total_bought + excluded.total_bought
+                """,
+                (row["month_utc"], row["market_type"], wallet, float(total_bought)),
+            )
+
+
+def decimal_from_sqlite(value: object) -> Decimal:
+    return decimal_from_value(str(value or 0), "sqlite.total_bought")
 
 
 def kalshi_get(path: str, params: dict[str, object] | None = None) -> dict:
@@ -1778,178 +1868,223 @@ def collect_polymarket_wallet_activity(detail_rows: list[dict]) -> tuple[list[di
 
 
 def collect_polymarket_wallet_positions(detail_rows: list[dict]) -> tuple[list[dict], list[dict], list[dict], list[str]]:
-    market_rows = []
     anomalies = []
-    daily_active_wallets: dict[tuple[str, str, str], set[str]] = defaultdict(set)
-    daily_wallet_sizes: dict[tuple[str, str, str], dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
-    daily_position_counts: dict[tuple[str, str, str], int] = defaultdict(int)
-    daily_position_totals: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
-    daily_platform_totals: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
-    daily_statuses: dict[tuple[str, str, str], set[str]] = defaultdict(set)
-    monthly_active_wallets: dict[tuple[str, str], set[str]] = defaultdict(set)
-    monthly_wallet_sizes: dict[tuple[str, str], dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
-    monthly_position_counts: dict[tuple[str, str], int] = defaultdict(int)
-    monthly_position_totals: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
-    monthly_platform_totals: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
-    monthly_statuses: dict[tuple[str, str], set[str]] = defaultdict(set)
     polymarket_rows = [row for row in detail_rows if row["platform"] == "polymarket"]
+    detail_by_market = {row["platform_market_id"]: row for row in polymarket_rows}
 
-    POLYMARKET_TRADES_RAW_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with POLYMARKET_TRADES_RAW_PATH.open("wb") as raw_output:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as gzip_output:
-            with io.TextIOWrapper(gzip_output, encoding="utf-8") as output:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=POLYMARKET_POSITIONS_WORKERS) as executor:
-                    pending = {
-                        executor.submit(fetch_polymarket_positions_for_market, row["platform_market_id"]): row
-                        for row in polymarket_rows
-                    }
-                    completed = 0
-                    total = len(pending)
-                    for future in concurrent.futures.as_completed(pending):
-                        row = pending[future]
-                        completed += 1
-                        condition_id = row["platform_market_id"]
-                        group = future.result()
-                        positions = group["positions"]
-                        status = group["status"]
-                        if completed == 1 or completed % 250 == 0 or status == "positions_truncated":
-                            print(
-                                f"polymarket positions: {completed}/{total} markets, "
-                                f"{len(positions)} position rows for {condition_id}",
-                                flush=True,
-                            )
+    if POLYMARKET_TRADES_RAW_PATH.exists():
+        POLYMARKET_TRADES_RAW_PATH.unlink()
 
-                        wallet_sizes: dict[str, Decimal] = defaultdict(Decimal)
-                        for position in positions:
-                            wallet_sizes[position["wallet"]] += position["total_bought"]
-                        active_wallets = set(wallet_sizes)
-                        position_total = sum(wallet_sizes.values(), Decimal("0"))
-                        top10_total = sum(sorted(wallet_sizes.values(), reverse=True)[:10], Decimal("0"))
-                        platform_total = decimal_from_value(row["volume"], "detail.volume")
-                        gap = platform_total - position_total
-                        daily_key = (row["date_utc"], row["month_utc"], row["market_type"])
-                        monthly_key = (row["month_utc"], row["market_type"])
+    WALLET_POSITIONS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(WALLET_POSITIONS_STATE_PATH)
+    connection.row_factory = sqlite3.Row
+    try:
+        initialize_wallet_positions_state(connection)
+        completed_markets = {
+            row[0]
+            for row in connection.execute("SELECT platform_market_id FROM completed_markets")
+            if row[0] in detail_by_market
+        }
+        pending_rows = [row for row in polymarket_rows if row["platform_market_id"] not in completed_markets]
+        completed = len(completed_markets)
+        total = len(polymarket_rows)
+        if completed:
+            print(
+                f"polymarket positions resume: {completed}/{total} markets already completed "
+                f"from {WALLET_POSITIONS_STATE_PATH.relative_to(ROOT)}",
+                flush=True,
+            )
 
-                        for wallet, size in wallet_sizes.items():
-                            daily_wallet_sizes[daily_key][wallet] += size
-                            monthly_wallet_sizes[monthly_key][wallet] += size
-                        daily_active_wallets[daily_key].update(active_wallets)
-                        monthly_active_wallets[monthly_key].update(active_wallets)
-                        daily_position_counts[daily_key] += len(positions)
-                        monthly_position_counts[monthly_key] += len(positions)
-                        daily_position_totals[daily_key] += position_total
-                        monthly_position_totals[monthly_key] += position_total
-                        daily_platform_totals[daily_key] += platform_total
-                        monthly_platform_totals[monthly_key] += platform_total
-                        daily_statuses[daily_key].add(status)
-                        monthly_statuses[monthly_key].add(status)
+        pending_iter = iter(pending_rows)
 
-                        market_rows.append(
-                            {
-                                "asset": ASSET_KEY,
-                                "platform": "polymarket",
-                                "month_utc": row["month_utc"],
-                                "date_utc": row["date_utc"],
-                                "market_type": row["market_type"],
-                                "platform_series": row["platform_series"],
-                                "platform_market_id": condition_id,
-                                "title": row["title"],
-                                "active_wallet_count": str(len(active_wallets)),
-                                "participant_trade_count": str(len(positions)),
-                                "taker_trade_count": "",
-                                "trade_history_volume": format_decimal(position_total),
-                                "top10_wallet_volume": format_decimal(top10_total),
-                                "top10_wallet_volume_share": decimal_ratio(top10_total, position_total),
-                                "platform_reported_volume": format_decimal(platform_total),
-                                "volume_gap": format_decimal(gap),
-                                "volume_gap_pct": volume_gap_pct(gap, platform_total),
-                                "data_status": status,
-                            }
+        def submit_next(executor, pending: dict) -> bool:
+            try:
+                row = next(pending_iter)
+            except StopIteration:
+                return False
+            pending[executor.submit(fetch_polymarket_positions_for_market, row["platform_market_id"])] = row
+            return True
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=POLYMARKET_POSITIONS_WORKERS) as executor:
+            pending = {}
+            for _ in range(POLYMARKET_POSITIONS_WORKERS):
+                if not submit_next(executor, pending):
+                    break
+            while pending:
+                done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    row = pending.pop(future)
+                    condition_id = row["platform_market_id"]
+                    group = future.result()
+                    store_wallet_position_aggregate(connection, row, group)
+                    completed += 1
+                    if completed == 1 or completed % 250 == 0 or group["status"] == "positions_truncated":
+                        print(
+                            f"polymarket positions: {completed}/{total} markets, "
+                            f"{group['position_count']} position rows for {condition_id}",
+                            flush=True,
                         )
-                        for position in positions:
-                            json.dump(
-                                {
-                                    "platform": "polymarket",
-                                    "asset": ASSET_KEY,
-                                    "source": "market_positions",
-                                    "month_utc": row["month_utc"],
-                                    "market_type": row["market_type"],
-                                    "platform_market_id": condition_id,
-                                    "position": position["raw"],
-                                },
-                                output,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            )
-                            output.write("\n")
-                        if status == "positions_truncated":
-                            anomalies.append(f"Polymarket positions truncated for {condition_id}")
+                    submit_next(executor, pending)
 
-    market_rows.sort(
-        key=lambda row: (
-            row["month_utc"],
-            row["date_utc"],
-            market_type_sort_key(row["market_type"]),
-            row["platform_market_id"],
-        )
-    )
-    daily_rows = []
-    for key in sorted(daily_position_totals, key=lambda item: (item[1], item[0], market_type_sort_key(item[2]))):
-        date_utc, month_utc, market_type = key
-        position_total = daily_position_totals[key]
-        top10_total = sum(sorted(daily_wallet_sizes[key].values(), reverse=True)[:10], Decimal("0"))
-        platform_total = daily_platform_totals[key]
-        gap = platform_total - position_total
-        daily_rows.append(
-            {
-                "asset": ASSET_KEY,
-                "platform": "polymarket",
-                "date_utc": date_utc,
-                "month_utc": month_utc,
-                "market_type": market_type,
-                "active_wallet_count": str(len(daily_active_wallets[key])),
-                "participant_trade_count": str(daily_position_counts[key]),
-                "taker_trade_count": "",
-                "trade_history_volume": format_decimal(position_total),
-                "top10_wallet_volume": format_decimal(top10_total),
-                "top10_wallet_volume_share": decimal_ratio(top10_total, position_total),
-                "platform_reported_volume": format_decimal(platform_total),
-                "volume_gap": format_decimal(gap),
-                "volume_gap_pct": volume_gap_pct(gap, platform_total),
-                "data_status": "positions_truncated" if "positions_truncated" in daily_statuses[key] else "positions_complete",
-                "unavailable_reason": "",
-            }
+        completed_by_market = {
+            row["platform_market_id"]: row
+            for row in connection.execute(
+                """
+                SELECT platform_market_id, active_wallet_count, position_count, position_total, top10_wallet_volume,
+                       platform_reported_volume, data_status
+                FROM completed_markets
+                """
+            )
+            if row["platform_market_id"] in detail_by_market
+        }
+
+        market_rows = []
+        for condition_id, metrics in completed_by_market.items():
+            row = detail_by_market[condition_id]
+            position_total = decimal_from_sqlite(metrics["position_total"])
+            top10_total = decimal_from_sqlite(metrics["top10_wallet_volume"])
+            platform_total = decimal_from_sqlite(metrics["platform_reported_volume"])
+            gap = platform_total - position_total
+            market_rows.append(
+                {
+                    "asset": ASSET_KEY,
+                    "platform": "polymarket",
+                    "month_utc": row["month_utc"],
+                    "date_utc": row["date_utc"],
+                    "market_type": row["market_type"],
+                    "platform_series": row["platform_series"],
+                    "platform_market_id": condition_id,
+                    "title": row["title"],
+                    "active_wallet_count": str(metrics["active_wallet_count"]),
+                    "participant_trade_count": str(metrics["position_count"]),
+                    "taker_trade_count": "",
+                    "trade_history_volume": format_decimal(position_total),
+                    "top10_wallet_volume": format_decimal(top10_total),
+                    "top10_wallet_volume_share": decimal_ratio(top10_total, position_total),
+                    "platform_reported_volume": format_decimal(platform_total),
+                    "volume_gap": format_decimal(gap),
+                    "volume_gap_pct": volume_gap_pct(gap, platform_total),
+                    "data_status": metrics["data_status"],
+                }
+            )
+            if metrics["data_status"] == "positions_truncated":
+                anomalies.append(f"Polymarket positions truncated for {condition_id}")
+
+        market_rows.sort(
+            key=lambda row: (
+                row["month_utc"],
+                row["date_utc"],
+                market_type_sort_key(row["market_type"]),
+                row["platform_market_id"],
+            )
         )
 
-    monthly_rows = []
-    for key in sorted(monthly_position_totals, key=lambda item: (item[0], market_type_sort_key(item[1]))):
-        month_utc, market_type = key
-        position_total = monthly_position_totals[key]
-        top10_total = sum(sorted(monthly_wallet_sizes[key].values(), reverse=True)[:10], Decimal("0"))
-        platform_total = monthly_platform_totals[key]
-        gap = platform_total - position_total
-        monthly_rows.append(
-            {
-                "asset": ASSET_KEY,
-                "platform": "polymarket",
-                "month_utc": month_utc,
-                "market_type": market_type,
-                "active_wallet_count": str(len(monthly_active_wallets[key])),
-                "participant_trade_count": str(monthly_position_counts[key]),
-                "taker_trade_count": "",
-                "trade_history_volume": format_decimal(position_total),
-                "top10_wallet_volume": format_decimal(top10_total),
-                "top10_wallet_volume_share": decimal_ratio(top10_total, position_total),
-                "platform_reported_volume": format_decimal(platform_total),
-                "volume_gap": format_decimal(gap),
-                "volume_gap_pct": volume_gap_pct(gap, platform_total),
-                "data_status": (
-                    "positions_truncated" if "positions_truncated" in monthly_statuses[key] else "positions_complete"
-                ),
-                "unavailable_reason": "",
-            }
-        )
+        daily_rows = []
+        for stats in connection.execute(
+            """
+            SELECT date_utc, month_utc, market_type, SUM(position_count), SUM(position_total),
+                   SUM(platform_reported_volume),
+                   MAX(CASE WHEN data_status = 'positions_truncated' THEN 1 ELSE 0 END)
+            FROM completed_markets
+            GROUP BY date_utc, month_utc, market_type
+            ORDER BY month_utc, date_utc, market_type
+            """
+        ):
+            date_utc, month_utc, market_type = stats[0], stats[1], stats[2]
+            active_wallet_count = connection.execute(
+                "SELECT COUNT(*) FROM daily_wallets WHERE date_utc = ? AND month_utc = ? AND market_type = ?",
+                (date_utc, month_utc, market_type),
+            ).fetchone()[0]
+            top10_total = sum(
+                decimal_from_sqlite(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT total_bought FROM daily_wallets
+                    WHERE date_utc = ? AND month_utc = ? AND market_type = ?
+                    ORDER BY CAST(total_bought AS REAL) DESC
+                    LIMIT 10
+                    """,
+                    (date_utc, month_utc, market_type),
+                )
+            )
+            position_total = decimal_from_sqlite(stats[4])
+            platform_total = decimal_from_sqlite(stats[5])
+            gap = platform_total - position_total
+            daily_rows.append(
+                {
+                    "asset": ASSET_KEY,
+                    "platform": "polymarket",
+                    "date_utc": date_utc,
+                    "month_utc": month_utc,
+                    "market_type": market_type,
+                    "active_wallet_count": str(active_wallet_count),
+                    "participant_trade_count": str(stats[3]),
+                    "taker_trade_count": "",
+                    "trade_history_volume": format_decimal(position_total),
+                    "top10_wallet_volume": format_decimal(top10_total),
+                    "top10_wallet_volume_share": decimal_ratio(top10_total, position_total),
+                    "platform_reported_volume": format_decimal(platform_total),
+                    "volume_gap": format_decimal(gap),
+                    "volume_gap_pct": volume_gap_pct(gap, platform_total),
+                    "data_status": "positions_truncated" if stats[6] else "positions_complete",
+                    "unavailable_reason": "",
+                }
+            )
+        daily_rows.sort(key=lambda row: (row["month_utc"], row["date_utc"], market_type_sort_key(row["market_type"])))
+
+        monthly_rows = []
+        for stats in connection.execute(
+            """
+            SELECT month_utc, market_type, SUM(position_count), SUM(position_total),
+                   SUM(platform_reported_volume),
+                   MAX(CASE WHEN data_status = 'positions_truncated' THEN 1 ELSE 0 END)
+            FROM completed_markets
+            GROUP BY month_utc, market_type
+            ORDER BY month_utc, market_type
+            """
+        ):
+            month_utc, market_type = stats[0], stats[1]
+            active_wallet_count = connection.execute(
+                "SELECT COUNT(*) FROM monthly_wallets WHERE month_utc = ? AND market_type = ?",
+                (month_utc, market_type),
+            ).fetchone()[0]
+            top10_total = sum(
+                decimal_from_sqlite(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT total_bought FROM monthly_wallets
+                    WHERE month_utc = ? AND market_type = ?
+                    ORDER BY CAST(total_bought AS REAL) DESC
+                    LIMIT 10
+                    """,
+                    (month_utc, market_type),
+                )
+            )
+            position_total = decimal_from_sqlite(stats[3])
+            platform_total = decimal_from_sqlite(stats[4])
+            gap = platform_total - position_total
+            monthly_rows.append(
+                {
+                    "asset": ASSET_KEY,
+                    "platform": "polymarket",
+                    "month_utc": month_utc,
+                    "market_type": market_type,
+                    "active_wallet_count": str(active_wallet_count),
+                    "participant_trade_count": str(stats[2]),
+                    "taker_trade_count": "",
+                    "trade_history_volume": format_decimal(position_total),
+                    "top10_wallet_volume": format_decimal(top10_total),
+                    "top10_wallet_volume_share": decimal_ratio(top10_total, position_total),
+                    "platform_reported_volume": format_decimal(platform_total),
+                    "volume_gap": format_decimal(gap),
+                    "volume_gap_pct": volume_gap_pct(gap, platform_total),
+                    "data_status": "positions_truncated" if stats[5] else "positions_complete",
+                    "unavailable_reason": "",
+                }
+            )
+        monthly_rows.sort(key=lambda row: (row["month_utc"], market_type_sort_key(row["market_type"])))
+    finally:
+        connection.close()
     return market_rows, daily_rows, monthly_rows, anomalies
 
 
@@ -2171,7 +2306,6 @@ def build_markdown_report(
             f"- Platform monthly volume CSV: `{PLATFORM_MONTHLY_PATH.relative_to(ROOT)}`",
             f"- Combined daily volume CSV: `{COMBINED_DAILY_PATH.relative_to(ROOT)}`",
             f"- Combined monthly volume CSV: `{COMBINED_MONTHLY_PATH.relative_to(ROOT)}`",
-            f"- Polymarket raw trades snapshot: `{POLYMARKET_TRADES_RAW_PATH.relative_to(ROOT)}`",
             f"- Wallet market activity CSV: `{WALLET_MARKET_PATH.relative_to(ROOT)}`",
             f"- Wallet daily activity CSV: `{WALLET_DAILY_PATH.relative_to(ROOT)}`",
             f"- Wallet monthly activity CSV: `{WALLET_MONTHLY_PATH.relative_to(ROOT)}`",
@@ -2179,6 +2313,9 @@ def build_markdown_report(
             f"- Kalshi discovery diagnostics: `{DISCOVERY_REPORT_PATH.relative_to(ROOT)}`",
         ]
     )
+    if POLYMARKET_TRADES_RAW_PATH.exists():
+        insert_at = lines.index("## Output Files") + 9
+        lines.insert(insert_at, f"- Polymarket raw trades snapshot: `{POLYMARKET_TRADES_RAW_PATH.relative_to(ROOT)}`")
     if anomalies:
         lines.extend(["", "## Anomalies", ""])
         lines.extend(f"- {anomaly}" for anomaly in anomalies)
@@ -2336,20 +2473,22 @@ def main(argv: list[str] | None = None) -> int:
         anomalies,
     ) = generate_report(wallet_mode=args.wallet_mode)
     print("generated outputs:")
-    for path in (
+    output_paths = [
         RAW_PATH,
         DETAIL_PATH,
         PLATFORM_DAILY_PATH,
         PLATFORM_MONTHLY_PATH,
         COMBINED_DAILY_PATH,
         COMBINED_MONTHLY_PATH,
-        POLYMARKET_TRADES_RAW_PATH,
         WALLET_MARKET_PATH,
         WALLET_DAILY_PATH,
         WALLET_MONTHLY_PATH,
         REPORT_PATH,
         DISCOVERY_REPORT_PATH,
-    ):
+    ]
+    if POLYMARKET_TRADES_RAW_PATH.exists():
+        output_paths.insert(6, POLYMARKET_TRADES_RAW_PATH)
+    for path in output_paths:
         print(f"- {path.relative_to(ROOT)}")
     print(f"detail rows: {len(detail_rows)}")
     print(f"platform daily rows: {len(platform_daily_rows)}")

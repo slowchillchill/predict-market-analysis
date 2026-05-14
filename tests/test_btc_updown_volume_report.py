@@ -380,7 +380,15 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(calls[0][0], report.POLYMARKET_DATA_API_BASE)
         self.assertEqual(calls[0][1], "/v1/market-positions")
         self.assertEqual(fetched["status"], "positions_complete")
-        self.assertEqual([position["wallet"] for position in fetched["positions"]], ["0x0000000000000000000000000000000000000001", "0x0000000000000000000000000000000000000002", "0x0000000000000000000000000000000000000003"])
+        self.assertEqual(fetched["position_count"], 3)
+        self.assertEqual(
+            fetched["wallet_sizes"],
+            {
+                "0x0000000000000000000000000000000000000001": Decimal("1"),
+                "0x0000000000000000000000000000000000000002": Decimal("2"),
+                "0x0000000000000000000000000000000000000003": Decimal("3"),
+            },
+        )
 
     def test_normalize_event_validates_title_outcomes_and_window(self):
         event = {
@@ -846,7 +854,7 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(wallet_daily_rows[0]["data_status"], "not_generated")
         self.assertEqual(raw_wallet_lines, [])
 
-    def test_collect_polymarket_wallet_positions_streams_raw_and_aggregates(self):
+    def test_collect_polymarket_wallet_positions_aggregates_without_raw_snapshot(self):
         detail_rows = [
             {
                 "platform": "polymarket",
@@ -862,32 +870,18 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
 
         def fake_fetch(condition_id):
             return {
-                "positions": [
-                    {
-                        "wallet": "0x1",
-                        "condition_id": condition_id,
-                        "asset": "up",
-                        "outcome_index": "0",
-                        "total_bought": Decimal("5"),
-                        "raw": {"conditionId": condition_id},
-                    },
-                    {
-                        "wallet": "0x2",
-                        "condition_id": condition_id,
-                        "asset": "down",
-                        "outcome_index": "1",
-                        "total_bought": Decimal("10"),
-                        "raw": {"conditionId": condition_id},
-                    },
-                ],
+                "wallet_sizes": {"0x1": Decimal("5"), "0x2": Decimal("10")},
+                "position_count": 2,
                 "status": "positions_complete",
             }
 
         with tempfile.TemporaryDirectory() as tmpdir:
             original_path = report.POLYMARKET_TRADES_RAW_PATH
+            original_state_path = report.WALLET_POSITIONS_STATE_PATH
             original_fetch = report.fetch_polymarket_positions_for_market
             original_workers = report.POLYMARKET_POSITIONS_WORKERS
             report.POLYMARKET_TRADES_RAW_PATH = Path(tmpdir) / "wallet_raw.jsonl.gz"
+            report.WALLET_POSITIONS_STATE_PATH = Path(tmpdir) / "wallet_state.sqlite3"
             report.fetch_polymarket_positions_for_market = fake_fetch
             report.POLYMARKET_POSITIONS_WORKERS = 1
             try:
@@ -896,11 +890,14 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
                 )
             finally:
                 report.POLYMARKET_TRADES_RAW_PATH = original_path
+                report.WALLET_POSITIONS_STATE_PATH = original_state_path
                 report.fetch_polymarket_positions_for_market = original_fetch
                 report.POLYMARKET_POSITIONS_WORKERS = original_workers
 
-            with gzip.open(Path(tmpdir) / "wallet_raw.jsonl.gz", "rt", encoding="utf-8") as input_file:
-                raw_records = [json.loads(line) for line in input_file]
+            raw_path = Path(tmpdir) / "wallet_raw.jsonl.gz"
+            state_path = Path(tmpdir) / "wallet_state.sqlite3"
+            raw_exists = raw_path.exists()
+            state_exists = state_path.exists()
 
         self.assertEqual(market_rows[0]["active_wallet_count"], "2")
         self.assertEqual(market_rows[0]["participant_trade_count"], "2")
@@ -909,8 +906,102 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(market_rows[0]["data_status"], "positions_complete")
         self.assertEqual(daily_rows[0]["active_wallet_count"], "2")
         self.assertEqual(monthly_rows[0]["trade_history_volume"], "15")
-        self.assertEqual(raw_records[0]["source"], "market_positions")
+        self.assertFalse(raw_exists)
+        self.assertTrue(state_exists)
         self.assertEqual(anomalies, [])
+
+    def test_collect_polymarket_wallet_positions_limits_queued_futures(self):
+        detail_rows = [
+            {
+                "platform": "polymarket",
+                "month_utc": "2026-02",
+                "date_utc": "2026-02-01",
+                "market_type": "hourly",
+                "platform_series": "btc-up-or-down-hourly",
+                "platform_market_id": f"0x{i:064x}",
+                "title": f"Bitcoin Up or Down - February 1 #{i}",
+                "volume": "20",
+            }
+            for i in range(5)
+        ]
+
+        def fake_fetch(condition_id):
+            return {
+                "wallet_sizes": {f"wallet-{condition_id[-1]}": Decimal("5")},
+                "position_count": 1,
+                "status": "positions_complete",
+            }
+
+        class FakeFuture:
+            def __init__(self, executor, result):
+                self.executor = executor
+                self._result = result
+
+            def result(self):
+                return self._result
+
+        class FakeExecutor:
+            instances = []
+
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+                self.outstanding = 0
+                self.max_outstanding = 0
+                self.submitted = 0
+                FakeExecutor.instances.append(self)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def submit(self, fn, condition_id):
+                self.outstanding += 1
+                self.max_outstanding = max(self.max_outstanding, self.outstanding)
+                self.submitted += 1
+                return FakeFuture(self, fn(condition_id))
+
+        def fake_wait(futures, return_when=None):
+            future = next(iter(futures))
+            future.executor.outstanding -= 1
+            remaining = set(futures)
+            remaining.remove(future)
+            return {future}, remaining
+
+        def fake_as_completed(futures):
+            for future in list(futures):
+                future.executor.outstanding -= 1
+                yield future
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_path = report.POLYMARKET_TRADES_RAW_PATH
+            original_state_path = report.WALLET_POSITIONS_STATE_PATH
+            original_fetch = report.fetch_polymarket_positions_for_market
+            original_workers = report.POLYMARKET_POSITIONS_WORKERS
+            original_executor = report.concurrent.futures.ThreadPoolExecutor
+            original_wait = report.concurrent.futures.wait
+            original_as_completed = report.concurrent.futures.as_completed
+            report.POLYMARKET_TRADES_RAW_PATH = Path(tmpdir) / "wallet_raw.jsonl.gz"
+            report.WALLET_POSITIONS_STATE_PATH = Path(tmpdir) / "wallet_state.sqlite3"
+            report.fetch_polymarket_positions_for_market = fake_fetch
+            report.POLYMARKET_POSITIONS_WORKERS = 2
+            report.concurrent.futures.ThreadPoolExecutor = FakeExecutor
+            report.concurrent.futures.wait = fake_wait
+            report.concurrent.futures.as_completed = fake_as_completed
+            try:
+                report.collect_polymarket_wallet_positions(detail_rows)
+            finally:
+                report.POLYMARKET_TRADES_RAW_PATH = original_path
+                report.WALLET_POSITIONS_STATE_PATH = original_state_path
+                report.fetch_polymarket_positions_for_market = original_fetch
+                report.POLYMARKET_POSITIONS_WORKERS = original_workers
+                report.concurrent.futures.ThreadPoolExecutor = original_executor
+                report.concurrent.futures.wait = original_wait
+                report.concurrent.futures.as_completed = original_as_completed
+
+        self.assertEqual(FakeExecutor.instances[0].submitted, 5)
+        self.assertLessEqual(FakeExecutor.instances[0].max_outstanding, 2)
 
     def test_collect_polymarket_wallet_activity_streams_raw_and_aggregates(self):
         detail_rows = [
