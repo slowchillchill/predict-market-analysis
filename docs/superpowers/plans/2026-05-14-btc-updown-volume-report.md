@@ -33,6 +33,11 @@ For each month and market type, produce:
   3. `market.volume`
   4. `event.volume`
 
+If all four Gamma volume fields are absent for a market, count the market as
+`0` volume, mark `volume_source` as `missing_as_zero`, and surface the count in
+the Markdown anomaly section. Do not silently mix in partial trade-history
+reconstruction; the public Data API can reject deep historical trade offsets.
+
 This means a market ending on `2026-03-01T00:00:00Z` belongs to March, not February.
 
 ## Data Sources
@@ -127,8 +132,12 @@ If implementing a single shared fallback fetch across all market types, classify
 
 Write outputs under deterministic paths:
 
+Generated data and report files are local-only review artifacts. They must not
+be committed to GitHub; reviewers should inspect them in the local workspace or
+regenerate them with the script.
+
 - Raw API copy:
-  - `data/raw/btc_updown_gamma_events_2026-02_2026-04.jsonl`
+  - `data/raw/btc_updown_gamma_events_2026-02_2026-04.jsonl.gz`
 - Per-market detail:
   - `outputs/btc_updown_market_detail_2026-02_2026-04.csv`
 - Daily totals:
@@ -173,7 +182,7 @@ month_utc,market_type,market_count,total_volume
    - outcomes parse to `["Up", "Down"]`
    - condition ID is present and not duplicated
    - volume parses as a non-negative number
-8. Write raw JSONL before aggregation.
+8. Write compressed raw JSONL before aggregation. The uncompressed raw snapshot is large enough to exceed GitHub's single-file limit.
 9. Write the per-market detail CSV.
 10. Aggregate detail rows into daily totals by `(date_utc, market_type)`.
 11. Aggregate daily totals into monthly totals by `(month_utc, market_type)`.
@@ -262,6 +271,7 @@ Expected:
 
 - `5min` markets may not exist for every day in February 2026. A live sample found no `5min` events on `2026-02-01`, but did find them on `2026-02-23`.
 - Gamma API volume fields are platform-reported cumulative market volume. They may not match a trade-timestamp reconstruction from `/trades` if the trade API has pagination, taker-only defaults, or indexing differences.
+- Some Gamma BTC Up/Down records omit all market and event volume fields. The script keeps those markets in the detail output with `volume_source=missing_as_zero`; the Markdown report lists the missing-field count so monthly totals are understood as known Gamma cumulative volume totals.
 - The plan intentionally uses UTC API time because that was the selected reporting boundary, even though many BTC Up/Down titles are written in ET.
 
 ## Commit and Review Discipline
