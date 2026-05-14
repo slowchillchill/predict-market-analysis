@@ -38,6 +38,39 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
             "kalshi_eth_series_discovery_2026-02_2026-04.md",
         )
 
+    def test_configure_asset_sets_wallet_output_paths(self):
+        report.configure_asset("btc")
+        self.assertEqual(
+            report.POLYMARKET_TRADES_RAW_PATH.name,
+            "btc_updown_polymarket_trades_2026-02_2026-04.jsonl.gz",
+        )
+        self.assertEqual(
+            report.WALLET_MARKET_PATH.name,
+            "btc_updown_wallet_activity_by_market_2026-02_2026-04.csv",
+        )
+        self.assertEqual(
+            report.WALLET_DAILY_PATH.name,
+            "btc_updown_wallet_activity_daily_by_platform_2026-02_2026-04.csv",
+        )
+        self.assertEqual(
+            report.WALLET_MONTHLY_PATH.name,
+            "btc_updown_wallet_activity_monthly_by_platform_2026-02_2026-04.csv",
+        )
+
+        report.configure_asset("eth")
+        self.assertEqual(
+            report.POLYMARKET_TRADES_RAW_PATH.name,
+            "eth_updown_polymarket_trades_2026-02_2026-04.jsonl.gz",
+        )
+        self.assertEqual(
+            report.WALLET_MARKET_PATH.name,
+            "eth_updown_wallet_activity_by_market_2026-02_2026-04.csv",
+        )
+        self.assertEqual(
+            report.WALLET_DAILY_PATH.name,
+            "eth_updown_wallet_activity_daily_by_platform_2026-02_2026-04.csv",
+        )
+
     def test_half_open_month_filter_excludes_end_boundary(self):
         start = datetime(2026, 2, 1, tzinfo=timezone.utc)
         end = datetime(2026, 3, 1, tzinfo=timezone.utc)
@@ -71,6 +104,111 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         )
         self.assertEqual(report.choose_volume({}, event), (Decimal("40"), "event.volume"))
         self.assertEqual(report.choose_volume({}, {}), (Decimal("0"), "missing_as_zero"))
+
+    def test_normalize_polymarket_trade_requires_wallet_condition_and_size(self):
+        condition_id = "0x" + "a" * 64
+        trade = {
+            "proxyWallet": "0x0000000000000000000000000000000000000001",
+            "conditionId": condition_id,
+            "size": "12.5",
+            "price": "0.61",
+            "timestamp": 1770000000,
+            "side": "BUY",
+            "outcome": "Up",
+            "transactionHash": "0xhash",
+        }
+        normalized = report.normalize_polymarket_trade(trade, condition_id)
+        self.assertEqual(normalized["wallet"], "0x0000000000000000000000000000000000000001")
+        self.assertEqual(normalized["condition_id"], condition_id)
+        self.assertEqual(normalized["size"], Decimal("12.5"))
+        self.assertEqual(
+            report.polymarket_trade_key(normalized),
+            (
+                "0xhash",
+                "0x0000000000000000000000000000000000000001",
+                condition_id,
+                "Up",
+                1770000000,
+                "BUY",
+                "12.5",
+                "0.61",
+            ),
+        )
+
+    def test_normalize_polymarket_trade_rejects_wrong_condition(self):
+        trade = {
+            "proxyWallet": "0x0000000000000000000000000000000000000001",
+            "conditionId": "0x" + "b" * 64,
+            "size": "1",
+            "timestamp": 1770000000,
+        }
+        with self.assertRaises(ValueError):
+            report.normalize_polymarket_trade(trade, "0x" + "a" * 64)
+
+    def test_fetch_polymarket_trades_for_market_dedupes_and_sets_taker_only(self):
+        condition_id = "0x" + "a" * 64
+        calls = []
+
+        def fake_get(base_url, path, params):
+            calls.append((base_url, path, params.copy()))
+            if params["offset"] == 0:
+                return [
+                    {
+                        "proxyWallet": "0x0000000000000000000000000000000000000001",
+                        "conditionId": condition_id,
+                        "size": "1",
+                        "timestamp": 1770000000,
+                        "transactionHash": "0x1",
+                    },
+                    {
+                        "proxyWallet": "0x0000000000000000000000000000000000000001",
+                        "conditionId": condition_id,
+                        "size": "1",
+                        "timestamp": 1770000000,
+                        "transactionHash": "0x1",
+                    },
+                ]
+            return []
+
+        original = report.get_json_list
+        report.get_json_list = fake_get
+        try:
+            trades, status = report.fetch_polymarket_trades_for_market(condition_id, taker_only=False)
+        finally:
+            report.get_json_list = original
+
+        self.assertEqual(status, "complete")
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(calls[0][0], report.POLYMARKET_DATA_API_BASE)
+        self.assertEqual(calls[0][1], "/trades")
+        self.assertEqual(calls[0][2]["market"], condition_id)
+        self.assertEqual(calls[0][2]["takerOnly"], "false")
+
+    def test_fetch_polymarket_trades_for_market_marks_truncated_at_max_offset(self):
+        condition_id = "0x" + "a" * 64
+
+        def fake_get(base_url, path, params):
+            start = params["offset"]
+            return [
+                {
+                    "proxyWallet": f"0x{i:040x}",
+                    "conditionId": condition_id,
+                    "size": "1",
+                    "timestamp": 1770000000 + start + i,
+                    "transactionHash": f"0x{start + i}",
+                }
+                for i in range(report.POLYMARKET_TRADE_LIMIT)
+            ]
+
+        original = report.get_json_list
+        report.get_json_list = fake_get
+        try:
+            trades, status = report.fetch_polymarket_trades_for_market(condition_id, taker_only=True)
+        finally:
+            report.get_json_list = original
+
+        self.assertEqual(status, "truncated")
+        self.assertEqual(len(trades), report.POLYMARKET_TRADE_LIMIT * 2)
 
     def test_normalize_event_validates_title_outcomes_and_window(self):
         event = {
@@ -323,6 +461,202 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(combined_monthly[0]["total_volume"], "0.2")
         with self.assertRaises(ValueError):
             report.validate_unique_platform_market_ids(rows + [dict(rows[0])])
+
+    def test_wallet_market_daily_and_monthly_aggregation_dedupes_wallets_within_bucket(self):
+        detail_rows = [
+            {
+                "platform": "polymarket",
+                "month_utc": "2026-02",
+                "date_utc": "2026-02-01",
+                "market_type": "hourly",
+                "platform_series": "btc-up-or-down-hourly",
+                "platform_market_id": "0x" + "a" * 64,
+                "title": "Bitcoin Up or Down - February 1",
+                "volume": "100",
+            },
+            {
+                "platform": "polymarket",
+                "month_utc": "2026-02",
+                "date_utc": "2026-02-01",
+                "market_type": "hourly",
+                "platform_series": "btc-up-or-down-hourly",
+                "platform_market_id": "0x" + "b" * 64,
+                "title": "Bitcoin Up or Down - February 1 1PM",
+                "volume": "50",
+            },
+        ]
+        trades_by_market = {
+            "0x" + "a" * 64: {
+                "participant_trades": [
+                    {"wallet": "0x1", "size": Decimal("5"), "transaction_hash": "0xpaired", "raw": {}},
+                    {"wallet": "0x2", "size": Decimal("5"), "transaction_hash": "0xpaired", "raw": {}},
+                    {"wallet": "0x3", "size": Decimal("10"), "transaction_hash": "0xsolo", "raw": {}},
+                ],
+                "participant_status": "complete",
+                "taker_trades": [
+                    {"wallet": "0x2", "size": Decimal("5"), "transaction_hash": "0xpaired", "raw": {}},
+                    {"wallet": "0x3", "size": Decimal("10"), "transaction_hash": "0xsolo", "raw": {}},
+                ],
+                "taker_status": "truncated",
+            },
+            "0x" + "b" * 64: {
+                "participant_trades": [
+                    {"wallet": "0x1", "size": Decimal("5"), "transaction_hash": "0xother", "raw": {}},
+                    {"wallet": "0x4", "size": Decimal("15"), "transaction_hash": "0xother", "raw": {}},
+                ],
+                "participant_status": "complete",
+                "taker_trades": [
+                    {"wallet": "0x4", "size": Decimal("15"), "transaction_hash": "0xother", "raw": {}},
+                ],
+                "taker_status": "complete",
+            },
+        }
+        market_rows, daily_rows, monthly_rows = report.aggregate_wallet_activity(detail_rows, trades_by_market)
+        self.assertEqual(market_rows[0]["active_wallet_count"], "3")
+        self.assertEqual(market_rows[0]["participant_trade_count"], "3")
+        self.assertEqual(market_rows[0]["taker_trade_count"], "2")
+        self.assertEqual(market_rows[0]["trade_history_volume"], "15")
+        self.assertEqual(market_rows[0]["top10_wallet_volume"], "15")
+        self.assertEqual(market_rows[0]["top10_wallet_volume_share"], "1")
+        self.assertEqual(market_rows[0]["platform_reported_volume"], "100")
+        self.assertEqual(market_rows[0]["volume_gap"], "85")
+        self.assertEqual(market_rows[0]["data_status"], "truncated")
+        self.assertEqual(daily_rows[0]["active_wallet_count"], "4")
+        self.assertEqual(daily_rows[0]["participant_trade_count"], "5")
+        self.assertEqual(daily_rows[0]["taker_trade_count"], "3")
+        self.assertEqual(daily_rows[0]["trade_history_volume"], "30")
+        self.assertEqual(monthly_rows[0]["active_wallet_count"], "4")
+        self.assertEqual(monthly_rows[0]["trade_history_volume"], "30")
+
+    def test_kalshi_wallet_rows_are_not_available(self):
+        platform_rows = [
+            {
+                "platform": "kalshi",
+                "date_utc": "2026-02-01",
+                "month_utc": "2026-02",
+                "market_type": "15min",
+                "total_volume": "123",
+            }
+        ]
+        rows = report.build_kalshi_wallet_unavailable_rows(platform_rows)
+        self.assertEqual(rows[0]["platform"], "kalshi")
+        self.assertEqual(rows[0]["date_utc"], "2026-02-01")
+        self.assertEqual(rows[0]["data_status"], "not_available")
+        self.assertEqual(rows[0]["unavailable_reason"], "kalshi_public_trades_have_no_wallet_identifier")
+
+    def test_collect_polymarket_wallet_rows_fetches_each_polymarket_market(self):
+        detail_rows = [
+            {
+                "platform": "polymarket",
+                "month_utc": "2026-02",
+                "date_utc": "2026-02-01",
+                "market_type": "hourly",
+                "platform_series": "btc-up-or-down-hourly",
+                "platform_market_id": "0x" + "a" * 64,
+                "title": "Bitcoin Up or Down - February 1",
+                "volume": "1",
+            },
+            {
+                "platform": "kalshi",
+                "month_utc": "2026-02",
+                "date_utc": "2026-02-01",
+                "market_type": "15min",
+                "platform_series": "KXBTC15M",
+                "platform_market_id": "KXBTC15M-1",
+                "title": "BTC 15M price up down",
+                "volume": "1",
+            },
+        ]
+        fetched = []
+
+        def fake_fetch(condition_id, taker_only):
+            fetched.append((condition_id, taker_only))
+            return ([{"wallet": "0x1", "size": Decimal("1"), "raw": {"conditionId": condition_id}}], "complete")
+
+        original = report.fetch_polymarket_trades_for_market
+        report.fetch_polymarket_trades_for_market = fake_fetch
+        try:
+            trades_by_market, raw_records, anomalies = report.collect_polymarket_wallet_trades(detail_rows)
+        finally:
+            report.fetch_polymarket_trades_for_market = original
+
+        self.assertEqual(fetched, [("0x" + "a" * 64, False), ("0x" + "a" * 64, True)])
+        self.assertIn("0x" + "a" * 64, trades_by_market)
+        self.assertEqual(len(raw_records), 2)
+        self.assertEqual(anomalies, [])
+
+    def test_markdown_report_includes_wallet_activity_section(self):
+        report.configure_asset("btc")
+        text = report.build_markdown_report(
+            detail_rows=[],
+            platform_daily_rows=[],
+            platform_monthly_rows=[],
+            combined_daily_rows=[],
+            combined_monthly_rows=[],
+            wallet_daily_rows=[
+                {
+                    "asset": "btc",
+                    "platform": "polymarket",
+                    "date_utc": "2026-02-01",
+                    "month_utc": "2026-02",
+                    "market_type": "hourly",
+                    "active_wallet_count": "3",
+                    "participant_trade_count": "6",
+                    "taker_trade_count": "4",
+                    "trade_history_volume": "10",
+                    "top10_wallet_volume": "9",
+                    "top10_wallet_volume_share": "0.9",
+                    "platform_reported_volume": "11",
+                    "volume_gap": "1",
+                    "volume_gap_pct": "0.0909",
+                    "data_status": "complete",
+                    "unavailable_reason": "",
+                },
+            ],
+            wallet_monthly_rows=[
+                {
+                    "asset": "btc",
+                    "platform": "polymarket",
+                    "month_utc": "2026-02",
+                    "market_type": "hourly",
+                    "active_wallet_count": "3",
+                    "participant_trade_count": "6",
+                    "taker_trade_count": "4",
+                    "trade_history_volume": "10",
+                    "top10_wallet_volume": "9",
+                    "top10_wallet_volume_share": "0.9",
+                    "platform_reported_volume": "11",
+                    "volume_gap": "1",
+                    "volume_gap_pct": "0.0909",
+                    "data_status": "complete",
+                    "unavailable_reason": "",
+                },
+                {
+                    "asset": "btc",
+                    "platform": "kalshi",
+                    "month_utc": "2026-02",
+                    "market_type": "15min",
+                    "active_wallet_count": "",
+                    "participant_trade_count": "",
+                    "taker_trade_count": "",
+                    "trade_history_volume": "",
+                    "top10_wallet_volume": "",
+                    "top10_wallet_volume_share": "",
+                    "platform_reported_volume": "5",
+                    "volume_gap": "",
+                    "volume_gap_pct": "",
+                    "data_status": "not_available",
+                    "unavailable_reason": "kalshi_public_trades_have_no_wallet_identifier",
+                },
+            ],
+            anomalies=[],
+            kalshi_cutoff=datetime(2026, 3, 15, tzinfo=timezone.utc),
+        )
+        self.assertIn("## Wallet Activity Daily", text)
+        self.assertIn("## Wallet Activity Monthly", text)
+        self.assertIn("| polymarket | 2026-02-01 | hourly | 3 | 0.9 | complete |", text)
+        self.assertIn("| polymarket | 2026-02 | hourly | 3 | 0.9 | complete |", text)
+        self.assertIn("kalshi_public_trades_have_no_wallet_identifier", text)
 
 
 if __name__ == "__main__":
