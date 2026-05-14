@@ -568,7 +568,13 @@ def get_json_payload(base_url: str, path: str, params: dict[str, object] | None 
                 raise FetchError(f"API HTTP {exc.code} for {url}: {body[:500]}") from exc
             if attempt == REQUEST_RETRIES:
                 raise FetchError(f"API HTTP {exc.code} for {url}: {body[:500]}") from exc
-        except (urllib.error.URLError, TimeoutError, http.client.IncompleteRead) as exc:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+            ConnectionResetError,
+        ) as exc:
             if attempt == REQUEST_RETRIES:
                 raise FetchError(f"API request failed for {url}: {exc}") from exc
         except json.JSONDecodeError as exc:
@@ -705,10 +711,21 @@ def fetch_kalshi_series_by_ticker(ticker: str) -> dict | None:
 
 def fetch_kalshi_series_discovery() -> list[dict]:
     series_by_ticker: dict[str, dict] = {}
+    payload = kalshi_get("/series", {"include_volume": "true"})
+    series_list = payload.get("series") or []
+    if not isinstance(series_list, list):
+        raise FetchError("Kalshi series payload missing series list")
+    for series in series_list:
+        if isinstance(series, dict):
+            ticker = kalshi_series_ticker(series)
+            if ticker:
+                series_by_ticker[ticker] = series
+
     for ticker in sorted(set(KALSHI_EXACT_DIRECTION_SERIES) | set(KALSHI_EXCLUDED_SERIES)):
-        series = fetch_kalshi_series_by_ticker(ticker)
-        if series:
-            series_by_ticker[ticker] = series
+        if ticker not in series_by_ticker:
+            series = fetch_kalshi_series_by_ticker(ticker)
+            if series:
+                series_by_ticker[ticker] = series
 
     classified = [classify_kalshi_series(series) for series in series_by_ticker.values()]
     btc_rows = [row for row in classified if row["classification"] != "irrelevant"]
@@ -824,14 +841,24 @@ def collect_polymarket_rows() -> tuple[list[dict], list[dict], list[str]]:
         for market_type, series_slug in POLYMARKET_SERIES.items():
             events = []
             for day_start, day_end in iter_day_windows(window_start, window_end):
-                day_events, fetch_mode = fetch_events_for_window(
-                    market_type, series_slug, month_utc, day_start, day_end
-                )
+                try:
+                    day_events = fetch_paginated_events(market_type, series_slug, month_utc, day_start, day_end)
+                    fetch_mode = "primary" if day_events else "primary_empty"
+                except FetchError:
+                    day_events = fetch_paginated_events(
+                        market_type,
+                        series_slug,
+                        month_utc,
+                        day_start,
+                        day_end,
+                        use_fallback=True,
+                    )
+                    fetch_mode = "fallback" if day_events else "fallback_empty"
                 if fetch_mode == "fallback":
                     anomalies.append(
                         f"Polymarket used fallback tag query for {month_utc} {market_type} {day_start.date()}"
                     )
-                elif fetch_mode == "primary_empty":
+                elif fetch_mode in {"primary_empty", "fallback_empty"}:
                     anomalies.append(f"Polymarket returned no events for {month_utc} {market_type} {day_start.date()}")
                 print(
                     f"polymarket {month_utc} {market_type} {day_start.date()}: {len(day_events)} events ({fetch_mode})",
