@@ -1,7 +1,10 @@
 import importlib.util
 from datetime import datetime, timezone
 from decimal import Decimal
+import gzip
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -208,7 +211,98 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
             report.get_json_list = original
 
         self.assertEqual(status, "truncated")
-        self.assertEqual(len(trades), report.POLYMARKET_TRADE_LIMIT * 2)
+        expected_pages = report.POLYMARKET_MAX_TRADE_OFFSET // report.POLYMARKET_TRADE_LIMIT + 1
+        self.assertEqual(len(trades), report.POLYMARKET_TRADE_LIMIT * expected_pages)
+
+    def test_fetch_polymarket_trades_for_markets_batches_and_groups_results(self):
+        condition_ids = ["0x" + "a" * 64, "0x" + "b" * 64]
+        calls = []
+
+        def fake_get(base_url, path, params):
+            calls.append((base_url, path, params.copy()))
+            return [
+                {
+                    "proxyWallet": "0x0000000000000000000000000000000000000001",
+                    "conditionId": condition_ids[0],
+                    "size": "1",
+                    "timestamp": 1770000000,
+                    "transactionHash": "0x1",
+                },
+                {
+                    "proxyWallet": "0x0000000000000000000000000000000000000002",
+                    "conditionId": condition_ids[1],
+                    "size": "2",
+                    "timestamp": 1770000001,
+                    "transactionHash": "0x2",
+                },
+            ]
+
+        original = report.get_json_list
+        report.get_json_list = fake_get
+        try:
+            grouped = report.fetch_polymarket_trades_for_markets(condition_ids, taker_only=True)
+        finally:
+            report.get_json_list = original
+
+        self.assertEqual(calls[0][0], report.POLYMARKET_DATA_API_BASE)
+        self.assertEqual(calls[0][1], "/trades")
+        self.assertEqual(calls[0][2]["market"], ",".join(condition_ids))
+        self.assertEqual(calls[0][2]["takerOnly"], "true")
+        self.assertEqual(
+            [trade["wallet"] for trade in grouped[condition_ids[0]]["trades"]],
+            ["0x0000000000000000000000000000000000000001"],
+        )
+        self.assertEqual(
+            [trade["wallet"] for trade in grouped[condition_ids[1]]["trades"]],
+            ["0x0000000000000000000000000000000000000002"],
+        )
+        self.assertEqual(grouped[condition_ids[0]]["status"], "complete")
+        self.assertEqual(grouped[condition_ids[1]]["status"], "complete")
+
+    def test_fetch_polymarket_trades_for_markets_splits_truncated_batches(self):
+        condition_ids = ["0x" + "a" * 64, "0x" + "b" * 64]
+        calls = []
+        original_limit = report.POLYMARKET_TRADE_LIMIT
+        original_max_offset = report.POLYMARKET_MAX_TRADE_OFFSET
+
+        def fake_get(base_url, path, params):
+            calls.append(params["market"])
+            requested = params["market"].split(",")
+            if len(requested) > 1:
+                return [
+                    {
+                        "proxyWallet": f"0x{i + 1:040x}",
+                        "conditionId": requested[i],
+                        "size": "1",
+                        "timestamp": 1770000000 + i,
+                        "transactionHash": f"0x{i}",
+                    }
+                    for i in range(2)
+                ]
+            return [
+                {
+                    "proxyWallet": "0x0000000000000000000000000000000000000001",
+                    "conditionId": requested[0],
+                    "size": "1",
+                    "timestamp": 1770000000,
+                    "transactionHash": "0x1",
+                }
+            ]
+
+        original_get = report.get_json_list
+        report.get_json_list = fake_get
+        report.POLYMARKET_TRADE_LIMIT = 2
+        report.POLYMARKET_MAX_TRADE_OFFSET = 0
+        try:
+            grouped = report.fetch_polymarket_trades_for_markets(condition_ids, taker_only=True)
+        finally:
+            report.get_json_list = original_get
+            report.POLYMARKET_TRADE_LIMIT = original_limit
+            report.POLYMARKET_MAX_TRADE_OFFSET = original_max_offset
+
+        self.assertEqual(calls, [",".join(condition_ids), condition_ids[0], condition_ids[1]])
+        self.assertEqual(grouped[condition_ids[0]]["status"], "complete")
+        self.assertEqual(grouped[condition_ids[1]]["status"], "complete")
 
     def test_normalize_event_validates_title_outcomes_and_window(self):
         event = {
@@ -528,6 +622,48 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(monthly_rows[0]["active_wallet_count"], "4")
         self.assertEqual(monthly_rows[0]["trade_history_volume"], "30")
 
+    def test_load_cached_detail_rows_reads_current_platform_detail_cache(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_detail_path = report.DETAIL_PATH
+            report.DETAIL_PATH = Path(tmpdir) / "btc_updown_market_detail_by_platform_2026-02_2026-04.csv"
+            report.DETAIL_PATH.write_text(
+                ",".join(report.DETAIL_FIELDS)
+                + "\n"
+                + ",".join(
+                    [
+                        "polymarket",
+                        "2026-02",
+                        "2026-02-01",
+                        "hourly",
+                        "true",
+                        "btc-up-or-down-hourly",
+                        "event-1",
+                        "0x" + "a" * 64,
+                        "Bitcoin Up or Down - February 1",
+                        "market-1",
+                        "2026-02-01T01:00:00Z",
+                        "closed",
+                        "",
+                        "100",
+                        "market.volumeClob",
+                        "100",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            try:
+                cached = report.load_cached_detail_rows()
+            finally:
+                report.DETAIL_PATH = original_detail_path
+
+        self.assertIsNotNone(cached)
+        detail_rows, raw_records, anomalies = cached
+        self.assertEqual(detail_rows[0]["platform"], "polymarket")
+        self.assertEqual(detail_rows[0]["platform_market_id"], "0x" + "a" * 64)
+        self.assertEqual(raw_records[0]["platform"], "polymarket")
+        self.assertIn("Loaded platform detail from local cache", anomalies[0])
+
     def test_kalshi_wallet_rows_are_not_available(self):
         platform_rows = [
             {
@@ -544,7 +680,7 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(rows[0]["data_status"], "not_available")
         self.assertEqual(rows[0]["unavailable_reason"], "kalshi_public_trades_have_no_wallet_identifier")
 
-    def test_collect_polymarket_wallet_rows_fetches_each_polymarket_market(self):
+    def test_collect_polymarket_wallet_activity_streams_raw_and_aggregates(self):
         detail_rows = [
             {
                 "platform": "polymarket",
@@ -554,35 +690,39 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
                 "platform_series": "btc-up-or-down-hourly",
                 "platform_market_id": "0x" + "a" * 64,
                 "title": "Bitcoin Up or Down - February 1",
-                "volume": "1",
-            },
-            {
-                "platform": "kalshi",
-                "month_utc": "2026-02",
-                "date_utc": "2026-02-01",
-                "market_type": "15min",
-                "platform_series": "KXBTC15M",
-                "platform_market_id": "KXBTC15M-1",
-                "title": "BTC 15M price up down",
-                "volume": "1",
-            },
+                "volume": "10",
+            }
         ]
-        fetched = []
 
-        def fake_fetch(condition_id, taker_only):
-            fetched.append((condition_id, taker_only))
-            return ([{"wallet": "0x1", "size": Decimal("1"), "raw": {"conditionId": condition_id}}], "complete")
+        def fake_fetch(condition_ids):
+            condition_id = condition_ids[0]
+            trade = {"wallet": "0x1", "size": Decimal("3"), "raw": {"conditionId": condition_id}}
+            return (
+                {condition_id: {"trades": [trade], "status": "complete"}},
+                {condition_id: {"trades": [trade], "status": "complete"}},
+            )
 
-        original = report.fetch_polymarket_trades_for_market
-        report.fetch_polymarket_trades_for_market = fake_fetch
-        try:
-            trades_by_market, raw_records, anomalies = report.collect_polymarket_wallet_trades(detail_rows)
-        finally:
-            report.fetch_polymarket_trades_for_market = original
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_path = report.POLYMARKET_TRADES_RAW_PATH
+            original_fetch = report.fetch_polymarket_trade_batch
+            report.POLYMARKET_TRADES_RAW_PATH = Path(tmpdir) / "wallet_raw.jsonl.gz"
+            report.fetch_polymarket_trade_batch = fake_fetch
+            try:
+                market_rows, daily_rows, monthly_rows, anomalies = report.collect_polymarket_wallet_activity(
+                    detail_rows
+                )
+            finally:
+                report.POLYMARKET_TRADES_RAW_PATH = original_path
+                report.fetch_polymarket_trade_batch = original_fetch
 
-        self.assertEqual(fetched, [("0x" + "a" * 64, False), ("0x" + "a" * 64, True)])
-        self.assertIn("0x" + "a" * 64, trades_by_market)
+            with gzip.open(Path(tmpdir) / "wallet_raw.jsonl.gz", "rt", encoding="utf-8") as input_file:
+                raw_records = [json.loads(line) for line in input_file]
+
+        self.assertEqual(market_rows[0]["active_wallet_count"], "1")
+        self.assertEqual(daily_rows[0]["trade_history_volume"], "3")
+        self.assertEqual(monthly_rows[0]["top10_wallet_volume_share"], "1")
         self.assertEqual(len(raw_records), 2)
+        self.assertEqual(raw_records[0]["platform_market_id"], "0x" + "a" * 64)
         self.assertEqual(anomalies, [])
 
     def test_markdown_report_includes_wallet_activity_section(self):
