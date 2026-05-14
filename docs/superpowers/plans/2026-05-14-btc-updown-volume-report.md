@@ -81,6 +81,14 @@ GET https://gamma-api.polymarket.com/events
   &offset=<offset>
 ```
 
+The Gamma API can include events whose `endDate` equals `end_date_max`. Treat the API date parameters as discovery filters only. After each response, parse every returned `endDate` and apply the local half-open filter:
+
+```text
+month_start_utc <= event.endDate < next_month_start_utc
+```
+
+Only rows that pass this local filter may be written to raw JSONL, detail CSV, or aggregate outputs.
+
 Month windows:
 
 | month_utc | start | end |
@@ -111,7 +119,9 @@ GET https://gamma-api.polymarket.com/events
   &offset=<offset>
 ```
 
-Then filter locally to events where any `event.series[].slug` equals one of the five target slugs.
+When this fallback is used inside a `(market_type, month)` loop, filter locally to events where `event.series[].slug` contains the current loop's exact `series_slug`; do not accept any of the other four target slugs in that loop. Also apply the same local half-open `endDate` filter before writing any rows.
+
+If implementing a single shared fallback fetch across all market types, classify each event by its actual `event.series[].slug`, map that slug back to `market_type`, and de-duplicate by `conditionId` before writing rows.
 
 ## Output Files
 
@@ -154,10 +164,11 @@ month_utc,market_type,market_count,total_volume
 2. Define constants for the five market types, three month windows, output paths, and the Gamma API base URL.
 3. Implement HTTP GET with `urllib.request`, timeout, JSON parsing, and a fixed user agent such as `poly-market-analysis/0.1`.
 4. Implement paginated event fetch for `(market_type, month)` using the primary `series_slug` query.
-5. Implement fallback fetch with `tag_slug=bitcoin` and local series filtering.
+5. Implement fallback fetch with `tag_slug=bitcoin`, exact current-loop series filtering, and local half-open `endDate` filtering.
 6. Normalize each returned event into one market detail row.
 7. Validate each market row:
    - target `series_slug` exists
+   - parsed `endDate` satisfies `month_start_utc <= endDate < next_month_start_utc`
    - title contains `Bitcoin Up or Down`
    - outcomes parse to `["Up", "Down"]`
    - condition ID is present and not duplicated
