@@ -1,4 +1,5 @@
 AGENTS.md
+__pycache__/
 data/raw/
 outputs/
 reports/btc_updown_volume_summary_*.md
