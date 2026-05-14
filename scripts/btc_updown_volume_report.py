@@ -37,6 +37,7 @@ POLYMARKET_MAX_TRADE_OFFSET = 3000
 KALSHI_PAGE_LIMIT = 1000
 REQUEST_SLEEP_SECONDS = 0.05
 DATA_RANGE_LABEL = "2026-02_2026-04"
+POLYMARKET_WALLET_STATUS_UNAVAILABLE_REASON = "polymarket_trade_history_generation_not_run"
 
 MARKET_TYPES = ["5min", "15min", "hourly", "4hour", "daily"]
 
@@ -955,6 +956,64 @@ def build_kalshi_wallet_unavailable_rows(platform_rows: list[dict]) -> list[dict
     return rows
 
 
+def build_polymarket_wallet_not_generated_rows(platform_rows: list[dict]) -> list[dict]:
+    rows = []
+    for row in platform_rows:
+        if row["platform"] != "polymarket":
+            continue
+        not_generated_row = {
+            "asset": ASSET_KEY,
+            "platform": "polymarket",
+            "month_utc": row["month_utc"],
+            "market_type": row["market_type"],
+            "active_wallet_count": "",
+            "participant_trade_count": "",
+            "taker_trade_count": "",
+            "trade_history_volume": "",
+            "top10_wallet_volume": "",
+            "top10_wallet_volume_share": "",
+            "platform_reported_volume": row["total_volume"],
+            "volume_gap": "",
+            "volume_gap_pct": "",
+            "data_status": "not_generated",
+            "unavailable_reason": POLYMARKET_WALLET_STATUS_UNAVAILABLE_REASON,
+        }
+        if "date_utc" in row:
+            not_generated_row["date_utc"] = row["date_utc"]
+        rows.append(not_generated_row)
+    return rows
+
+
+def build_polymarket_wallet_market_not_generated_rows(detail_rows: list[dict]) -> list[dict]:
+    rows = []
+    for row in detail_rows:
+        if row["platform"] != "polymarket":
+            continue
+        rows.append(
+            {
+                "asset": ASSET_KEY,
+                "platform": "polymarket",
+                "month_utc": row["month_utc"],
+                "date_utc": row["date_utc"],
+                "market_type": row["market_type"],
+                "platform_series": row["platform_series"],
+                "platform_market_id": row["platform_market_id"],
+                "title": row["title"],
+                "active_wallet_count": "",
+                "participant_trade_count": "",
+                "taker_trade_count": "",
+                "trade_history_volume": "",
+                "top10_wallet_volume": "",
+                "top10_wallet_volume_share": "",
+                "platform_reported_volume": format_decimal(decimal_from_value(row["volume"], "detail.volume")),
+                "volume_gap": "",
+                "volume_gap_pct": "",
+                "data_status": "not_generated",
+            }
+        )
+    return rows
+
+
 def get_json_payload(base_url: str, path: str, params: dict[str, object] | None = None) -> object:
     query = urllib.parse.urlencode(params or {})
     url = f"{base_url}{path}"
@@ -1786,6 +1845,7 @@ def build_markdown_report(
             "- `active_wallet_count` uses Polymarket `takerOnly=false` participant rows and counts unique wallets.",
             "- `top10_wallet_volume_share` uses Polymarket `takerOnly=true` rows so the denominator stays market-volume aligned.",
             "- Kalshi wallet metrics are `not_available` because public Kalshi trades do not expose wallet identifiers.",
+            "- Rows marked `not_generated` intentionally leave wallet counts blank; see unavailable reasons below.",
             "",
             "## Wallet Activity Daily",
             "",
@@ -1888,7 +1948,9 @@ def build_markdown_report(
     return "\n".join(lines) + "\n"
 
 
-def generate_report() -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], list[str]]:
+def generate_report(
+    wallet_mode: str = "full",
+) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], list[str]]:
     cached_detail = load_cached_detail_rows()
     if cached_detail is None:
         discovery_rows = fetch_kalshi_series_discovery()
@@ -1936,9 +1998,23 @@ def generate_report() -> tuple[list[dict], list[dict], list[dict], list[dict], l
     platform_monthly_rows = aggregate_platform_monthly(detail_rows)
     combined_daily_rows = aggregate_combined_daily(detail_rows)
     combined_monthly_rows = aggregate_combined_monthly(detail_rows)
-    wallet_market_rows, wallet_daily_rows, wallet_monthly_rows, wallet_anomalies = collect_polymarket_wallet_activity(
-        detail_rows
-    )
+    if wallet_mode == "full":
+        (
+            wallet_market_rows,
+            wallet_daily_rows,
+            wallet_monthly_rows,
+            wallet_anomalies,
+        ) = collect_polymarket_wallet_activity(detail_rows)
+    elif wallet_mode == "status-only":
+        wallet_market_rows = build_polymarket_wallet_market_not_generated_rows(detail_rows)
+        wallet_daily_rows = build_polymarket_wallet_not_generated_rows(platform_daily_rows)
+        wallet_monthly_rows = build_polymarket_wallet_not_generated_rows(platform_monthly_rows)
+        wallet_anomalies = [
+            "Polymarket wallet trade history generation was skipped; wallet metrics are marked not_generated"
+        ]
+        write_jsonl_gzip(POLYMARKET_TRADES_RAW_PATH, [])
+    else:
+        raise ValueError(f"unsupported wallet_mode: {wallet_mode}")
     wallet_daily_rows.extend(build_kalshi_wallet_unavailable_rows(platform_daily_rows))
     wallet_monthly_rows.extend(build_kalshi_wallet_unavailable_rows(platform_monthly_rows))
     anomalies.extend(wallet_anomalies)
@@ -1989,6 +2065,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="btc",
         help="asset family to report; defaults to btc for backward compatibility",
     )
+    parser.add_argument(
+        "--wallet-mode",
+        choices=("full", "status-only"),
+        default="full",
+        help="full fetches Polymarket wallet trades; status-only writes report rows without trade-history metrics",
+    )
     return parser.parse_args(argv)
 
 
@@ -2005,7 +2087,7 @@ def main(argv: list[str] | None = None) -> int:
         wallet_daily_rows,
         wallet_monthly_rows,
         anomalies,
-    ) = generate_report()
+    ) = generate_report(wallet_mode=args.wallet_mode)
     print("generated outputs:")
     for path in (
         RAW_PATH,
