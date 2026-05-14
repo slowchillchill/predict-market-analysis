@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Generate cross-platform BTC Up/Down volume reports for Feb-Apr 2026."""
+"""Generate cross-platform crypto Up/Down volume reports for Feb-Apr 2026."""
 
 from __future__ import annotations
 
+import argparse
 import csv
 import gzip
 import http.client
 import io
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -32,21 +34,70 @@ DATA_RANGE_LABEL = "2026-02_2026-04"
 
 MARKET_TYPES = ["5min", "15min", "hourly", "4hour", "daily"]
 
-POLYMARKET_SERIES = {
-    "5min": "btc-up-or-down-5m",
-    "15min": "btc-up-or-down-15m",
-    "hourly": "btc-up-or-down-hourly",
-    "4hour": "btc-up-or-down-4h",
-    "daily": "btc-up-or-down-daily",
+ASSET_CONFIGS = {
+    "btc": {
+        "display": "BTC",
+        "full_name": "Bitcoin",
+        "title_phrase": "Bitcoin Up or Down",
+        "fallback_tag_slug": "bitcoin",
+        "title_terms": ("btc", "bitcoin"),
+        "polymarket_series": {
+            "5min": "btc-up-or-down-5m",
+            "15min": "btc-up-or-down-15m",
+            "hourly": "btc-up-or-down-hourly",
+            "4hour": "btc-up-or-down-4h",
+            "daily": "btc-up-or-down-daily",
+        },
+        "kalshi_exact_direction_series": {"KXBTC15M": "15min"},
+        "kalshi_excluded_series": {
+            "KXBTCD": "absolute above/below multi-strike market",
+            "BTCD": "daily absolute above/below market",
+            "BTCD-B": "daily absolute above/below market",
+            "KXBTC": "range bucket market",
+        },
+    },
+    "eth": {
+        "display": "ETH",
+        "full_name": "Ethereum",
+        "title_phrase": "Ethereum Up or Down",
+        "fallback_tag_slug": "ethereum",
+        "title_terms": ("eth", "ethereum"),
+        "polymarket_series": {
+            "5min": "eth-up-or-down-5m",
+            "15min": "eth-up-or-down-15m",
+            "hourly": "eth-up-or-down-hourly",
+            "4hour": "eth-up-or-down-4h",
+            "daily": "eth-up-or-down-daily",
+        },
+        "kalshi_exact_direction_series": {"KXETH15M": "15min"},
+        "kalshi_excluded_series": {
+            "ETH": "daily Ethereum range market",
+            "KXETH": "range bucket market",
+            "ETHD": "daily absolute above/below market",
+            "KXETHD": "absolute above/below multi-strike market",
+            "ETHATH": "all-time-high market",
+            "KXETHATH": "all-time-high market",
+            "ETHETF": "ETF listed market",
+            "KXETHETF": "ETF listed market",
+            "ETHMAXY": "annual high threshold market",
+            "KXETHMAXY": "annual high threshold market",
+            "ETHMINY": "annual low threshold market",
+            "KXETHMINY": "annual low threshold market",
+            "KXETHMAXMON": "monthly one-touch market",
+            "KXETHMINMON": "monthly one-touch market",
+        },
+    },
 }
 
-KALSHI_EXACT_DIRECTION_SERIES = {"KXBTC15M": "15min"}
-KALSHI_EXCLUDED_SERIES = {
-    "KXBTCD": "absolute above/below multi-strike market",
-    "BTCD": "daily absolute above/below market",
-    "BTCD-B": "daily absolute above/below market",
-    "KXBTC": "range bucket market",
-}
+ASSET_KEY = ""
+ASSET_DISPLAY = ""
+ASSET_FULL_NAME = ""
+ASSET_TITLE_PHRASE = ""
+POLYMARKET_FALLBACK_TAG_SLUG = ""
+KALSHI_TITLE_TERMS: tuple[str, ...] = ()
+POLYMARKET_SERIES: dict[str, str] = {}
+KALSHI_EXACT_DIRECTION_SERIES: dict[str, str] = {}
+KALSHI_EXCLUDED_SERIES: dict[str, str] = {}
 KALSHI_COMPLETED_STATUSES = {"settled", "finalized", "closed"}
 
 MONTH_WINDOWS = [
@@ -70,15 +121,15 @@ MONTH_WINDOWS = [
 GLOBAL_START = MONTH_WINDOWS[0][1]
 GLOBAL_END = MONTH_WINDOWS[-1][2]
 
-RAW_PATH = ROOT / "data" / "raw" / f"btc_updown_platform_events_{DATA_RANGE_LABEL}.jsonl.gz"
-LEGACY_POLYMARKET_DETAIL_PATH = ROOT / "outputs" / f"btc_updown_market_detail_{DATA_RANGE_LABEL}.csv"
-DETAIL_PATH = ROOT / "outputs" / f"btc_updown_market_detail_by_platform_{DATA_RANGE_LABEL}.csv"
-PLATFORM_DAILY_PATH = ROOT / "outputs" / f"btc_updown_daily_volume_by_platform_{DATA_RANGE_LABEL}.csv"
-PLATFORM_MONTHLY_PATH = ROOT / "outputs" / f"btc_updown_monthly_volume_by_platform_{DATA_RANGE_LABEL}.csv"
-COMBINED_DAILY_PATH = ROOT / "outputs" / f"btc_updown_daily_volume_combined_{DATA_RANGE_LABEL}.csv"
-COMBINED_MONTHLY_PATH = ROOT / "outputs" / f"btc_updown_monthly_volume_combined_{DATA_RANGE_LABEL}.csv"
-REPORT_PATH = ROOT / "reports" / f"btc_updown_cross_platform_volume_summary_{DATA_RANGE_LABEL}.md"
-DISCOVERY_REPORT_PATH = ROOT / "reports" / f"kalshi_btc_series_discovery_{DATA_RANGE_LABEL}.md"
+RAW_PATH: Path
+LEGACY_POLYMARKET_DETAIL_PATH: Path
+DETAIL_PATH: Path
+PLATFORM_DAILY_PATH: Path
+PLATFORM_MONTHLY_PATH: Path
+COMBINED_DAILY_PATH: Path
+COMBINED_MONTHLY_PATH: Path
+REPORT_PATH: Path
+DISCOVERY_REPORT_PATH: Path
 
 DETAIL_FIELDS = [
     "platform",
@@ -103,6 +154,43 @@ PLATFORM_DAILY_FIELDS = ["platform", "date_utc", "month_utc", "market_type", "ma
 PLATFORM_MONTHLY_FIELDS = ["platform", "month_utc", "market_type", "market_count", "total_volume"]
 COMBINED_DAILY_FIELDS = ["date_utc", "month_utc", "market_type", "platform_count", "market_count", "total_volume"]
 COMBINED_MONTHLY_FIELDS = ["month_utc", "market_type", "platform_count", "market_count", "total_volume"]
+
+
+def configure_asset(asset_key: str) -> None:
+    config = ASSET_CONFIGS.get(asset_key)
+    if config is None:
+        raise ValueError(f"unknown asset: {asset_key}")
+
+    global ASSET_KEY, ASSET_DISPLAY, ASSET_FULL_NAME, ASSET_TITLE_PHRASE
+    global POLYMARKET_FALLBACK_TAG_SLUG, KALSHI_TITLE_TERMS
+    global POLYMARKET_SERIES, KALSHI_EXACT_DIRECTION_SERIES, KALSHI_EXCLUDED_SERIES
+    global RAW_PATH, LEGACY_POLYMARKET_DETAIL_PATH, DETAIL_PATH
+    global PLATFORM_DAILY_PATH, PLATFORM_MONTHLY_PATH, COMBINED_DAILY_PATH, COMBINED_MONTHLY_PATH
+    global REPORT_PATH, DISCOVERY_REPORT_PATH
+
+    ASSET_KEY = asset_key
+    ASSET_DISPLAY = str(config["display"])
+    ASSET_FULL_NAME = str(config["full_name"])
+    ASSET_TITLE_PHRASE = str(config["title_phrase"])
+    POLYMARKET_FALLBACK_TAG_SLUG = str(config["fallback_tag_slug"])
+    KALSHI_TITLE_TERMS = tuple(config["title_terms"])
+    POLYMARKET_SERIES = dict(config["polymarket_series"])
+    KALSHI_EXACT_DIRECTION_SERIES = dict(config["kalshi_exact_direction_series"])
+    KALSHI_EXCLUDED_SERIES = dict(config["kalshi_excluded_series"])
+
+    output_prefix = f"{asset_key}_updown"
+    RAW_PATH = ROOT / "data" / "raw" / f"{output_prefix}_platform_events_{DATA_RANGE_LABEL}.jsonl.gz"
+    LEGACY_POLYMARKET_DETAIL_PATH = ROOT / "outputs" / f"{output_prefix}_market_detail_{DATA_RANGE_LABEL}.csv"
+    DETAIL_PATH = ROOT / "outputs" / f"{output_prefix}_market_detail_by_platform_{DATA_RANGE_LABEL}.csv"
+    PLATFORM_DAILY_PATH = ROOT / "outputs" / f"{output_prefix}_daily_volume_by_platform_{DATA_RANGE_LABEL}.csv"
+    PLATFORM_MONTHLY_PATH = ROOT / "outputs" / f"{output_prefix}_monthly_volume_by_platform_{DATA_RANGE_LABEL}.csv"
+    COMBINED_DAILY_PATH = ROOT / "outputs" / f"{output_prefix}_daily_volume_combined_{DATA_RANGE_LABEL}.csv"
+    COMBINED_MONTHLY_PATH = ROOT / "outputs" / f"{output_prefix}_monthly_volume_combined_{DATA_RANGE_LABEL}.csv"
+    REPORT_PATH = ROOT / "reports" / f"{output_prefix}_cross_platform_volume_summary_{DATA_RANGE_LABEL}.md"
+    DISCOVERY_REPORT_PATH = ROOT / "reports" / f"kalshi_{asset_key}_series_discovery_{DATA_RANGE_LABEL}.md"
+
+
+configure_asset("btc")
 
 
 class FetchError(RuntimeError):
@@ -255,7 +343,7 @@ def normalize_polymarket_event(
     end_dt = parse_utc_datetime(end_date_value)
 
     title = str(event.get("title") or market.get("question") or "")
-    if "Bitcoin Up or Down" not in title:
+    if ASSET_TITLE_PHRASE not in title:
         raise ValueError(f"unexpected title for event {event.get('slug')}: {title!r}")
 
     parse_outcomes(market.get("outcomes"))
@@ -302,6 +390,26 @@ def kalshi_series_ticker(series: dict) -> str:
     return str(series.get("ticker") or series.get("series_ticker") or "")
 
 
+def is_kalshi_asset_candidate(ticker: str, title: str) -> bool:
+    normalized_ticker = ticker.upper()
+    if ASSET_KEY == "eth":
+        if normalized_ticker.startswith(("ETH", "KXETH")):
+            return True
+        if re.search(r"(^|[^A-Za-z0-9])ETH([^A-Za-z0-9]|$)", title) or re.search(
+            r"(^|[^A-Za-z0-9])Ethereum([^A-Za-z0-9]|$)",
+            title,
+            re.IGNORECASE,
+        ):
+            return True
+        explicit_segments = ("BTCETH", "VSETH", "SOLETH", "FLIPETH", "REVETH")
+        if any(segment in normalized_ticker for segment in explicit_segments):
+            return True
+        return False
+
+    normalized_title = title.lower()
+    return any(term in normalized_ticker.lower() or term in normalized_title for term in KALSHI_TITLE_TERMS)
+
+
 def classify_kalshi_series(series: dict) -> dict:
     ticker = kalshi_series_ticker(series)
     title = str(series.get("title") or "")
@@ -317,7 +425,7 @@ def classify_kalshi_series(series: dict) -> dict:
                 "classification": "exact_direction",
                 "market_type": KALSHI_EXACT_DIRECTION_SERIES[ticker],
                 "comparable": "true",
-                "reason": "exact BTC directional series",
+                "reason": f"exact {ASSET_DISPLAY} directional series",
                 "volume_fp": str(series.get("volume_fp") or ""),
             }
         return {
@@ -343,15 +451,15 @@ def classify_kalshi_series(series: dict) -> dict:
             "volume_fp": str(series.get("volume_fp") or ""),
         }
 
-    if "btc" in ticker.lower() or "bitcoin" in normalized_title:
+    if is_kalshi_asset_candidate(ticker, title):
         return {
             "ticker": ticker,
             "title": title,
             "frequency": frequency,
-            "classification": "unmapped_btc_candidate",
+            "classification": f"unmapped_{ASSET_KEY}_candidate",
             "market_type": "",
             "comparable": "false",
-            "reason": "not approved as BTC Up/Down equivalent",
+            "reason": f"not approved as {ASSET_DISPLAY} Up/Down equivalent",
             "volume_fp": str(series.get("volume_fp") or ""),
         }
 
@@ -362,7 +470,7 @@ def classify_kalshi_series(series: dict) -> dict:
         "classification": "irrelevant",
         "market_type": "",
         "comparable": "false",
-        "reason": "not BTC related",
+        "reason": f"not {ASSET_DISPLAY} related",
         "volume_fp": str(series.get("volume_fp") or ""),
     }
 
@@ -379,9 +487,11 @@ def is_kalshi_directional_market(market: dict, series_ticker: str) -> bool:
     strike_type = str(market.get("strike_type") or "").lower()
     if market_type != "binary":
         return False
-    if "btc price up" in title:
+    if not is_kalshi_asset_candidate(series_ticker, str(market.get("title") or "")):
+        return False
+    if "price up" in title or "up down" in title or "up in next" in title:
         return True
-    return "btc" in title and "15 min" in title and strike_type == "greater_or_equal"
+    return ("15 min" in title or "15m" in title) and strike_type == "greater_or_equal"
 
 
 def normalize_kalshi_market(
@@ -401,7 +511,7 @@ def normalize_kalshi_market(
     if not is_kalshi_completed_market(market):
         return None
     if not is_kalshi_directional_market(market, series_ticker):
-        raise ValueError(f"Kalshi market {market.get('ticker')} is not directional BTC Up/Down")
+        raise ValueError(f"Kalshi market {market.get('ticker')} is not directional {ASSET_DISPLAY} Up/Down")
 
     volume, volume_source, raw_volume = choose_kalshi_volume(market)
     row = {
@@ -625,7 +735,7 @@ def fetch_paginated_events(
             "offset": offset,
         }
         if use_fallback:
-            params["tag_slug"] = "bitcoin"
+            params["tag_slug"] = POLYMARKET_FALLBACK_TAG_SLUG
         else:
             params["series_slug"] = series_slug
 
@@ -728,8 +838,8 @@ def fetch_kalshi_series_discovery() -> list[dict]:
                 series_by_ticker[ticker] = series
 
     classified = [classify_kalshi_series(series) for series in series_by_ticker.values()]
-    btc_rows = [row for row in classified if row["classification"] != "irrelevant"]
-    return sorted(btc_rows, key=lambda row: (row["classification"] != "exact_direction", row["ticker"]))
+    asset_rows = [row for row in classified if row["classification"] != "irrelevant"]
+    return sorted(asset_rows, key=lambda row: (row["classification"] != "exact_direction", row["ticker"]))
 
 
 def fetch_kalshi_historical_markets(series_ticker: str, window_start: datetime, window_end: datetime) -> list[dict]:
@@ -967,7 +1077,7 @@ def collect_kalshi_rows(discovery_rows: list[dict]) -> tuple[list[dict], list[di
 
     for market_type in MARKET_TYPES:
         if market_type not in {row["market_type"] for row in exact_rows}:
-            anomalies.append(f"Kalshi has no approved comparable {market_type} BTC Up/Down series")
+            anomalies.append(f"Kalshi has no approved comparable {market_type} {ASSET_DISPLAY} Up/Down series")
 
     return detail_rows, raw_records, anomalies, cutoff
 
@@ -996,10 +1106,10 @@ def lookup(rows: list[dict], key_fields: tuple[str, ...], value_field: str) -> d
 
 def build_discovery_report(discovery_rows: list[dict]) -> str:
     lines = [
-        "# Kalshi BTC Series Discovery",
+        f"# Kalshi {ASSET_DISPLAY} Series Discovery",
         "",
         f"- Generated at: `{isoformat_z(datetime.now(timezone.utc))}`",
-        "- Exact directional rows may be included in combined BTC Up/Down totals.",
+        f"- Exact directional rows may be included in combined {ASSET_DISPLAY} Up/Down totals.",
         "- Excluded rows are diagnostics only and are not included in platform or combined volume outputs.",
         "",
         "| ticker | title | frequency | classification | market_type | comparable | reason | volume_fp |",
@@ -1040,14 +1150,21 @@ def build_markdown_report(
     platform_counts = lookup(platform_monthly_rows, ("platform", "month_utc", "market_type"), "market_count")
     combined_totals = lookup(combined_monthly_rows, ("month_utc", "market_type"), "total_volume")
     month_labels = [month_utc for month_utc, _, _ in MONTH_WINDOWS]
+    approved_kalshi = ", ".join(f"`{ticker}`" for ticker in sorted(KALSHI_EXACT_DIRECTION_SERIES)) or "`none`"
+    missing_kalshi_types = [
+        market_type
+        for market_type in MARKET_TYPES
+        if market_type not in set(KALSHI_EXACT_DIRECTION_SERIES.values())
+    ]
+    excluded_kalshi = ", ".join(f"`{ticker}`" for ticker in sorted(KALSHI_EXCLUDED_SERIES)) or "`none`"
 
     lines = [
-        "# BTC Up/Down Cross-Platform Volume Summary",
+        f"# {ASSET_DISPLAY} Up/Down Cross-Platform Volume Summary",
         "",
         f"- Generated at: `{generated_at}`",
         f"- Date range: `{MONTH_WINDOWS[0][0]}` through `{MONTH_WINDOWS[-1][0]}` using UTC half-open month windows.",
         "- Platforms: `polymarket`, `kalshi`.",
-        "- Combined totals include only semantically comparable `comparable=true` BTC direction rows.",
+        f"- Combined totals include only semantically comparable `comparable=true` {ASSET_DISPLAY} direction rows.",
         "- Volume basis: platform-reported cumulative contract/share volume, not USD notional.",
         "- Polymarket volume priority: `market.volumeClob`, `market.volumeNum`, `market.volume`, then `event.volume`.",
         "- Kalshi volume source: `market.volume_fp`.",
@@ -1101,9 +1218,11 @@ def build_markdown_report(
             "",
             "## Kalshi Coverage Notes",
             "",
-            "- `KXBTC15M` is the only approved comparable Kalshi BTC Up/Down series discovered for this run.",
-            "- No approved comparable Kalshi `5min`, `hourly`, `4hour`, or `daily` series is included.",
-            "- `KXBTCD`, `BTCD`, `BTCD-B`, and `KXBTC` remain excluded because they are above/below or range products.",
+            f"- Approved comparable Kalshi {ASSET_DISPLAY} Up/Down series: {approved_kalshi}.",
+            "- No approved comparable Kalshi "
+            + ", ".join(f"`{market_type}`" for market_type in missing_kalshi_types)
+            + " series is included.",
+            f"- Excluded Kalshi {ASSET_DISPLAY} diagnostics include: {excluded_kalshi}.",
             "",
             "## Output Files",
             "",
@@ -1177,7 +1296,20 @@ def generate_report() -> tuple[list[dict], list[dict], list[dict], list[dict], l
     return detail_rows, platform_daily_rows, platform_monthly_rows, combined_daily_rows, combined_monthly_rows, anomalies
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--asset",
+        choices=sorted(ASSET_CONFIGS),
+        default="btc",
+        help="asset family to report; defaults to btc for backward compatibility",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    configure_asset(args.asset)
     detail_rows, platform_daily_rows, platform_monthly_rows, combined_daily_rows, combined_monthly_rows, anomalies = (
         generate_report()
     )

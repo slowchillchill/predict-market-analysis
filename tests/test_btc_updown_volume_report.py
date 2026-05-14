@@ -12,12 +12,31 @@ spec.loader.exec_module(report)
 
 
 class BtcUpdownVolumeReportTests(unittest.TestCase):
+    def tearDown(self):
+        report.configure_asset("btc")
+
     def test_series_slug_maps_market_type_including_4hour(self):
         self.assertEqual(report.market_type_for_series_slug("btc-up-or-down-5m"), "5min")
         self.assertEqual(report.market_type_for_series_slug("btc-up-or-down-15m"), "15min")
         self.assertEqual(report.market_type_for_series_slug("btc-up-or-down-hourly"), "hourly")
         self.assertEqual(report.market_type_for_series_slug("btc-up-or-down-4h"), "4hour")
         self.assertEqual(report.market_type_for_series_slug("btc-up-or-down-daily"), "daily")
+
+    def test_configure_eth_maps_series_and_output_paths(self):
+        report.configure_asset("eth")
+        self.assertEqual(report.market_type_for_series_slug("eth-up-or-down-5m"), "5min")
+        self.assertEqual(report.market_type_for_series_slug("eth-up-or-down-15m"), "15min")
+        self.assertEqual(report.market_type_for_series_slug("eth-up-or-down-hourly"), "hourly")
+        self.assertEqual(report.market_type_for_series_slug("eth-up-or-down-4h"), "4hour")
+        self.assertEqual(report.market_type_for_series_slug("eth-up-or-down-daily"), "daily")
+        self.assertEqual(
+            report.DETAIL_PATH.name,
+            "eth_updown_market_detail_by_platform_2026-02_2026-04.csv",
+        )
+        self.assertEqual(
+            report.DISCOVERY_REPORT_PATH.name,
+            "kalshi_eth_series_discovery_2026-02_2026-04.md",
+        )
 
     def test_half_open_month_filter_excludes_end_boundary(self):
         start = datetime(2026, 2, 1, tzinfo=timezone.utc)
@@ -90,6 +109,34 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(row["comparable"], "true")
         self.assertEqual(raw["event"]["id"], "event-1")
 
+    def test_normalize_eth_event_validates_ethereum_title(self):
+        report.configure_asset("eth")
+        event = {
+            "id": "event-eth-1",
+            "slug": "ethereum-up-or-down-february-1-12pm-et",
+            "title": "Ethereum Up or Down - February 1, 12PM ET",
+            "endDate": "2026-02-01T17:00:00Z",
+            "series": [{"slug": "eth-up-or-down-hourly"}],
+            "markets": [
+                {
+                    "id": "market-eth-1",
+                    "conditionId": "0xeth",
+                    "outcomes": '["Up", "Down"]',
+                    "volumeClob": "7",
+                }
+            ],
+        }
+        row, _ = report.normalize_polymarket_event(
+            event,
+            market_type="hourly",
+            series_slug="eth-up-or-down-hourly",
+            month_utc="2026-02",
+            window_start=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            window_end=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual(row["platform_series"], "eth-up-or-down-hourly")
+        self.assertEqual(row["title"], "Ethereum Up or Down - February 1, 12PM ET")
+
     def test_kalshi_classifier_accepts_exact_15min_and_rejects_related_products(self):
         exact = report.classify_kalshi_series(
             {"ticker": "KXBTC15M", "title": "Bitcoin price up down", "frequency": "fifteen_min"}
@@ -102,6 +149,37 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
             classified = report.classify_kalshi_series({"ticker": ticker, "title": "Bitcoin price Above/below"})
             self.assertEqual(classified["classification"], "excluded_related_product")
             self.assertEqual(classified["comparable"], "false")
+
+    def test_eth_kalshi_classifier_accepts_exact_15min_and_rejects_legacy_products(self):
+        report.configure_asset("eth")
+        exact = report.classify_kalshi_series(
+            {"ticker": "KXETH15M", "title": "ETH 15M price up down", "frequency": "fifteen_min"}
+        )
+        self.assertEqual(exact["classification"], "exact_direction")
+        self.assertEqual(exact["market_type"], "15min")
+        self.assertEqual(exact["comparable"], "true")
+
+        for ticker in ("ETH", "ETHATH", "ETHETF", "ETHMAXY", "ETHMINY", "KXETHD", "ETHD", "KXETH"):
+            classified = report.classify_kalshi_series({"ticker": ticker, "title": "Ethereum range"})
+            self.assertEqual(classified["classification"], "excluded_related_product")
+            self.assertEqual(classified["comparable"], "false")
+
+        cross_asset = report.classify_kalshi_series({"ticker": "BTCETHRETURN", "title": "BTC vs. ETH performance"})
+        self.assertEqual(cross_asset["comparable"], "false")
+        self.assertNotEqual(cross_asset["classification"], "irrelevant")
+
+    def test_eth_kalshi_candidate_predicate_rejects_substring_false_positives(self):
+        report.configure_asset("eth")
+        false_positives = [
+            ("KXHEGSETH", "Hegseth Senate Yeas"),
+            ("KXTETHERPAUSE", "Tether pause"),
+            ("KXBETHELSEAT", "GA Supreme Court: Bethel seat winner?"),
+            ("KXYCAITOGETHER", "Altman and Musk on stage together"),
+            ("KXMOSTSTREAMEDSOMETHINGBEAUTIFUL", "Most streamed song on Miley Cyrus's Something Beautiful"),
+        ]
+        for ticker, title in false_positives:
+            classified = report.classify_kalshi_series({"ticker": ticker, "title": title})
+            self.assertEqual(classified["classification"], "irrelevant")
 
     def test_kalshi_half_open_filter_excludes_month_end_boundary(self):
         before_boundary = report.normalize_kalshi_market(
@@ -149,6 +227,19 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
                     "strike_type": "greater_or_equal",
                 },
                 "KXBTC15M",
+            )
+        )
+
+    def test_eth_kalshi_directional_market_accepts_exact_target_title(self):
+        report.configure_asset("eth")
+        self.assertTrue(
+            report.is_kalshi_directional_market(
+                {
+                    "title": "ETH 15M price up down",
+                    "market_type": "binary",
+                    "strike_type": "greater_or_equal",
+                },
+                "KXETH15M",
             )
         )
 

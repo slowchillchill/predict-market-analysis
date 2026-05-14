@@ -5,3 +5,5 @@ outputs/
 reports/btc_updown_volume_summary_*.md
 reports/btc_updown_cross_platform_volume_summary_*.md
 reports/kalshi_btc_series_discovery_*.md
+reports/eth_updown_cross_platform_volume_summary_*.md
+reports/kalshi_eth_series_discovery_*.md
