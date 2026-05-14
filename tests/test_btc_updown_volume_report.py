@@ -680,6 +680,94 @@ class BtcUpdownVolumeReportTests(unittest.TestCase):
         self.assertEqual(rows[0]["data_status"], "not_available")
         self.assertEqual(rows[0]["unavailable_reason"], "kalshi_public_trades_have_no_wallet_identifier")
 
+    def test_polymarket_status_only_wallet_rows_are_not_generated(self):
+        report.configure_asset("btc")
+        platform_rows = [
+            {
+                "platform": "polymarket",
+                "date_utc": "2026-02-01",
+                "month_utc": "2026-02",
+                "market_type": "hourly",
+                "total_volume": "123",
+            }
+        ]
+        detail_rows = [
+            {
+                "platform": "polymarket",
+                "date_utc": "2026-02-01",
+                "month_utc": "2026-02",
+                "market_type": "hourly",
+                "platform_series": "btc-up-or-down-hourly",
+                "platform_market_id": "0x" + "a" * 64,
+                "title": "Bitcoin Up or Down - February 1",
+                "volume": "123",
+            }
+        ]
+
+        daily_rows = report.build_polymarket_wallet_not_generated_rows(platform_rows)
+        market_rows = report.build_polymarket_wallet_market_not_generated_rows(detail_rows)
+
+        self.assertEqual(daily_rows[0]["platform"], "polymarket")
+        self.assertEqual(daily_rows[0]["date_utc"], "2026-02-01")
+        self.assertEqual(daily_rows[0]["active_wallet_count"], "")
+        self.assertEqual(daily_rows[0]["platform_reported_volume"], "123")
+        self.assertEqual(daily_rows[0]["data_status"], "not_generated")
+        self.assertEqual(
+            daily_rows[0]["unavailable_reason"],
+            "polymarket_trade_history_generation_not_run",
+        )
+        self.assertEqual(market_rows[0]["platform_market_id"], "0x" + "a" * 64)
+        self.assertEqual(market_rows[0]["data_status"], "not_generated")
+
+    def test_generate_report_status_only_skips_polymarket_trade_fetch(self):
+        detail_rows = [
+            {
+                "platform": "polymarket",
+                "month_utc": "2026-02",
+                "date_utc": "2026-02-01",
+                "market_type": "hourly",
+                "comparable": "true",
+                "platform_series": "btc-up-or-down-hourly",
+                "platform_event_id": "event-1",
+                "platform_market_id": "0x" + "a" * 64,
+                "title": "Bitcoin Up or Down - February 1",
+                "subtitle": "",
+                "end_time_utc": "2026-02-01T01:00:00Z",
+                "status": "closed",
+                "result": "",
+                "volume": "123",
+                "volume_source": "market.volumeClob",
+                "raw_volume": "123",
+            }
+        ]
+
+        def fail_collect(_detail_rows):
+            raise AssertionError("status-only must not fetch Polymarket wallet trades")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_root = report.ROOT
+            original_collect = report.collect_polymarket_wallet_activity
+            original_load_cached = report.load_cached_detail_rows
+            report.ROOT = Path(tmpdir)
+            report.configure_asset("btc")
+            report.collect_polymarket_wallet_activity = fail_collect
+            report.load_cached_detail_rows = lambda: (detail_rows, [{"platform": "polymarket"}], [])
+            try:
+                generated = report.generate_report(wallet_mode="status-only")
+                with gzip.open(report.POLYMARKET_TRADES_RAW_PATH, "rt", encoding="utf-8") as input_file:
+                    raw_wallet_lines = input_file.readlines()
+            finally:
+                report.ROOT = original_root
+                report.collect_polymarket_wallet_activity = original_collect
+                report.load_cached_detail_rows = original_load_cached
+                report.configure_asset("btc")
+
+        wallet_market_rows = generated[5]
+        wallet_daily_rows = generated[6]
+        self.assertEqual(wallet_market_rows[0]["data_status"], "not_generated")
+        self.assertEqual(wallet_daily_rows[0]["data_status"], "not_generated")
+        self.assertEqual(raw_wallet_lines, [])
+
     def test_collect_polymarket_wallet_activity_streams_raw_and_aggregates(self):
         detail_rows = [
             {
