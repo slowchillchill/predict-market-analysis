@@ -448,15 +448,17 @@ MongoDB MCP 用于允许 Agent Builder/Gemini 对 MongoDB 进行受控查询。�
 后端：
 
 ```text
-Python 3.12
-FastAPI
-uvicorn
-aiohttp
-websockets
-pymongo / motor
-google-genai >= 1.51.0
-structlog
-python-dotenv
+Rust 1.89+
+Tokio
+Axum
+Tower / tower-http
+tokio-tungstenite
+reqwest
+mongodb Rust Driver
+serde / serde_json
+tracing / tracing-subscriber
+dotenvy
+anyhow / thiserror
 ```
 
 前端：
@@ -482,27 +484,62 @@ MongoDB MCP Server
 MongoDB Vector Search
 ```
 
-### 12.1 语言选型：Python first，Rust optional hot path
+### 12.1 原方案框架到 Rust 框架映射
 
-Rust 在性能上确实更有优势，尤其适合 WebSocket collector、orderbook parser、feature engine 这类热路径：
+| 原方案组件 | 原框架 / 库 | Rust 方案 | 用途 |
+|------------|-------------|-----------|------|
+| 后端语言 | Python 3.12 | Rust 1.89+ | 统一后端、collector、feature engine、API server 的实现语言 |
+| Async runtime | `asyncio` | `tokio` | WebSocket、HTTP、MongoDB、SSE、定时任务的异步运行时 |
+| API server | FastAPI | `axum` | REST tools、SSE stream、health check、static frontend fallback |
+| ASGI server | uvicorn | `axum` + `tokio::net::TcpListener` | Cloud Run HTTP 服务入口 |
+| Middleware | FastAPI middleware | `tower` / `tower-http` | timeout、trace、CORS、compression、request limit |
+| HTTP client | `aiohttp` | `reqwest` | Gamma API、Gemini REST API、Cloud Run webhook、外部 price feed |
+| WebSocket client | `websockets` | `tokio-tungstenite` | Polymarket CLOB WS、Chainlink/price WS |
+| MongoDB async driver | `motor` | `mongodb` Rust Driver | Atlas collections、alerts、feature windows、agent summaries |
+| MongoDB sync/admin helper | `pymongo` | `mongodb` Rust Driver | index bootstrap、ping、admin checks |
+| JSON / schema | Python `dict` / pydantic | `serde` / `serde_json` | typed event schema、config、API request/response |
+| Gemini SDK | `google-genai` | `reqwest` 调 Gemini REST API | 低频 Gemini summary；不放在热路径 |
+| Structured logging | `structlog` | `tracing` / `tracing-subscriber` | event latency、collector state、alert lifecycle |
+| `.env` loading | `python-dotenv` | `dotenvy` | local dev config；Cloud Run 生产环境用 Secret Manager 注入 |
+| Error handling | Python exceptions | `anyhow` / `thiserror` | app-level error context + typed domain errors |
+| Tests | `unittest` / `pytest` | `cargo test` | feature engine、time grid、replay、alert scoring |
+| Formatting / lint | black / ruff | `cargo fmt` / `cargo clippy` | Rust code quality gate |
+| Container build | Python Dockerfile | Rust multi-stage Dockerfile | `cargo build --release` 后复制单二进制到 runtime image |
 
-- 更低的运行时开销和内存占用。
-- 更稳定的 p95/p99 延迟。
-- 更适合高吞吐、多市场并发和长期运行的采集进程。
-- 已有 `poly-tx` 的 Rust WebSocket 采集代码可作为后续热路径参考。
+### 12.2 Rust-first 语言选型
 
-但本 hackathon MVP 不建议一开始全量切 Rust。原因：
+后端统一切换为 Rust-first。原因：
 
-- 单个 BTC 5min 市场的事件量不大，Python async 足够支撑 demo 目标。
-- FastAPI、Google SDK、MongoDB SDK、Agent Builder 工具端点和 Gemini 集成用 Python 更快。
-- Dashboard、MongoDB MCP、Agent orchestration 的集成风险高于 collector 性能风险。
-- 参赛评分更看重可演示产品、Agent 集成、UX 和证据链，而不是纯吞吐。
+- 热路径需要尽量稳定的 p95/p99 延迟，Rust 更适合 WebSocket collector、orderbook parser、feature engine 和长期运行服务。
+- Tokio 生态适合同时处理 CLOB WS、price feed、MongoDB 写入、SSE fanout 和定时 summary。
+- 单二进制部署到 Cloud Run 更简单，镜像更小，冷启动和内存占用更容易控制。
+- 本地已有 `poly-tx` 的 Rust WebSocket 采集代码，可复用时间网格和市场切换经验。
 
-推荐路线：
+需要接受的代价：
 
-- MVP：Python async + FastAPI 完成 collector、feature engine、SSE、agent tools。
-- 性能边界：在代码里记录 `event_receive_ts`、`feature_done_ts`、`sse_send_ts`，先用 p95/p99 延迟数据判断是否需要 Rust。
-- 后续优化：如果多市场并发或 p99 延迟不达标，把 collector + feature engine 独立成 Rust service；Python 保留 API、dashboard SSE、Gemini scheduler 和 Agent tools。
+- Google Gemini / Agent Builder 的 Rust 官方 SDK 支持不如 Python 直接；本方案用 `reqwest` 调 REST API，Agent Builder 侧通过 OpenAPI/MCP 集成。
+- Rust 开发速度低于 Python，需要更明确的模块边界和测试。
+- 前端仍保留 SvelteKit + Tailwind + lightweight-charts；把前端也改成 Rust/WASM 会增加交付风险，不利于 hackathon 设计/UX 评分。
+
+Rust 后端模块建议：
+
+```text
+crates/regime-core      # typed events, indicators, fair probability, alert scoring
+crates/regime-collector # CLOB/price WebSocket collector + reconnect/backpressure
+crates/regime-api       # Axum REST tools + SSE + static frontend serving
+crates/regime-agent     # Gemini scheduler, MongoDB MCP-adjacent tool handlers
+crates/regime-replay    # historical replay + validation metrics
+```
+
+参考：
+
+- Tokio: <https://tokio.rs/>
+- Axum: <https://docs.rs/axum/latest/axum/>
+- tokio-tungstenite: <https://docs.rs/tokio-tungstenite/latest/tokio_tungstenite/>
+- reqwest: <https://docs.rs/reqwest/latest/reqwest/>
+- MongoDB Rust Driver: <https://www.mongodb.com/docs/drivers/rust/>
+- Serde: <https://docs.rs/serde/latest/serde/>
+- tracing: <https://docs.rs/tracing/>
 
 ## 13. 资源和容量规划
 
@@ -667,4 +704,4 @@ Hackathon 成功：
 | Live 数据不稳定 | replay demo 作为稳定演示，live 作为附加展示 |
 | Hackathon 新项目规则 | 独立 repo、独立 app、独立 README，不把旧项目包装成扩展 |
 | Vector Search 集成耗时 | Phase 2 先做固定 feature vector，相似窗口检索只查已聚合窗口 |
-| Agent Builder 配置风险 | 先用 FastAPI OpenAPI tools，再接 MongoDB MCP |
+| Agent Builder 配置风险 | 先用 Axum 暴露 OpenAPI-compatible tools，再接 MongoDB MCP |
