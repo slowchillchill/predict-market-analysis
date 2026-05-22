@@ -482,6 +482,28 @@ MongoDB MCP Server
 MongoDB Vector Search
 ```
 
+### 12.1 语言选型：Python first，Rust optional hot path
+
+Rust 在性能上确实更有优势，尤其适合 WebSocket collector、orderbook parser、feature engine 这类热路径：
+
+- 更低的运行时开销和内存占用。
+- 更稳定的 p95/p99 延迟。
+- 更适合高吞吐、多市场并发和长期运行的采集进程。
+- 已有 `poly-tx` 的 Rust WebSocket 采集代码可作为后续热路径参考。
+
+但本 hackathon MVP 不建议一开始全量切 Rust。原因：
+
+- 单个 BTC 5min 市场的事件量不大，Python async 足够支撑 demo 目标。
+- FastAPI、Google SDK、MongoDB SDK、Agent Builder 工具端点和 Gemini 集成用 Python 更快。
+- Dashboard、MongoDB MCP、Agent orchestration 的集成风险高于 collector 性能风险。
+- 参赛评分更看重可演示产品、Agent 集成、UX 和证据链，而不是纯吞吐。
+
+推荐路线：
+
+- MVP：Python async + FastAPI 完成 collector、feature engine、SSE、agent tools。
+- 性能边界：在代码里记录 `event_receive_ts`、`feature_done_ts`、`sse_send_ts`，先用 p95/p99 延迟数据判断是否需要 Rust。
+- 后续优化：如果多市场并发或 p99 延迟不达标，把 collector + feature engine 独立成 Rust service；Python 保留 API、dashboard SSE、Gemini scheduler 和 Agent tools。
+
 ## 13. 资源和容量规划
 
 Demo 默认配置：
@@ -507,6 +529,28 @@ Cloud Run WebSocket/SSE 注意事项：
 参考：
 
 - Cloud Run WebSockets: <https://docs.cloud.google.com/run/docs/triggering/websockets>
+
+### 13.1 当前已搭建环境
+
+截至 2026-05-22，当前本机和云端已经完成以下基础配置：
+
+| 项目 | 当前状态 |
+|------|----------|
+| Google Cloud project | `poly-market-analysis` |
+| Billing / budget | 已由用户配置完成 |
+| gcloud CLI | 已安装，版本 `Google Cloud SDK 569.0.0` |
+| gcloud active account | `awgcoder@gmail.com` |
+| Cloud Run region | `asia-northeast1`（东京） |
+| Compute region | `asia-northeast1`（东京） |
+| Application Default Credentials | 已配置，quota project 为 `poly-market-analysis` |
+| 已启用 API | Cloud Run、Cloud Build、Artifact Registry、Secret Manager、Vertex AI、Compute Engine |
+| Secret Manager | 已创建 `mongodb-uri` 和 `mongodb-db` |
+| MongoDB Atlas | 已创建连接信息，当前本机 `ping` 验证通过 |
+| 本地 `.env` | 已创建，权限 `600`，已加入 `.gitignore` |
+| 本地环境记录 | `LOCAL_ENVIRONMENT.md` 已创建，包含明文环境信息，已加入 `.gitignore` |
+| 本地测试 venv | `.venv-gcp/` 已创建并加入 `.gitignore`，用于 GCP/MongoDB 连通性检查 |
+
+方案文档不记录 MongoDB 密码或完整连接串；本地明文记录只放在被忽略的 `LOCAL_ENVIRONMENT.md`。
 
 ## 14. Dashboard 设计
 

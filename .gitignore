@@ -1,6 +1,7 @@
 AGENTS.md
 .env
 .venv-gcp/
+LOCAL_ENVIRONMENT.md
 __pycache__/
 data/raw/
 outputs/
