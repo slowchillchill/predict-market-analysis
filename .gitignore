@@ -1,4 +1,6 @@
 AGENTS.md
+.env
+.venv-gcp/
 __pycache__/
 data/raw/
 outputs/
