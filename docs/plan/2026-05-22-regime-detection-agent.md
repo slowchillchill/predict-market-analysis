@@ -80,7 +80,8 @@ Polymarket CLOB WS + Chainlink/price feed
   -> feature engine
   -> warning engine
   -> MongoDB alerts/regime_states
-  -> SSE dashboard
+  -> regime-api REST/SSE
+  -> dashboard
 ```
 
 目标：
@@ -89,6 +90,8 @@ Polymarket CLOB WS + Chainlink/price feed
 - dashboard snapshot 每 `1s` 更新。
 - MongoDB 写入失败时不阻塞热路径，先写本地 NDJSON fallback。
 - Gemini 失败或限流不影响预警。
+- `regime-collector` 和 `regime-api` 是逻辑边界；MVP 可以先由单个 `regime-service` binary 承载，代码内仍保持 collector loop、API/SSE、agent tools 的边界。
+- Hackathon demo 默认 `regime-service` 限制小规模并发；如未引入外部 fanout，总体按单区域、低并发演示设计。
 
 ### 4.2 冷路径：Agent explanation / historical reasoning
 
@@ -110,6 +113,13 @@ MongoDB alerts/regime_states/backtest_runs
 - 检索历史相似窗口。
 - 解释最近 alert 的原因。
 - 生成 demo-friendly narrative。
+
+职责边界：
+
+- `regime-agent` 是唯一负责定时触发 Gemini summary、执行 cooldown、写入 `agent_summaries` 的服务。
+- Agent Builder tools 默认只读：查询当前 regime、最近 alerts、相似窗口和 backtest 指标。
+- MongoDB MCP 默认只读；如必须写解释字段，只允许通过 `regime-agent` service identity 写 `agent_summaries`，不允许任意写 market data collections。
+- 手动 explain 也走 `regime-agent`，受 `MANUAL_EXPLAIN_COOLDOWN_SECONDS` 限制。
 
 ## 5. Gemini 调用节流策略
 
@@ -262,7 +272,7 @@ book_update_gap
 
 如果流动性不足，预警等级降级，dashboard 明确显示 `low confidence`。
 
-### P7 — Wallet Concentration
+### P7 — Wallet Concentration（Stretch Goal）
 
 仅在 live 数据源能可靠提供 wallet/session 信息时启用。否则只用于离线回测和历史报告，不放入热路径。
 
@@ -340,6 +350,19 @@ shift_onset_time = first timestamp where:
 - 验证：后续历史窗口
 - demo：挑选一场可复现高波动窗口
 - live：只作为展示，不作为唯一证据
+
+### 9.4 标签、阈值和预警去重闭环
+
+毫秒到秒级预告必须按事件时间闭环验证，避免只做事后检测。
+
+执行步骤：
+
+1. 先用历史 replay 生成 1s、5s、30s horizon 的 `shift_onset_time` 标签。
+2. 用训练窗口调 `score` 权重和各 horizon 的 `EARLY_RISK` 阈值；首版优先 deterministic scoring，不默认引入重模型。
+3. 在 holdout 窗口固定阈值评估，不用验证集结果反调参数。
+4. alert 按 market、direction、onset window 去重；同一方向在 cooldown 内只算一次事件级 alert。
+5. 每个 alert 记录 `alert_time`、`shift_onset_time`、`lead_time_ms`、`horizon`、`state`、`confidence`。
+6. 报告提前预警、同步检测、滞后检测和误报四类结果，不能只报 aggregate AUC。
 
 ## 10. MongoDB 数据模型
 
@@ -441,24 +464,32 @@ Agent Builder 注册工具：
 | `get_backtest_metrics(run_id)` | 查询验证结果 |
 | `generate_market_summary(minutes)` | 汇总最近 15/30 分钟状态 |
 
-MongoDB MCP 用于允许 Agent Builder/Gemini 对 MongoDB 进行受控查询。工具只读为主，写入仅允许写 `agent_summaries` 和解释字段。
+MongoDB MCP 用于允许 Agent Builder/Gemini 对 MongoDB 进行受控查询。工具默认只读；写入不暴露给通用 MCP 查询链路，统一由 `regime-agent` 写 `agent_summaries` 和解释字段。
+
+实现前置 spike：
+
+- 验证 Agent Builder 能调用 Axum 暴露的 OpenAPI-compatible tools。
+- 验证 Rust `reqwest` 能通过 Vertex/Gemini REST API 完成低频 summary 调用。
+- 验证 MongoDB MCP 的认证方式和最小权限配置。
+- 验证当前 MongoDB Atlas tier 支持 Vector Search、time-series collection 和所需 index。
+- 验证 Gemini 3 模型 ID 在当前 Google Cloud project / region 中可用；不可用时改用同赛道允许的可用 Gemini 模型。
 
 ## 12. 技术栈
 
 后端：
 
 ```text
-Rust 1.89+
-Tokio
-Axum
-Tower / tower-http
-tokio-tungstenite
-reqwest
-mongodb Rust Driver
-serde / serde_json
-tracing / tracing-subscriber
-dotenvy
-anyhow / thiserror
+Rust stable, pinned by rust-toolchain.toml
+Tokio 1.x
+Axum 0.8.x
+Tower / tower-http 0.6.x
+tokio-tungstenite, rustls TLS
+reqwest 0.13.x, rustls TLS
+mongodb Rust Driver 3.x, async Tokio path
+serde / serde_json 1.x
+tracing / tracing-subscriber 0.1.x
+dotenvy 0.15.x
+anyhow 1.x / thiserror 2.x
 ```
 
 前端：
@@ -466,7 +497,7 @@ anyhow / thiserror
 ```text
 SvelteKit
 Tailwind CSS
-lightweight-charts
+TradingView Lightweight Charts
 SSE client
 ```
 
@@ -478,11 +509,19 @@ Google Cloud Agent Builder
 Vertex AI Gemini 3
 Secret Manager
 Cloud Logging
-Firebase Hosting or Cloud Run static hosting
+Cloud Run static hosting via Axum, Firebase Hosting optional fallback
 MongoDB Atlas
 MongoDB MCP Server
 MongoDB Vector Search
 ```
+
+构建可复现性要求：
+
+- 应用型 repo 提交 `Cargo.lock`。
+- 提交 `rust-toolchain.toml`，Cloud Build 和本地使用同一 Rust stable toolchain。
+- 热路径 binaries 不启用 MongoDB sync feature；index bootstrap/admin check 放启动任务或独立 binary。
+- `reqwest` 和 `tokio-tungstenite` 默认使用 rustls TLS，避免额外系统 OpenSSL 依赖。
+- 首次 scaffold 后用 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 作为基础质量门。
 
 ### 12.1 原方案框架到 Rust 框架映射
 
@@ -496,7 +535,7 @@ MongoDB Vector Search
 | HTTP client | `aiohttp` | `reqwest` | Gamma API、Gemini REST API、Cloud Run webhook、外部 price feed |
 | WebSocket client | `websockets` | `tokio-tungstenite` | Polymarket CLOB WS、Chainlink/price WS |
 | MongoDB async driver | `motor` | `mongodb` Rust Driver | Atlas collections、alerts、feature windows、agent summaries |
-| MongoDB sync/admin helper | `pymongo` | `mongodb` Rust Driver | index bootstrap、ping、admin checks |
+| MongoDB sync/admin helper | `pymongo` | `mongodb` Rust Driver 独立启动任务/独立 binary | index bootstrap、ping、admin checks；不进入 collector/API 热路径 |
 | JSON / schema | Python `dict` / pydantic | `serde` / `serde_json` | typed event schema、config、API request/response |
 | Gemini SDK | `google-genai` | `reqwest` 调 Gemini REST API | 低频 Gemini summary；不放在热路径 |
 | Structured logging | `structlog` | `tracing` / `tracing-subscriber` | event latency、collector state、alert lifecycle |
@@ -513,23 +552,30 @@ MongoDB Vector Search
 - 热路径需要尽量稳定的 p95/p99 延迟，Rust 更适合 WebSocket collector、orderbook parser、feature engine 和长期运行服务。
 - Tokio 生态适合同时处理 CLOB WS、price feed、MongoDB 写入、SSE fanout 和定时 summary。
 - 单二进制部署到 Cloud Run 更简单，镜像更小，冷启动和内存占用更容易控制。
-- 本地已有 `poly-tx` 的 Rust WebSocket 采集代码，可复用时间网格和市场切换经验。
+- 本地 `poly-tx` 仅作为接口经验和实现模式参考；hackathon 提交项目会在 contest period 内重新实现最小 collector，不复制既有项目代码。
 
 需要接受的代价：
 
-- Google Gemini / Agent Builder 的 Rust 官方 SDK 支持不如 Python 直接；本方案用 `reqwest` 调 REST API，Agent Builder 侧通过 OpenAPI/MCP 集成。
+- Google Gemini / Agent Builder 的 Rust 官方 SDK 支持不如 Python 直接；本方案优先用 `reqwest` 调 REST API，Agent Builder 侧通过 OpenAPI/MCP 集成，并在 Phase 0 先做 spike。若 Rust REST 集成被阻塞，允许引入最薄的 Python/TypeScript/Go bridge，只负责 Agent/Gemini 调用，不进入热路径。
 - Rust 开发速度低于 Python，需要更明确的模块边界和测试。
-- 前端仍保留 SvelteKit + Tailwind + lightweight-charts；把前端也改成 Rust/WASM 会增加交付风险，不利于 hackathon 设计/UX 评分。
+- 前端仍保留 SvelteKit + Tailwind + TradingView Lightweight Charts；SvelteKit 使用 static adapter/client-side dashboard，Rust Axum 提供 REST/SSE 和静态文件服务。把前端也改成 Rust/WASM 会增加交付风险，不利于 hackathon 设计/UX 评分。
+
+TradingView 说明：
+
+- 这里的 TradingView 架构指 TradingView 维护的开源 `Lightweight Charts` 客户端库。
+- 不使用 TradingView hosted widget，也不使用 Advanced Charts。
+- Lightweight Charts 不自带市场数据；所有数据由本项目 Rust/Axum REST/SSE 提供。
+- 若后续需要内置画线工具、图表布局保存或更复杂指标，再评估 Advanced Charts；hackathon MVP 不需要。
 
 Rust 后端模块建议：
 
 ```text
 crates/regime-core      # typed events, indicators, fair probability, alert scoring
-crates/regime-collector # CLOB/price WebSocket collector + reconnect/backpressure
-crates/regime-api       # Axum REST tools + SSE + static frontend serving
-crates/regime-agent     # Gemini scheduler, MongoDB MCP-adjacent tool handlers
-crates/regime-replay    # historical replay + validation metrics
+apps/regime-service     # Axum REST/SSE/static frontend + optional single-market live collector for demo
+apps/regime-replay      # historical replay + validation metrics
 ```
+
+MVP 先控制在一个 shared crate + 两个 binary。只有当 live collector、API 和 agent scheduler 的生命周期明显冲突时，再拆出 `apps/regime-collector` 和 `apps/regime-agent`，避免为 hackathon 过早拆分五个 crate。
 
 参考：
 
@@ -547,21 +593,25 @@ Demo 默认配置：
 
 | 组件 | 配置 |
 |------|------|
-| `regime-collector` | Cloud Run min=1 max=1, 1 vCPU, 1GiB RAM |
-| `regime-agent-app` | Cloud Run min=1, 0.5-1 vCPU, 512MiB-1GiB RAM |
-| Web dashboard | Firebase Hosting 或 Cloud Run static |
+| `regime-service` | Cloud Run service，min=1 max=1，1 vCPU，1GiB RAM，承载 Axum REST/SSE/static frontend 和 demo 单市场 live collector |
+| `regime-agent-app` | Cloud Run service/job，min=0 max=1，0.5-1 vCPU，512MiB-1GiB RAM，低频 Gemini summary 和 Agent tools |
+| Web dashboard | 默认由 `regime-service` 静态托管；Firebase Hosting 只作可选 fallback |
 | MongoDB Atlas | 先按 M10 dedicated 规划；若实测低 tier 支持所需功能再降级 |
 | SSE 并发 | demo 限制 10-25 clients |
 | 写入能力 | 单市场 50-100 writes/sec burst |
 | TTL 存储 | 7 天 1-10GB 起步 |
 | Gemini | 默认 2 calls/hour，最高 4 calls/hour |
+| Artifact Registry | `asia-northeast1` Docker repository，用于 Cloud Run image |
+| Service account | 最小权限：Secret Manager secretAccessor、Cloud Logging writer、Cloud Run invocation 需要时单独授权 |
 
 Cloud Run WebSocket/SSE 注意事项：
 
 - WebSocket/SSE 属于长 HTTP request，要设置 request timeout。
 - 客户端必须支持 reconnect。
 - 不依赖单个连接永久不断。
-- collector 使用单实例，避免重复订阅同一个市场。
+- demo 默认 `regime-service` 使用 max=1，避免多实例下重复订阅同一市场和 SSE 状态同步问题。
+- SSE request timeout 建议设置到 demo 所需最大值，例如 60 分钟；客户端按 30-60 秒心跳和断线重连处理。
+- 如果后续拆分多实例 API，需要引入外部 fanout 或从 MongoDB latest snapshot 轮询重建状态，不能依赖单实例内存。
 
 参考：
 
@@ -569,7 +619,7 @@ Cloud Run WebSocket/SSE 注意事项：
 
 ### 13.1 当前已搭建环境
 
-截至 2026-05-22，当前本机和云端已经完成以下基础配置：
+截至 2026-05-23，当前本机和云端已经完成以下基础配置：
 
 | 项目 | 当前状态 |
 |------|----------|
@@ -585,7 +635,7 @@ Cloud Run WebSocket/SSE 注意事项：
 | MongoDB Atlas | 已创建连接信息，当前本机 `ping` 验证通过 |
 | 本地 `.env` | 已创建，权限 `600`，已加入 `.gitignore` |
 | 本地环境记录 | `LOCAL_ENVIRONMENT.md` 已创建，包含明文环境信息，已加入 `.gitignore` |
-| 本地测试 venv | `.venv-gcp/` 已创建并加入 `.gitignore`，用于 GCP/MongoDB 连通性检查 |
+| 本地测试 venv | `.venv-gcp/` 已创建并加入 `.gitignore`，仅用于 GCP/MongoDB 连通性检查，不属于提交项目运行栈 |
 
 方案文档不记录 MongoDB 密码或完整连接串；本地明文记录只放在被忽略的 `LOCAL_ENVIRONMENT.md`。
 
@@ -593,16 +643,22 @@ Cloud Run WebSocket/SSE 注意事项：
 
 默认暗色，支持浅色切换。
 
-主要区域：
+MVP 首屏：
+
+- P_mid vs P_fair 曲线
+- 当前 regime / confidence badge
+- Alert stream
+- Live / replay toggle
+- Gemini summary：最近 15/30 分钟摘要，明确生成时间和覆盖窗口
+
+后续增强区域：
 
 - 当前市场状态卡片
-- P_mid vs P_fair 曲线
 - Regime timeline
-- Alert stream
 - Feature bars：fair_gap、OFI、spread、depth、volume acceleration
-- Gemini summary：最近 15/30 分钟摘要
 - Similar history：MongoDB Vector Search 返回的相似窗口
 - Validation panel：lead time、false alert、precision、recall
+- 浅色/暗色切换
 
 关键 UI 原则：
 
@@ -620,6 +676,8 @@ Cloud Run WebSocket/SSE 注意事项：
 - 添加 hosted URL 占位。
 - 明确 MongoDB Track。
 - 明确 Google Cloud + Agent Builder + Gemini 3 + MongoDB MCP。
+- 写清 `poly-tx` 只作为经验参考，参赛 collector 在 contest period 内重新实现。
+- 完成集成 spike：Agent Builder 调 Axum OpenAPI tool、Rust `reqwest` 调 Gemini REST、MongoDB MCP 最小权限、Vector Search tier、Gemini 模型 ID。
 
 ### Phase 1 — Replay + Feature Engine
 
@@ -628,9 +686,12 @@ Cloud Run WebSocket/SSE 注意事项：
 - 实现 fair probability baseline。
 - 实现 feature windows。
 - 实现 alert engine。
+- 实现 shift label generator。
+- 实现 1s/5s/30s horizon 阈值调参。
+- 实现 alert 去重和 cooldown。
 - 输出 backtest CSV/JSON。
 
-可演示物：历史窗口 replay 时 dashboard 动起来。
+可演示物：历史窗口 replay 时 dashboard 动起来，并输出 lead-time / false-alert 报告。
 
 ### Phase 2 — MongoDB Core
 
@@ -656,8 +717,8 @@ Cloud Run WebSocket/SSE 注意事项：
 
 ### Phase 4 — Agent Builder + Gemini
 
-- 配置 MongoDB MCP。
-- 配置 Agent Builder tools。
+- 根据 Phase 0 spike 结果配置 MongoDB MCP。
+- 根据 Phase 0 spike 结果配置 Agent Builder tools。
 - 实现 Gemini summary scheduler。
 - 实现 15/30 分钟可配置节流。
 - 实现 manual explain cooldown。
@@ -674,25 +735,52 @@ Cloud Run WebSocket/SSE 注意事项：
 - 录制英文 3 分钟 demo。
 - 确认 public repo、license、README、setup instructions 完整。
 
-## 16. 成功标准
+## 16. 验收标准
 
-Hackathon 成功：
+验收按 gate 判断，不用“看起来能跑”作为完成标准。
 
-- Hosted web app 可访问。
-- Agent Builder + Gemini 3 可用。
-- MongoDB MCP 被实际用于查询。
-- MongoDB Vector Search 被用于相似窗口检索。
-- Demo 展示 live/replay dashboard。
-- Demo 展示 Gemini summary 不是高频调用，而是受控低频分析。
-- README 说明配置、运行、成本保护和验证方法。
+### 16.1 Hackathon 提交 gate
 
-技术成功：
+- 独立参赛 repo 在 contest period 内创建，README、license、setup instructions 完整。
+- Hosted web app URL 可访问，并能在 Web 平台完成主要演示流程。
+- 明确选择 MongoDB Track，实际使用 MongoDB Atlas、MongoDB MCP 或 track 要求的 MongoDB partner product。
+- 实际使用 Google Cloud、Agent Builder 和 Gemini；不是只在 README 中提到。
+- 提供不超过 3 分钟英文 demo video，视频内容和 hosted app 行为一致。
+- 不复制既有 `poly-tx` 代码；只参考接口经验并重新实现参赛 collector。
 
-- 热路径不依赖 Gemini。
+### 16.2 系统功能 gate
+
+- Replay 模式可复现同一个历史窗口，并驱动 dashboard 更新。
+- Live 模式至少能稳定跑 3 个真实 5min market window；如果 live 数据不稳定，demo 以 replay 为主、live 为附加展示。
+- Dashboard MVP 包含 P_mid vs P_fair、regime/confidence badge、alert stream、live/replay toggle、Gemini summary。
+- `regime-service` REST/SSE 可用，dashboard snapshot 至少每 `1s` 更新一次。
+- MongoDB collections 写入可验证：`market_ticks`、`feature_windows`、`regime_states`、`alerts`、`agent_summaries`、`backtest_runs`。
+- Gemini summary 按配置的 15/30 分钟节流运行；重复打开 dashboard 不重复触发 Gemini 调用。
+
+### 16.3 预警有效性 gate
+
+- 生成 1s、5s、30s horizon 的 event-based shift labels。
+- 每个 alert 记录 `alert_time`、`shift_onset_time`、`lead_time_ms`、`horizon`、`confidence`。
+- 报告 median lead time、p75 lead time、false alerts per market、precision、recall、horizon PR-AUC 和 ablation。
+- 报告提前预警、同步检测、滞后检测和误报四类结果。
+- 至少一个可复现 high-volatility replay 窗口展示 `alert_time < shift_onset_time` 的提前预警案例。
+- 验证过程不使用未来数据调参；holdout 窗口阈值固定。
+
+### 16.4 性能和可靠性 gate
+
+- 热路径不调用 Gemini，不依赖 Agent Builder，不等待 Vector Search。
 - p95 feature processing latency `<500ms`。
-- 每市场 false alerts 可统计。
-- 能给出 1s/5s/30s horizon lead-time 指标。
-- 能说明哪些预警是提前、哪些只是同步检测。
+- MongoDB 写入失败时不阻塞热路径，能落本地 NDJSON fallback。
+- SSE/WebSocket 客户端断线后能自动 reconnect。
+- Cloud Run resource config 明确：region、min/max instances、request timeout、service account、Secret Manager 注入。
+- 成本保护生效：Gemini 默认 2 calls/hour，最高 4 calls/hour，可通过 env 关闭。
+
+### 16.5 文档和复现 gate
+
+- README 提供本地 replay、Cloud Run deploy、Secret Manager 配置、MongoDB index 初始化命令。
+- 提供一份固定 demo 数据或 replay window id，评委可按步骤复现。
+- 提供 `backtest_runs` 输出样例和 validation report。
+- 提供已知限制：低流动性、stale data、wallet concentration stretch goal、Gemini/Agent Bridge fallback 条件。
 
 ## 17. 主要风险和处理
 
@@ -704,4 +792,7 @@ Hackathon 成功：
 | Live 数据不稳定 | replay demo 作为稳定演示，live 作为附加展示 |
 | Hackathon 新项目规则 | 独立 repo、独立 app、独立 README，不把旧项目包装成扩展 |
 | Vector Search 集成耗时 | Phase 2 先做固定 feature vector，相似窗口检索只查已聚合窗口 |
-| Agent Builder 配置风险 | 先用 Axum 暴露 OpenAPI-compatible tools，再接 MongoDB MCP |
+| Agent Builder 配置风险 | Phase 0 先用 Axum 暴露 OpenAPI-compatible tools 做 spike，再接 MongoDB MCP |
+| Gemini / Agent Builder Rust SDK 缺口 | Rust 热路径保留；Agent/Gemini 优先 REST，必要时用最薄 Python/TypeScript/Go bridge |
+| SSE 长连接影响热路径 | MVP 用 `regime-service` max=1 控制并发；如拆分多实例，引入外部 fanout 或 MongoDB latest snapshot 同步 |
+| MVP 范围过大 | Phase 1 只做 replay、核心 features、alert、MVP dashboard；wallet concentration、完整 validation panel、复杂 UI 放 stretch goal |
