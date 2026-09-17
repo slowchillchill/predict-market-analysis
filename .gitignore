@@ -15,3 +15,4 @@ data/raw/*_updown_polymarket_trades_*.jsonl.gz
 outputs/*_updown_wallet_activity_by_market_*.csv
 outputs/*_updown_wallet_activity_daily_by_platform_*.csv
 outputs/*_updown_wallet_activity_monthly_by_platform_*.csv
+*.md
