@@ -3,6 +3,7 @@ AGENTS.md
 .venv-gcp/
 LOCAL_ENVIRONMENT.md
 __pycache__/
+.venv-btc5m/
 data/raw/
 outputs/
 reports/btc_updown_volume_summary_*.md
