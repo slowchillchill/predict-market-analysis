@@ -6,5 +6,7 @@ __pycache__/
 data/raw/
 outputs/
 *.md
+!README.md
+!README.zh-CN.md
 !docs/updown_daily.md
 !docs/updown_poster.md
