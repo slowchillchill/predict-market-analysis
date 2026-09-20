@@ -1,0 +1,105 @@
+# 加密货币 Up/Down 英文海报
+
+`scripts/polymarket_updown_poster.py` 读取本地数据库，复用已确认的深蓝 Web3 背景，
+生成 1600 × 2000、4:5 竖版 PNG 和配套英文推文。日期、英文文字和数字由程序排版，日常运行完全离线。
+
+## 安装与运行
+
+在仓库根目录安装海报依赖；现有采集环境可以继续使用：
+
+```bash
+.venv-btc5m/bin/python -m pip install -r requirements-poster.txt
+```
+
+生成 UTC 2026-09-17 结束的目标市场海报：
+
+```bash
+.venv-btc5m/bin/python scripts/polymarket_updown_poster.py --date 2026-09-18
+```
+
+之后只需替换日期。完整参数示例：
+
+```bash
+.venv-btc5m/bin/python scripts/polymarket_updown_poster.py \
+  --date 2026-09-18 \
+  --db data/raw/btc5m.sqlite3 \
+  --output-dir outputs/posters
+```
+
+输出三个对应日期的文件，重复生成同一日期会更新对应文件：
+
+- `outputs/posters/updown_2026-09-17.png`：可用于 X 的英文海报。
+- `outputs/posters/updown_2026-09-17.json`：当前日、前日的未舍入数据、机器人规则和海报显示值。
+- `outputs/posters/updown_2026-09-17_tweet.md`：可直接粘贴到 X 的完整英文推文正文。
+
+数据库使用只读连接；程序不会启动采集或修改原有成交。退出码 `0` 表示已生成，
+`2` 表示所选日期未完整采集、此次未生成海报。该行为沿用现有完整日统计口径。
+
+## 推文与浏览器发布
+
+通过 GPT 桌面应用控制浏览器发布时，将同一日期的 `.png` 和 `_tweet.md` 一起交给 AI，
+说明“将 Markdown 文件全文作为推文正文，保留换行，并附上这张海报”。
+Markdown 文件仅包含待发布正文，不夹带标题标记、代码围栏、图片路径或操作说明。
+相较 JSON，它便于直接阅读与粘贴，无须提取字段或处理换行转义。
+现有 `.json` 继续用于数据核对和程序取数；将来需要通过程序接口发布时，可由程序读取正文文件。
+
+推文与海报使用同一次只读查询得到的数据，格式如下：
+
+```text
+Polymarket Crypto Up/Down | Sep 17, 2026 UTC
+
+20.11M USDC wallet volume (-1.25%)
+14,774 trading wallets (+14.38%)
+293 suspected bot wallets: 55.12% of volume
+
+More wallets, lower volume.
+Markets ending that day; buys + sells. Bot criteria in chart.
+#Polymarket
+```
+
+推文成交额达到一百万 USDC 时用 `M` 表示，按未舍入金额保留两位小数；低于一百万时显示完整金额。
+环比和机器人占比复用海报显示值。前日缺失或基数为零时，环比显示 `N/A` 并说明原因。
+只有钱包数和成交额的环比都显示明确涨跌时才生成趋势句；缺失或显示 `0.00%` 时省略趋势句，
+不推断变化原因，也不自动评价涨跌幅度。
+
+## 统计与显示
+
+- 范围：文档定义的 38 个 Polymarket 加密货币 Up/Down 系列。
+- 日期：市场 `endDate` 所属 UTC 日，包含这些市场的全部提前和跨日成交。
+- 市场数：当天已完整采集的全部目标市场数。
+- 钱包数：跨当天全部目标市场去重。
+- 钱包成交额：逐条买入支出加卖出收入，使用库内整数微 USDC；不等同于只计单边的市场成交量。
+- 环比：`(当日值 − 前日值) / 前日值 × 100%`，按未舍入金额计算。
+- 疑似机器人：同一钱包在该批市场中的平均成交间隔不超过 60 秒，首末成交跨度至少 90 分钟，
+  不要求参与特定数量的市场。平均间隔为 `(最后成交时间 − 最早成交时间) / (记录数 − 1)`。
+- 疑似机器人成交额占比：被筛选钱包的全部成交额除以当天全部钱包成交额。属于行为筛选，不能确认身份。
+
+金额与百分比使用十进制 ROUND_HALF_UP 保留两位小数；金额完整显示、带千分位和 USDC 单位，
+市场数及钱包数保持整数。正增长带 `+`，负增长带 `-`；舍入到零的变化显示 `0.00%`。
+
+前日未完整采集时，当前日仍可生成海报，环比显示 `N/A` 和 `prior day unavailable`。
+前日基数为零时显示 `N/A` 和 `prior day = 0`；当日成交额为零时疑似机器人金额占比也显示 `N/A`。
+这些情况不会用零冒充未知变化。
+
+版式沿用确认稿：标题两行、成交额通栏、市场数和钱包数双栏、独立疑似机器人区块。
+排版按字体实际宽度调整字号，不截断金额、不自动换成长短失衡的行。PNG 为不透明 RGB，
+不同查看器的背景颜色不会改变成品外观。
+
+## 素材和实现
+
+- 固定背景：`assets/posters/updown_background_v1.png`，由内置 imagegen 生成并经用户确认。
+- 字体：`assets/fonts/Inter.ttf`，随项目附带；许可为同目录的 `Inter-OFL.txt`。
+- 字体来源：[Google Fonts 的 Inter](https://github.com/google/fonts/tree/main/ofl/inter)。
+- 数据查询：`sql/updown_poster.sql`，复用现有系列目录和采集完整性视图。
+- 图片排版使用 [Pillow 字体与文字测量接口](https://pillow.readthedocs.io/en/stable/reference/ImageFont.html)。
+
+不需要再次调用图片生成服务，也不依赖本机安装特定字体。
+
+## 验证
+
+```bash
+.venv-btc5m/bin/python -m unittest discover -s tests -v
+```
+
+海报测试覆盖机器人筛选边界、跨市场去重、UTC 结束日边界、前日缺口、零基数、两位小数、
+只读数据库、PNG 尺寸与透明度、长数字的文本边界及货币单位基线。

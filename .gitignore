@@ -6,3 +6,5 @@ __pycache__/
 data/raw/
 outputs/
 *.md
+!docs/updown_daily.md
+!docs/updown_poster.md

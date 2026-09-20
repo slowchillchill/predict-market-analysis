@@ -1,5 +1,8 @@
 # BTC 5 分钟逐笔采集与日统计
 
+全系列采集和新的 UTC 市场结束日口径见 [加密货币 Up/Down 全系列采集](updown_daily.md)。
+本页描述保留的 BTC 5 分钟开始日口径；两种统计共用逐笔数据。
+
 入口为 `scripts/polymarket_btc5m_daily.py`，只覆盖 Polymarket 的
 `btc-up-or-down-5m` 系列。逐笔明细保存在 SQLite，钱包与日汇总由普通 SQL
 和非物化视图按需计算。旧版跨平台报表程序及其 2026 年 2—4 月数据已清理；

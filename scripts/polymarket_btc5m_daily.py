@@ -122,7 +122,7 @@ def trade_params(condition: str) -> dict:
 def discover(db: sqlite3.Connection, client: Client, start: date, end: date) -> None:
     pending = db.execute(
         "SELECT slug FROM markets WHERE date_utc >= ? AND date_utc < ? "
-        "AND condition_id IS NULL ORDER BY slug", (start.isoformat(), end.isoformat())
+        "AND slug GLOB 'btc-updown-5m-*' AND condition_id IS NULL ORDER BY slug", (start.isoformat(), end.isoformat())
     ).fetchall()
     for offset in range(0, len(pending), DISCOVERY_BATCH_SIZE):
         slugs = [row["slug"] for row in pending[offset:offset + DISCOVERY_BATCH_SIZE]]
@@ -227,6 +227,7 @@ def collect(db: sqlite3.Connection, client: Client, start: date, end: date) -> N
     pending = db.execute(
         "SELECT m.slug FROM markets m JOIN collection_progress p ON p.market_slug=m.slug "
         "WHERE m.date_utc >= ? AND m.date_utc < ? AND m.condition_id IS NOT NULL "
+        "AND m.slug GLOB 'btc-updown-5m-*' "
         "AND p.completed_at IS NULL ORDER BY m.slug", (start.isoformat(), end.isoformat()),
     ).fetchall()
     for index, row in enumerate(pending, 1):
@@ -336,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         while day < args.end_date:
             state = coverage(db, day.isoformat())
             count = db.execute("SELECT COUNT(*) FROM trades t JOIN markets m ON m.slug=t.market_slug "
-                               "WHERE m.date_utc=?", (day.isoformat(),)).fetchone()[0]
+                               "WHERE m.date_utc=? AND m.slug GLOB 'btc-updown-5m-*'", (day.isoformat(),)).fetchone()[0]
             print(f"{day}: 完成 {state['completed_markets']}/288 市场，"
                   f"{state['committed_pages']} 页，{count} 条，缺口 {288-state['completed_markets']}")
             all_complete = all_complete and bool(state["is_complete"])

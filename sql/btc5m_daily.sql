@@ -1,4 +1,9 @@
 -- 普通非物化视图；不保存市场或每日金额缓存。金额单位均为微 USDC。
+-- 重建视图，使既有数据库也应用系列范围；不改动任何成交或采集进度。
+DROP VIEW IF EXISTS btc5m_daily_summary;
+DROP VIEW IF EXISTS btc5m_wallet_ranked;
+DROP VIEW IF EXISTS btc5m_wallet_daily;
+DROP VIEW IF EXISTS btc5m_coverage;
 CREATE VIEW IF NOT EXISTS btc5m_coverage AS
 SELECT m.date_utc, 288 AS expected_markets,
        COUNT(m.condition_id) AS discovered_markets,
@@ -6,6 +11,7 @@ SELECT m.date_utc, 288 AS expected_markets,
        COALESCE(SUM(p.committed_page), 0) AS committed_pages,
        COUNT(*) = 288 AND COUNT(p.completed_at) = 288 AS is_complete
 FROM markets m LEFT JOIN collection_progress p ON p.market_slug = m.slug
+WHERE m.slug GLOB 'btc-updown-5m-*'
 GROUP BY m.date_utc;
 
 -- 完整日才进入统计视图；缺失或失败的市场不会被计为零成交。
@@ -13,6 +19,7 @@ CREATE VIEW IF NOT EXISTS btc5m_wallet_daily AS
 SELECT m.date_utc, t.wallet, SUM(t.amount_micro_usdc) AS amount_micro_usdc
 FROM trades t JOIN markets m ON m.slug = t.market_slug
 JOIN btc5m_coverage c ON c.date_utc = m.date_utc AND c.is_complete
+WHERE m.slug GLOB 'btc-updown-5m-*'
 GROUP BY m.date_utc, t.wallet;
 
 CREATE VIEW IF NOT EXISTS btc5m_wallet_ranked AS
