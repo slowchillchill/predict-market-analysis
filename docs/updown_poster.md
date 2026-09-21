@@ -11,26 +11,26 @@
 .venv-btc5m/bin/python -m pip install -r requirements-poster.txt
 ```
 
-生成 UTC 2026-09-17 结束的目标市场海报：
+生成 UTC 2026-09-20 结束的目标市场海报：
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_poster.py --date 2026-09-18
+.venv-btc5m/bin/python scripts/polymarket_updown_poster.py --date 2026-09-20
 ```
 
 之后只需替换日期。完整参数示例：
 
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_updown_poster.py \
-  --date 2026-09-18 \
+  --date 2026-09-20 \
   --db data/raw/btc5m.sqlite3 \
   --output-dir outputs/posters
 ```
 
 输出三个对应日期的文件，重复生成同一日期会更新对应文件：
 
-- `outputs/posters/updown_2026-09-17.png`：可用于 X 的英文海报。
-- `outputs/posters/updown_2026-09-17.json`：当前日、前日的未舍入数据、机器人规则和海报显示值。
-- `outputs/posters/updown_2026-09-17_tweet.md`：可直接粘贴到 X 的完整英文推文正文。
+- `outputs/posters/updown_2026-09-20.png`：可用于 X 的英文海报。
+- `outputs/posters/updown_2026-09-20.json`：当前日、前日的未舍入数据、机器人规则和海报显示值。
+- `outputs/posters/updown_2026-09-20_tweet.md`：可直接粘贴到 X 的完整英文推文正文。
 
 数据库使用只读连接；程序不会启动采集或修改原有成交。退出码 `0` 表示已生成，
 `2` 表示所选日期未完整采集、此次未生成海报。该行为沿用现有完整日统计口径。

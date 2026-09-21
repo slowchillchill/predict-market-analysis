@@ -38,7 +38,7 @@ class UpdownTests(unittest.TestCase):
 
     def discover(self, events, series="btc-up-or-down-5m"):
         client = Mock()
-        client.get.side_effect = [[dict(slug=series, id="123")], events]
+        client.get.side_effect = [[dict(slug=series, id="123")], {"events": events}]
         up.discover_series(self.db, client, series, START, END)
         return client
 
@@ -82,11 +82,22 @@ class UpdownTests(unittest.TestCase):
         before = [tuple(row) for row in self.db.execute("SELECT * FROM collection_progress ORDER BY market_slug")]
         client = Mock()
         client.get.side_effect = [[dict(slug="btc-up-or-down-5m", id="123")],
-                                  [event("keep", "2026-09-17T00:00:00Z"), event("resume", "2026-09-17T00:05:00Z")],
-                                  [event("third", "2026-09-17T00:10:00Z")]]
-        with patch.object(up, "EVENT_PAGE_SIZE", 2):
+                                  {"events": [event("keep", "2026-09-17T00:00:00Z"), event("resume", "2026-09-17T00:05:00Z")],
+                                   "next_cursor": "server-issued-cursor"},
+                                  {"events": [event("third", "2026-09-17T00:10:00Z")], "next_cursor": None}]
+        # 未满页仍有游标时必须继续；终页可省略游标或返回 null。
+        with patch.object(up, "EVENT_PAGE_SIZE", 100):
             up.discover_series(self.db, client, "btc-up-or-down-5m", START, END)
-        self.assertEqual(client.get.call_args.args[1]["offset"], 2)
+        self.assertEqual(client.get.call_count, 3)
+        first, second = client.get.call_args_list[1:]
+        self.assertEqual(first.args[0], "https://gamma-api.polymarket.com/events/keyset")
+        self.assertNotIn("offset", first.args[1])
+        self.assertNotIn("after_cursor", first.args[1])
+        self.assertEqual(second.args[1], {**first.args[1], "after_cursor": "server-issued-cursor"})
+        self.assertEqual(first.args[1]["series_id"], "123")
+        self.assertEqual(first.args[1]["end_date_min"], "2026-09-17T00:00:00+00:00")
+        self.assertEqual(first.args[1]["end_date_max"], "2026-09-18T00:00:00+00:00")
+        self.assertIsNotNone(self.db.execute("SELECT 1 FROM markets WHERE slug='third'").fetchone())
         self.assertEqual(before, [tuple(row) for row in self.db.execute(
             "SELECT * FROM collection_progress WHERE market_slug IN ('keep','resume') ORDER BY market_slug")])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 2)

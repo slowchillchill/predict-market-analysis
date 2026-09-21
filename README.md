@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Collect trade records from Polymarket crypto Up/Down markets, analyze wallet activity in SQLite, and generate daily reports and English posters for X.
+Collect trade records from Polymarket crypto Up/Down markets, analyze wallet activity in SQLite, and generate daily reports, daily and weekly posters, and English post text for X.
 
 The main workflow covers 38 market series and groups markets by their **UTC end date**. Collection is resumable; reporting and poster generation run offline against a read-only database connection. This repository contains the tools, tests, and poster assets; download market data locally before generating reports.
 
@@ -12,6 +12,7 @@ The main workflow covers 38 market series and groups markets by their **UTC end 
 - Store trade records and pagination progress in SQLite, with each page committed atomically.
 - Export daily wallet volume, unique wallet counts, and the top 200 wallets to CSV, alongside a Chinese Markdown report.
 - Generate a 1600 × 2000 English PNG poster, supporting JSON, and English post text for X.
+- Generate burgundy-and-gold weekly posters with week-over-week comparisons, a seven-day chart, asset shares, and suspected bot activity; weekly post text fits ordinary X posts.
 - Query coverage and wallet rankings through SQL views.
 - Retain the original BTC 5-minute workflow for historical comparisons.
 
@@ -69,6 +70,8 @@ This example collects markets ending on September 17 and 18, 2026 (UTC). Replace
 
 Press `Ctrl+C` to stop and rerun the same command to resume. Completed markets are skipped. Run only one collector per database at a time. The default database keeps its historical name, `btc5m.sqlite3`, and is shared by both workflows; no separate copy of trade data is needed.
 
+Market discovery uses Gamma `/events/keyset`, passing the returned `next_cursor` as `after_cursor` for the next page until no cursor remains.
+
 ### 3. Export a daily report
 
 After collection has created the database and installed the Up/Down views:
@@ -102,6 +105,24 @@ This writes `updown_2026-09-18.png`, `updown_2026-09-18.json`, and `updown_2026-
 The current day must be complete. If the previous day is incomplete or its comparison value is zero, the affected day-over-day comparison displays `N/A`. The background and Inter font are bundled, so rendering needs no image-generation service or system font installation.
 
 For these workflows, exit code `0` means success, `2` indicates incomplete coverage (argument errors also use `2`), and `130` indicates an interrupted collection. CLI help, progress messages, and daily Markdown reports are currently in Chinese; posters and post text are in English.
+
+### 5. Generate last week's poster and post text
+
+```bash
+.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py
+```
+
+The default selects the previous complete Monday-to-Sunday week using the UTC date at startup. To select a specific week:
+
+```bash
+.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py --week-start 2026-09-14
+```
+
+This writes `updown_weekly_2026-09-14_2026-09-20.png`, matching `.json`, and `_tweet.md` files under `outputs/posters/`. It reads the local database without collecting data. All seven target days must be complete; comparisons use the preceding complete week and display `N/A` for missing or zero baselines.
+
+Weekly wallets are deduplicated across the entire week. Suspected bots are classified daily: the weekly count is the union of flagged wallets, and bot volume includes only each flagged wallet's volume in the corresponding day's markets. Post text keeps the core figures, leaves detailed methodology in the chart, and includes no narrative takeaway. The template uses a 280-character budget and shortens supporting text when numbers require more space.
+
+For scheduling, run the command without a date argument so each invocation selects the previous week automatically. Timers are local configuration and are not installed by cloning this repository. See the [weekly poster guide](docs/updown_weekly_poster.md).
 
 ## How to interpret the data
 
@@ -148,6 +169,7 @@ Detailed guides are currently in Chinese:
 
 - [All-series collection and reporting](docs/updown_daily.md)
 - [Poster generation and metric definitions](docs/updown_poster.md)
+- [Weekly posters, post text, and scheduled runs](docs/updown_weekly_poster.md)
 - [Legacy BTC 5-minute guide](README_BTC5M.md)
 - [BTC collector implementation notes](docs/btc5m_daily.md)
 - [Market-series inventory](reports/crypto_updown_market_types_2026-09-17.md)

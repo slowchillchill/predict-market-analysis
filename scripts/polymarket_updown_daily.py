@@ -25,6 +25,7 @@ TARGET_SERIES = {
        for coin in ("btc", "eth", "solana", "xrp", "dogecoin", "bnb", "hype")},
 }
 GAMMA_SERIES = "https://gamma-api.polymarket.com/series"
+GAMMA_EVENTS_KEYSET = "https://gamma-api.polymarket.com/events/keyset"
 EVENT_PAGE_SIZE = 100
 
 
@@ -52,13 +53,17 @@ def discover_series(db: sqlite3.Connection, client: core.Client, series: str,
                     start: date, end: date) -> None:
     series_rows = client.get(GAMMA_SERIES, {"slug": series})
     series_id = next(row["id"] for row in series_rows if row["slug"] == series)
-    offset = 0
+    cursor = None
     while True:
-        events = client.get(core.GAMMA_EVENTS, {
+        params = {
             "series_id": series_id, "end_date_min": midnight(start).isoformat(),
             "end_date_max": midnight(end).isoformat(), "limit": EVENT_PAGE_SIZE,
-            "offset": offset, "order": "id", "ascending": "true",
-        })
+            "order": "id", "ascending": "true",
+        }
+        if cursor:
+            params["after_cursor"] = cursor
+        page = client.get(GAMMA_EVENTS_KEYSET, params)
+        events = page["events"]
         with db:
             for event in events:
                 membership = {s["slug"] for s in event.get("series", [])}
@@ -87,9 +92,9 @@ def discover_series(db: sqlite3.Connection, client: core.Client, series: str,
                         "ON CONFLICT(market_slug) DO UPDATE SET query_params=excluded.query_params",
                         (slug, json.dumps(core.trade_params(market["conditionId"]), sort_keys=True)),
                     )
-        if len(events) < EVENT_PAGE_SIZE:
+        cursor = page.get("next_cursor")
+        if not cursor:
             return
-        offset += len(events)
 
 
 def coverage(db: sqlite3.Connection, day: str) -> dict:

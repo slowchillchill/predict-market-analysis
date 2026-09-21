@@ -53,7 +53,8 @@
 
 ```
 
-通过 Gamma 按实际系列和结束时间发现市场，处理全部事件分页，并在本地排除上限日期的市场。
+通过 Gamma `/events/keyset` 按实际系列和结束时间发现市场，将返回的 `next_cursor`
+作为下一页的 `after_cursor`，直到没有后续游标，并在本地排除上限日期的市场。
 成交查询沿用 `/v2/trades`、`taker_only=false`、`filter_type=TOKENS`、`filter_amount=1e-18`、
 `limit=1000`。跟随游标直到 `next_cursor=null`，保留每条返回记录，不按交易哈希去重。
 “完整”指采集时这些参数下官方接口三年窗口内的全部分页，未作全量链上对账。
