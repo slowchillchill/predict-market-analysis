@@ -183,3 +183,9 @@ Install both requirements files, then run the offline test suite:
 ```
 
 Tests cover pagination and resumption, atomic page commits, UTC date boundaries, shared-database compatibility, decimal rounding, coverage gaps, bot thresholds, and poster layout. When reporting a problem or proposing a change, include the command, expected behavior, and a reproducible example without local credentials or raw database files.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE), except for third-party materials with their own licenses. MIT permits commercial use, modification, and redistribution, including in closed-source projects, provided the copyright and license notices are retained. The software is provided without warranty.
+
+The bundled Inter font remains under the [SIL Open Font License 1.1](assets/fonts/Inter-OFL.txt). Dependencies retain their respective licenses. The MIT License does not grant rights to third-party market data or services accessed by these tools.
