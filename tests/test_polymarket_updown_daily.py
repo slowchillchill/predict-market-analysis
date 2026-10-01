@@ -5,7 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -108,7 +108,7 @@ class UpdownTests(unittest.TestCase):
         client = Mock()
         client.get.return_value = {"data": [trade("0xB", 0), trade("0xB", 9999999999)],
                                    "pagination": {"next_cursor": None}}
-        with patch.object(up, "discover_series"), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), contextlib.redirect_stdout(io.StringIO()):
             up.collect(self.db, client, START, END)
         self.assertEqual(client.get.call_count, 1)
         self.assertEqual(client.get.call_args.args[1]["condition"], "condition-new")
@@ -155,6 +155,63 @@ class UpdownTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("zec-up-or-down-4h", (output / "updown_daily_2026-09-17.md").read_text())
         self.assertFalse((output / "updown_daily_2026-09-17.csv").exists())
+
+    def test_historical_coverage_and_existing_database_view_upgrade(self):
+        for day in (date(2026,8,1), date(2026,8,4), date(2026,8,5)):
+            with self.db:
+                for series in up.TARGET_SERIES:
+                    for ended in up.expected_slots(series, day):
+                        slug = up.market_slug(series, ended)
+                        self.db.execute(
+                            "INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) VALUES (?,?,?,?,?)",
+                            (slug,str(day),slug,series,ended.isoformat()))
+                        self.db.execute("INSERT INTO collection_progress(market_slug,completed_at) VALUES (?,'done')",(slug,))
+        self.assertEqual(up.coverage(self.db,'2026-08-01')['expected_markets'],2905)
+        self.assertEqual(up.coverage(self.db,'2026-08-04')['expected_markets'],2942)
+        self.assertEqual(up.coverage(self.db,'2026-08-05')['expected_markets'],3295)
+        self.assertTrue(all(up.coverage(self.db,str(day))['is_complete'] for day in
+                            (date(2026,8,1),date(2026,8,4),date(2026,8,5))))
+        # 已存在的旧视图也必须被初始化更新。
+        self.db.executescript("DROP VIEW updown_coverage; CREATE VIEW updown_coverage AS SELECT 1 AS old;")
+        self.db.close()
+        self.db=up.connect_database(self.path)
+        self.assertEqual(up.coverage(self.db,'2026-08-04')['expected_markets'],2942)
+        with self.db:
+            self.db.execute("UPDATE collection_progress SET completed_at=NULL WHERE market_slug='zec-updown-5m-1785879300'")
+        self.assertFalse(up.coverage(self.db,'2026-08-04')['is_complete'])
+
+    def test_detail_discovery_repairs_inactive_market_without_touching_completed_pages(self):
+        day=date(2026,9,3)
+        missing='btc-updown-5m-1788448800'
+        with self.db:
+            for series in up.TARGET_SERIES:
+                for ended in up.expected_slots(series,day):
+                    slug=up.market_slug(series,ended)
+                    if slug==missing:continue
+                    self.db.execute("INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) VALUES (?,?,?,?,?)",
+                                    (slug,str(day),slug,series,ended.isoformat()))
+                    self.db.execute("INSERT INTO collection_progress(market_slug,completed_at) VALUES (?,'done')",(slug,))
+        client=Mock()
+        client.get.return_value={**event(missing,'2026-09-03T15:25:00Z','2026-09-03T15:20:00Z'),
+                                 'active':False,'closed':False}
+        with contextlib.redirect_stdout(io.StringIO()):
+            up.discover_missing_markets(self.db,client,day,day+timedelta(days=1))
+        client.get.assert_called_once_with(up.GAMMA_EVENT_SLUG+missing,{})
+        self.assertEqual(up.coverage(self.db,str(day))['discovered_markets'],3295)
+        self.assertEqual(up.coverage(self.db,str(day))['completed_markets'],3294)
+        self.assertIsNone(self.db.execute('SELECT completed_at FROM collection_progress WHERE market_slug=?',(missing,)).fetchone()[0])
+
+    def test_slots_and_slug_use_end_day_and_new_york_dst(self):
+        first=list(up.expected_slots('zec-up-or-down-5m',date(2026,8,4)))
+        self.assertEqual(len(first),28)
+        self.assertEqual(first[0].isoformat(),'2026-08-04T21:40:00+00:00')
+        self.assertEqual(list(up.expected_slots('zec-up-or-down-4h',date(2026,8,4))),[])
+        self.assertEqual(up.market_slug('btc-up-or-down-hourly',datetime(2026,9,5,17,tzinfo=timezone.utc)),
+                         'bitcoin-up-or-down-september-5-2026-12pm-et')
+        self.assertEqual(up.market_slug('btc-up-or-down-hourly',datetime(2026,12,1,0,tzinfo=timezone.utc)),
+                         'bitcoin-up-or-down-november-30-2026-6pm-et')
+        self.assertEqual(next(up.expected_slots('btc-up-or-down-daily',date(2026,12,1))).hour,17)
+        self.assertEqual(up.coverage(self.db,'2026-08-01')['expected_markets'],2905)
 
 
 if __name__ == "__main__":

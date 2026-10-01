@@ -8,12 +8,12 @@ import json
 import math
 import sqlite3
 import sys
-from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 import polymarket_updown_poster as daily
+import polymarket_updown_period as period
+from polymarket_updown_period import load_period, millions
 
 ROOT = daily.ROOT
 BACKGROUND = ROOT / "assets/posters/updown_weekly_background_v1.png"
@@ -22,76 +22,15 @@ COLORS = ("#e9c36d", "#c98d69", "#e5b39e", "#947861")
 
 
 def load_week(db: sqlite3.Connection, start: date, *, required: bool = True) -> dict | None:
-    end = start + timedelta(days=7)
-    days = [(start + timedelta(days=i)).isoformat() for i in range(7)]
-    coverage = {r["date_utc"]: dict(r) for r in db.execute(
-        "SELECT * FROM updown_coverage WHERE date_utc>=? AND date_utc<?", (str(start), str(end)))}
-    missing = [d for d in days if not coverage.get(d, {}).get("is_complete")]
-    # 延续日海报的完整日要求和前期缺失语义。
-    if missing:
-        if required:
-            raise daily.IncompleteDay("以下日期尚未完整采集，未生成周海报：" + ", ".join(missing))
-        return None
-    wallets = set()
-    wallet_days = {}
-    assets = defaultdict(int)
-    volumes = dict.fromkeys(days, 0)
-    query = (ROOT / "sql/updown_weekly_poster.sql").read_text(encoding="utf-8")
-    for r in db.execute(query, {"start": str(start), "end": str(end)}):
-        d, wallet, amount = r["date_utc"], r["wallet"], r["amount_micro_usdc"]
-        wallets.add(wallet)
-        volumes[d] += amount
-        coin = r["series_slug"].split("-", 1)[0]
-        coin = {"solana": "sol", "dogecoin": "doge"}.get(coin, coin).upper()
-        assets[coin] += amount
-        key = (d, wallet)
-        if key not in wallet_days:
-            wallet_days[key] = [0, r["first_timestamp"], r["last_timestamp"], 0]
-        f = wallet_days[key]
-        f[0] += r["trade_count"]
-        f[1] = min(f[1], r["first_timestamp"])
-        f[2] = max(f[2], r["last_timestamp"])
-        f[3] += amount
-    bot_wallets = set()
-    bot_volume = 0
-    for (_, wallet), (count, first, last, amount) in wallet_days.items():
-        span = last - first
-        if (count > 1 and span <= daily.MAX_INTERVAL_SECONDS * (count - 1)
-                and span >= daily.MIN_SPAN_MINUTES * 60):
-            bot_wallets.add(wallet)
-            bot_volume += amount
-    return {
-        "start_date_utc": str(start), "end_date_utc_exclusive": str(end),
-        "coverage": [coverage[d] for d in days],
-        "total_markets": sum(coverage[d]["completed_markets"] for d in days),
-        "volume_micro_usdc": sum(volumes.values()), "unique_wallets": len(wallets),
-        "suspected_bot_wallets": len(bot_wallets), "suspected_bot_volume_micro_usdc": bot_volume,
-        "daily_volume_micro_usdc": volumes,
-        "asset_volume_micro_usdc": dict(sorted(assets.items(), key=lambda pair: (-pair[1], pair[0]))),
-    }
+    return load_period(db, start, start+timedelta(days=7), required=required)
 
 
 def changes(current: dict, previous: dict | None, field: str) -> tuple[str, str]:
-    if previous is None:
-        return "N/A", "prior week unavailable"
-    if previous[field] == 0:
-        return "N/A", "prior week = 0"
-    return daily.percent_text(current[field] - previous[field], previous[field], change=True), "vs prior week"
+    return period.changes(current, previous, field, "week")
 
 
 def bot_share_change(current: dict, previous: dict | None) -> tuple[str, str]:
-    if previous is None:
-        return "N/A", "prior week unavailable"
-    if not current["volume_micro_usdc"] or not previous["volume_micro_usdc"]:
-        return "N/A", "zero volume denominator"
-    delta = ((Decimal(current["suspected_bot_volume_micro_usdc"]) / current["volume_micro_usdc"]
-              - Decimal(previous["suspected_bot_volume_micro_usdc"]) / previous["volume_micro_usdc"]) * 100)
-    delta = delta.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return (f"{delta:+.2f} pp" if delta else "0.00 pp"), "vs prior week"
-
-
-def millions(value: int) -> str:
-    return str((Decimal(value) / 10**12).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    return period.bot_share_change(current, previous, "week")
 
 
 def render_tweet(current: dict, previous: dict | None) -> str:

@@ -1,21 +1,36 @@
 -- 日期均为市场 end_time 所属 UTC 日；原 markets.date_utc 仍保留开始日。
 -- updown_target_series 由采集入口的系列目录生成，供离线查询使用。
+-- 采集初始化时更新已有视图，使历史范围修订同时作用于日、周、月报告。
+DROP VIEW IF EXISTS updown_daily_summary;
+DROP VIEW IF EXISTS updown_wallet_ranked;
+DROP VIEW IF EXISTS updown_wallet_daily;
+DROP VIEW IF EXISTS updown_coverage;
+DROP VIEW IF EXISTS updown_series_coverage;
 CREATE VIEW IF NOT EXISTS updown_series_coverage AS
 WITH days AS (
     SELECT DISTINCT date(m.end_time) AS date_utc
     FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug
     WHERE m.end_time IS NOT NULL
+), expected AS (
+    SELECT d.date_utc, s.series_slug,
+        CASE WHEN s.first_end_time IS NULL OR date(s.first_end_time)<d.date_utc THEN s.expected_markets
+             WHEN date(s.first_end_time)>d.date_utc THEN 0
+             ELSE (CAST(strftime('%s', d.date_utc, '+1 day') AS INTEGER)
+                   - CAST(strftime('%s', s.first_end_time) AS INTEGER)
+                   + 86400/s.expected_markets - 1) / (86400/s.expected_markets)
+        END AS expected_markets
+    FROM days d CROSS JOIN updown_target_series s
 )
-SELECT d.date_utc, s.series_slug, s.expected_markets,
+SELECT s.date_utc, s.series_slug, s.expected_markets,
        COUNT(m.condition_id) AS discovered_markets,
        COUNT(p.completed_at) AS completed_markets,
        COALESCE(SUM(p.committed_page), 0) AS committed_pages,
        COUNT(m.condition_id)=s.expected_markets AND
            COUNT(p.completed_at)=COUNT(m.condition_id) AS is_complete
-FROM days d CROSS JOIN updown_target_series s
-LEFT JOIN markets m ON m.series_slug=s.series_slug AND date(m.end_time)=d.date_utc
+FROM expected s
+LEFT JOIN markets m ON m.series_slug=s.series_slug AND date(m.end_time)=s.date_utc
 LEFT JOIN collection_progress p ON p.market_slug=m.slug
-GROUP BY d.date_utc, s.series_slug, s.expected_markets;
+GROUP BY s.date_utc, s.series_slug, s.expected_markets;
 
 CREATE VIEW IF NOT EXISTS updown_coverage AS
 SELECT date_utc, SUM(expected_markets) AS expected_markets,

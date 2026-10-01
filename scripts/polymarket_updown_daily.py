@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import polymarket_btc5m_daily as core
 
@@ -24,18 +25,30 @@ TARGET_SERIES = {
     **{f"{coin}-up-or-down-daily": 1
        for coin in ("btc", "eth", "solana", "xrp", "dogecoin", "bnb", "hype")},
 }
+# 官方系列创建信息及首期市场详情见 docs/updown_daily.md 的历史范围说明。
+# 边界是第一期市场结束时间，避免把上线首日的未开设时段算作漏采。
+SERIES_FIRST_END_UTC = {
+    "zec-up-or-down-5m": "2026-08-04T21:40:00+00:00",
+    "zec-up-or-down-15m": "2026-08-04T21:45:00+00:00",
+    "zec-up-or-down-4h": "2026-08-05T00:00:00+00:00",
+}
 GAMMA_SERIES = "https://gamma-api.polymarket.com/series"
 GAMMA_EVENTS_KEYSET = "https://gamma-api.polymarket.com/events/keyset"
+GAMMA_EVENT_SLUG = "https://gamma-api.polymarket.com/events/slug/"
 EVENT_PAGE_SIZE = 100
+ENGLISH_MONTHS = ("january", "february", "march", "april", "may", "june",
+                  "july", "august", "september", "october", "november", "december")
 
 
 def connect_database(path: Path) -> sqlite3.Connection:
     db = core.connect_database(path)
     # 目录只在此定义；持久化视图让 sqlite3 与离线报告使用同一目录。
-    values = ", ".join(f"('{slug}', {count})" for slug, count in TARGET_SERIES.items())
+    values = ", ".join(
+        f"('{slug}', {count}, " + (f"'{SERIES_FIRST_END_UTC[slug]}'" if slug in SERIES_FIRST_END_UTC else "NULL") + ")"
+        for slug, count in TARGET_SERIES.items())
     db.executescript(
         "DROP VIEW IF EXISTS updown_target_series; "
-        "CREATE VIEW updown_target_series(series_slug, expected_markets) AS VALUES " + values + ";"
+        "CREATE VIEW updown_target_series(series_slug, expected_markets, first_end_time) AS VALUES " + values + ";"
     )
     db.executescript((core.ROOT / "sql/updown_daily.sql").read_text())
     return db
@@ -47,6 +60,65 @@ def utc_time(value: str) -> datetime:
 
 def midnight(day: date) -> datetime:
     return datetime.combine(day, datetime.min.time(), timezone.utc)
+
+
+def expected_slots(series: str, day: date):
+    """给出已知系列计划中的结束时点；详情返回的市场元数据决定最终归属。"""
+    count = TARGET_SERIES[series]
+    step = timedelta(seconds=86400 // count)
+    ended = midnight(day)
+    if count == 1:
+        ended = datetime.combine(day, datetime.min.time(), ZoneInfo("America/New_York")).replace(
+            hour=12).astimezone(timezone.utc)
+    first = SERIES_FIRST_END_UTC.get(series)
+    while ended < midnight(day + timedelta(days=1)):
+        if first is None or ended >= utc_time(first):
+            yield ended
+        ended += step
+
+
+def market_slug(series: str, ended: datetime) -> str:
+    coin, period = series.split("-", 1)[0], series.rsplit("-", 1)[1]
+    if period in ("5m", "15m", "4h"):
+        began = ended - timedelta(seconds=86400 // TARGET_SERIES[series])
+        return f"{coin}-updown-{period}-{int(began.timestamp())}"
+    coin = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana", "doge": "dogecoin"}.get(coin, coin)
+    stamp = ended if period == "daily" else ended - timedelta(hours=1)
+    local = stamp.astimezone(ZoneInfo("America/New_York"))
+    stamp_text = f"{ENGLISH_MONTHS[local.month-1]}-{local.day}-{local.year}"
+    if period == "daily":
+        return f"{coin}-up-or-down-on-{stamp_text}"
+    hour = local.hour % 12 or 12
+    return f"{coin}-up-or-down-{stamp_text}-{hour}{'am' if local.hour < 12 else 'pm'}-et"
+
+
+def save_event(db: sqlite3.Connection, event: dict, series: str, start: date, end: date) -> None:
+    membership = {s["slug"] for s in event.get("series", [])}
+    membership.add(event.get("seriesSlug"))
+    if series not in membership:
+        return
+    for market in event["markets"]:
+        ended = utc_time(market["endDate"])
+        # Gamma 时间边界可能包含上限，必须在市场层落实半开区间。
+        if not midnight(start) <= ended < midnight(end):
+            continue
+        began = utc_time(market["eventStartTime"])
+        slug = market["slug"]
+        db.execute(
+            "INSERT INTO markets(slug,date_utc,market_id,condition_id,event_id,title,"
+            "series_slug,event_start_time,end_time) VALUES (?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(slug) DO UPDATE SET market_id=excluded.market_id, "
+            "condition_id=excluded.condition_id,event_id=excluded.event_id, "
+            "title=excluded.title,series_slug=excluded.series_slug, "
+            "event_start_time=excluded.event_start_time,end_time=excluded.end_time",
+            (slug, began.date().isoformat(), str(market["id"]), market["conditionId"],
+             str(event["id"]), market["question"], series, began.isoformat(), ended.isoformat()),
+        )
+        db.execute(
+            "INSERT INTO collection_progress(market_slug,query_params) VALUES (?,?) "
+            "ON CONFLICT(market_slug) DO UPDATE SET query_params=excluded.query_params",
+            (slug, json.dumps(core.trade_params(market["conditionId"]), sort_keys=True)),
+        )
 
 
 def discover_series(db: sqlite3.Connection, client: core.Client, series: str,
@@ -63,43 +135,43 @@ def discover_series(db: sqlite3.Connection, client: core.Client, series: str,
         if cursor:
             params["after_cursor"] = cursor
         page = client.get(GAMMA_EVENTS_KEYSET, params)
-        events = page["events"]
         with db:
-            for event in events:
-                membership = {s["slug"] for s in event.get("series", [])}
-                membership.add(event.get("seriesSlug"))
-                if series not in membership:
-                    continue
-                for market in event["markets"]:
-                    ended = utc_time(market["endDate"])
-                    # Gamma 时间边界可能包含上限，必须在市场层落实半开区间。
-                    if not midnight(start) <= ended < midnight(end):
-                        continue
-                    began = utc_time(market["eventStartTime"])
-                    slug = market["slug"]
-                    db.execute(
-                        "INSERT INTO markets(slug,date_utc,market_id,condition_id,event_id,title,"
-                        "series_slug,event_start_time,end_time) VALUES (?,?,?,?,?,?,?,?,?) "
-                        "ON CONFLICT(slug) DO UPDATE SET market_id=excluded.market_id, "
-                        "condition_id=excluded.condition_id,event_id=excluded.event_id, "
-                        "title=excluded.title,series_slug=excluded.series_slug, "
-                        "event_start_time=excluded.event_start_time,end_time=excluded.end_time",
-                        (slug, began.date().isoformat(), str(market["id"]), market["conditionId"],
-                         str(event["id"]), market["question"], series, began.isoformat(), ended.isoformat()),
-                    )
-                    db.execute(
-                        "INSERT INTO collection_progress(market_slug,query_params) VALUES (?,?) "
-                        "ON CONFLICT(market_slug) DO UPDATE SET query_params=excluded.query_params",
-                        (slug, json.dumps(core.trade_params(market["conditionId"]), sort_keys=True)),
-                    )
+            for event in page["events"]:
+                save_event(db, event, series, start, end)
         cursor = page.get("next_cursor")
         if not cursor:
             return
 
 
+def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start: date, end: date) -> None:
+    """补查列表接口未返回的预期时段；404 等失败保留为覆盖缺口。"""
+    existing = {}
+    for row in db.execute(
+        "SELECT series_slug,end_time FROM markets WHERE date(end_time)>=? AND date(end_time)<? "
+        "AND condition_id IS NOT NULL", (str(start), str(end))):
+        ended = utc_time(row["end_time"])
+        existing.setdefault((row["series_slug"], ended.date()), set()).add(ended)
+    day = start
+    while day < end:
+        for series in TARGET_SERIES:
+            for ended in expected_slots(series, day):
+                if ended in existing.get((series, day), set()):
+                    continue
+                slug = market_slug(series, ended)
+                try:
+                    event = client.get(GAMMA_EVENT_SLUG + slug, {})
+                    with db:
+                        save_event(db, event, series, start, end)
+                    print(f"详情补查 {slug} 完成", flush=True)
+                except (core.FetchError, KeyError, TypeError, ValueError) as exc:
+                    print(f"详情补查 {slug} 未完成：{exc}", file=sys.stderr, flush=True)
+        day += timedelta(days=1)
+
+
 def coverage(db: sqlite3.Connection, day: str) -> dict:
     row = db.execute("SELECT * FROM updown_coverage WHERE date_utc=?", (day,)).fetchone()
-    return dict(row) if row else dict(date_utc=day, expected_markets=sum(TARGET_SERIES.values()),
+    return dict(row) if row else dict(date_utc=day, expected_markets=sum(
+                                     sum(1 for _ in expected_slots(s, date.fromisoformat(day))) for s in TARGET_SERIES),
                                      discovered_markets=0, completed_markets=0,
                                      committed_pages=0, is_complete=0)
 
@@ -111,6 +183,7 @@ def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date)
             print(f"发现 [{index}/{len(TARGET_SERIES)}] {series} 完成", flush=True)
         except (core.FetchError, KeyError, TypeError, ValueError, StopIteration) as exc:
             print(f"发现 {series} 未完成：{exc}", file=sys.stderr, flush=True)
+    discover_missing_markets(db, client, start, end)
     pending = db.execute(
         "SELECT m.slug FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug "
         "JOIN collection_progress p ON p.market_slug=m.slug "

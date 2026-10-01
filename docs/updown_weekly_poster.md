@@ -38,7 +38,9 @@
 - 柱状图从零起算，柱高和占比条宽度按未舍入金额绘制，标签保留两位小数。
 - 前期零基数、前期缺失、零成交额分母沿用日海报 N/A 语义。
 
-背景为 `assets/posters/updown_weekly_background_v1.png`；查询见 `sql/updown_weekly_poster.sql`。正式版不调用图像生成模型绘制文字或数据图表。
+背景为 `assets/posters/updown_weekly_background_v1.png`；周、月共用的查询见 `sql/updown_period.sql`。
+聚合按日处理钱包特征，跨日仅保留钱包并集与金额汇总。历史系列启用边界沿用[每日覆盖定义](updown_daily.md)。
+正式版不调用图像生成模型绘制文字或数据图表。
 
 ## 验证
 
