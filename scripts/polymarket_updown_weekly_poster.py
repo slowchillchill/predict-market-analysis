@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+
+from polymarket_updown_captions import write_sidecars
 import json
 import math
 import sqlite3
@@ -37,31 +39,33 @@ def render_tweet(current: dict, previous: dict | None) -> str:
     start = date.fromisoformat(current["start_date_utc"])
     last = date.fromisoformat(current["end_date_utc_exclusive"]) - timedelta(days=1)
     amount = current["volume_micro_usdc"]
-    volume = millions(amount) + "M" if amount >= 10**12 else daily.amount_text(amount)
+    volume = millions(amount) + "M" if amount is not None and amount >= 10**12 else daily.amount_text(amount)
 
     def comparison(field: str) -> str:
         value, _ = changes(current, previous, field)
         if value != "N/A":
             return f"{value} WoW"
-        return "N/A: no prior week" if previous is None else "N/A: zero base"
+        if previous is None:
+            return "N/A: no prior week"
+        return "N/A: missing volume" if current[field] is None or previous[field] is None else "N/A: zero base"
 
     volume_change = comparison("volume_micro_usdc")
     wallet_change = comparison("unique_wallets")
-    bot_share = daily.percent_text(current["suspected_bot_volume_micro_usdc"], amount)
-    if amount == 0:
-        bot_share = "N/A (zero volume)"
+    bot_share = daily.percent_text(current["suspected_bot_volume_micro_usdc"], current["wallet_volume_micro_usdc"])
+    if current["wallet_volume_micro_usdc"] == 0:
+        bot_share = "N/A (zero wallet volume)"
     lines = [
         "#Polymarket Crypto Up/Down | Weekly",
         f"{start.isoformat()}/{last.isoformat()} UTC",
-        f"{volume} USDC wallet volume ({volume_change})",
+        f"{volume} USDC market volume ({volume_change})",
         f"{current['unique_wallets']:,} unique wallets ({wallet_change})",
-        f"{current['suspected_bot_wallets']:,} suspected bot wallets: {bot_share} of volume",
-        "Market end dates; buys+sells. Bot rules in chart.",
+        f"{current['suspected_bot_wallets']:,} suspected bot wallets: {bot_share} of wallet volume",
+        "Market end dates; taker side once. Rules in chart.",
     ]
     # 本模板只有 ASCII 数字与文字，无链接；X 加权长度等于字符数。
     # 长数字占用更多空间时，将机器人钱包数与详细口径留在配图，保留完整核心指标。
     if len("\n".join(lines) + "\n") > 280:
-        lines[4] = f"Suspected bots: {bot_share} of volume"
+        lines[4] = f"Suspected bots: {bot_share} of wallet volume"
         lines[5] = "Details in chart."
     return "\n".join(lines) + "\n"
 
@@ -91,7 +95,7 @@ def render(current: dict, previous: dict | None):
     c.text("WEEKLY REPORT", 98, 84, 60, weight=800, color=WHITE)
     c.text(period, 101, 151, 26, color=WHITE)
     c.line((96, 193, 1026, 193))
-    c.text("WALLET TRADING VOLUME", 101, 212, 23, weight=650, color=WHITE)
+    c.text("MARKET VOLUME", 101, 212, 23, weight=650, color=WHITE)
     box = c.text(daily.amount_text(current["volume_micro_usdc"]), 96, 252, 82,
                  weight=780, color=WHITE, width=784)
     c.text("USDC", box[2]+15, 289, 30, color=MUTED, width=137)
@@ -102,10 +106,10 @@ def render(current: dict, previous: dict | None):
     c.change(*changes(current, previous, "unique_wallets"), box[2]+28, 473, width=240, size=35)
     c.line((96, 529, 1026, 529))
 
-    c.text("7-DAY VOLUME", 101, 549, 23, weight=650, color=WHITE)
+    c.text("7-DAY MARKET VOLUME", 101, 549, 23, weight=650, color=WHITE)
     c.text("M USDC", 943, 551, 20, width=89)
     amounts = list(current["daily_volume_micro_usdc"].values())
-    maximum = max(amounts)
+    maximum = max((amount for amount in amounts if amount is not None), default=0)
     ceiling = max(5, math.ceil(maximum / 10**12 / 5) * 5)
     bottom, height = 808, 201
     for i in range(6):
@@ -117,10 +121,10 @@ def render(current: dict, previous: dict | None):
     c.line((113, bottom, 1030, bottom), color=MUTED)
     for i, amount in enumerate(amounts):
         x = 137 + i*133
-        y = bottom - height * (amount / 10**12) / ceiling
+        y = bottom if amount is None else bottom - height * (amount / 10**12) / ceiling
         if amount:
-            c.rect((x, y, x+76, bottom-1), GOLD if amount == maximum else COLORS[1])
-        label = millions(amount)
+            c.rect((x, min(y, bottom-1), x+76, bottom-1), GOLD if amount == maximum else COLORS[1])
+        label = "N/A" if amount is None else millions(amount)
         face = daily.font(round(22*daily.SCALE), 650)
         label_width = face.getlength(label)/daily.SCALE
         c.text(label, x+38-label_width/2, y-29, 22, weight=650, color=WHITE, width=120)
@@ -130,7 +134,10 @@ def render(current: dict, previous: dict | None):
     c.line((96, 860, 1026, 860))
 
     c.text("VOLUME BY ASSET", 101, 880, 23, weight=650, color=WHITE)
-    ranked = list(current["asset_volume_micro_usdc"].items())
+    assets = current["asset_volume_micro_usdc"]
+    if assets is None:
+        c.text("N/A: market volume incomplete", 102, 930, 25, color=WHITE, width=922)
+    ranked = list(assets.items()) if assets is not None else []
     groups = ranked[:3] + ([("OTHER", sum(v for _, v in ranked[3:]))] if len(ranked) > 3 else [])
     total, consumed = current["volume_micro_usdc"], 0
     for i, (coin, amount) in enumerate(groups):
@@ -146,9 +153,9 @@ def render(current: dict, previous: dict | None):
     c.line((96, 1010, 1026, 1010))
 
     c.text("SUSPECTED BOT ACTIVITY", 101, 1030, 23, weight=650, color=WHITE)
-    share = daily.percent_text(current["suspected_bot_volume_micro_usdc"], total)
+    share = daily.percent_text(current["suspected_bot_volume_micro_usdc"], current["wallet_volume_micro_usdc"])
     box = c.text(share, 96, 1069, 74, weight=780, color=WHITE, width=366)
-    c.text("of weekly volume", box[2]+18, 1080, 22, width=350)
+    c.text("of wallet volume", box[2]+18, 1080, 22, width=350)
     c.change(*bot_share_change(current, previous), box[2]+18, 1111, width=250, size=28)
     box = c.text(f"{current['suspected_bot_wallets']:,}", 98, 1160, 51, weight=750, color=WHITE, width=231)
     c.text("wallets", box[2]+12, 1181, 23, width=118)
@@ -161,9 +168,9 @@ def render(current: dict, previous: dict | None):
     c.rect((96, 1250, 1030, 1354), "#270b12")
     footnotes = [
         "UTC market end dates; includes all trades in those markets.",
-        "Volume = buys + sells. Wallets deduplicated across the week.",
+        "Market volume: taker side once. Wallets deduplicated across the week.",
         "Bots flagged daily: mean gap ≤60s, span ≥90min; weekly wallet union.",
-        "Bot volume sums flagged wallet-days. Behavioral estimate, not identity.",
+        "Bot share uses wallet buys + sells; flagged wallet-days. Behavioral estimate.",
     ]
     for i, line in enumerate(footnotes):
         c.text(line, 102, 1258+i*24, 17, weight=450, color=MUTED, width=922)
@@ -202,6 +209,7 @@ def main(argv=None):
     image.save(args.output_dir / f"{stem}.png")
     payload = {
         "date_basis": "market_end_utc", "source_database": str(args.db),
+        "volume_basis": "taker_only", "bot_volume_basis": "wallet_buys_plus_sells",
         "current": current, "previous": previous,
         "bot_rule": {"max_mean_interval_seconds": daily.MAX_INTERVAL_SECONDS,
                      "min_span_minutes": daily.MIN_SPAN_MINUTES,
@@ -214,6 +222,7 @@ def main(argv=None):
     (args.output_dir / f"{stem}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2)+"\n")
     tweet_path = args.output_dir / f"{stem}_tweet.md"
     tweet_path.write_text(render_tweet(current, previous), encoding="utf-8")
+    write_sidecars(args.output_dir / f"{stem}.json")
     print(f"海报：{args.output_dir / f'{stem}.png'}\n数据：{args.output_dir / f'{stem}.json'}\n推文：{tweet_path}")
     return 0
 

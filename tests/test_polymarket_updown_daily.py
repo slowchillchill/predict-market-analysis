@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import io
 import json
 import sqlite3
@@ -110,9 +111,13 @@ class UpdownTests(unittest.TestCase):
                                    "pagination": {"next_cursor": None}}
         with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), contextlib.redirect_stdout(io.StringIO()):
             up.collect(self.db, client, START, END)
-        self.assertEqual(client.get.call_count, 1)
-        self.assertEqual(client.get.call_args.args[1]["condition"], "condition-new")
-        self.assertNotIn("start", client.get.call_args.args[1])
+        self.assertEqual(client.get.call_count, 3)
+        wallet_calls = [call for call in client.get.call_args_list if call.args[1]["taker_only"] == "false"]
+        single_calls = [call for call in client.get.call_args_list if call.args[1]["taker_only"] == "true"]
+        self.assertEqual(len(wallet_calls), 1)
+        self.assertEqual(wallet_calls[0].args[1]["condition"], "condition-new")
+        self.assertEqual({call.args[1]["condition"] for call in single_calls}, {"condition-keep", "condition-new"})
+        self.assertNotIn("start", wallet_calls[0].args[1])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 3)
 
     def test_complete_end_day_aggregates_and_top200_rank(self):
@@ -129,11 +134,63 @@ class UpdownTests(unittest.TestCase):
         self.assertEqual(summary["wallet_total_micro_usdc"], 20302000000)
         self.assertEqual(summary["top200_micro_usdc"], 20300000000)
         self.assertAlmostEqual(summary["top200_share"], 20300 / 20302)
+        self.assertIsNone(summary["market_volume_micro_usdc"])
         # 缺少一个完整系列时，不能把其成交当作零并声称完整。
         with self.db:
             self.db.execute("UPDATE collection_progress SET completed_at=NULL WHERE market_slug LIKE 'zec-up-or-down-4h-%'")
         self.assertFalse(up.coverage(self.db, "2026-09-17")["is_complete"])
         self.assertIsNone(self.db.execute("SELECT * FROM updown_daily_summary").fetchone())
+
+    def test_market_volume_is_nullable_until_all_markets_complete(self):
+        self.fill_complete_day()
+        with self.db:
+            self.db.execute("INSERT INTO market_volume(market_slug,completed_at) SELECT slug,'done' FROM markets")
+            self.db.execute("UPDATE market_volume SET amount_micro_usdc=4995000 WHERE market_slug='btc-up-or-down-5m-0'")
+        summary = self.db.execute("SELECT * FROM updown_daily_summary").fetchone()
+        self.assertEqual(summary["market_volume_micro_usdc"], 4995000)
+        self.assertEqual(summary["wallet_total_micro_usdc"], 0)
+        self.assertTrue(up.coverage(self.db, str(START))["market_volume_is_complete"])
+        with self.db:
+            self.db.execute("UPDATE market_volume SET completed_at=NULL WHERE market_slug='btc-up-or-down-5m-0'")
+        self.assertIsNone(self.db.execute("SELECT market_volume_micro_usdc FROM updown_daily_summary").fetchone()[0])
+        self.assertTrue(up.coverage(self.db, str(START))["is_complete"])
+        self.assertFalse(up.coverage(self.db, str(START))["market_volume_is_complete"])
+
+    def test_report_legacy_summary_exposes_missing_volume_without_modifying_database(self):
+        self.fill_complete_day()
+        self.db.executescript("DROP VIEW updown_daily_summary; CREATE VIEW updown_daily_summary AS "
+                            "SELECT '2026-09-17' AS date_utc,0 AS unique_wallets,0 AS wallet_total_micro_usdc,"
+                            "0 AS top200_micro_usdc,NULL AS top200_share;")
+        self.db.executescript("DROP VIEW updown_coverage; CREATE VIEW updown_coverage AS "
+                            "SELECT '2026-09-17' AS date_utc,3295 AS expected_markets,3295 AS discovered_markets,"
+                            "3295 AS completed_markets,3295 AS committed_pages,1 AS is_complete;")
+        output = Path(self.tmp.name) / "legacy"
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = up.main(["report", "--date", str(START), "--db", str(self.path), "--output-dir", str(output)])
+        self.assertEqual(result, 0)
+        self.assertIn("市场成交额：缺失", (output / f"updown_daily_{START}.md").read_text())
+        with (output / f"updown_daily_{START}.csv").open() as handle:
+            summary = next(csv.DictReader(handle))
+        self.assertEqual(summary["market_volume_usdc"], "")
+        self.assertEqual(summary["market_volume_micro_usdc"], "")
+
+    def test_collect_only_initializes_single_side_for_requested_range(self):
+        self.discover([event("yesterday", "2026-09-17T00:00:00Z")])
+        with self.db:
+            self.db.execute("INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) "
+                            "VALUES ('old','2026-09-15','old','btc-up-or-down-5m','2026-09-16T00:00:00Z')")
+        client = Mock()
+        client.get.return_value = {"data": [], "pagination": {"next_cursor": None}}
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), contextlib.redirect_stdout(io.StringIO()):
+            up.collect(self.db, client, START, END)
+        self.assertEqual([row[0] for row in self.db.execute("SELECT market_slug FROM market_volume")], ["yesterday"])
+
+    def test_collect_exit_failure_when_single_side_is_incomplete(self):
+        with patch.object(up, "collect"), patch.object(up.core, "Client"), patch.object(up, "coverage", return_value={
+                "is_complete": 1, "market_volume_is_complete": 0}), contextlib.redirect_stdout(io.StringIO()):
+            result = up.main(["collect", "--start-date", str(START), "--end-date", str(END),
+                              "--proxy", "http://proxy.invalid", "--db", str(self.path)])
+        self.assertEqual(result, 2)
 
     def test_legacy_btc_start_day_survives_shared_database(self):
         up.core.seed_markets(self.db, START, END)

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+
+from polymarket_updown_captions import write_sidecars
 import json
 import sqlite3
 import sys
@@ -16,6 +18,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 import polymarket_updown_daily as daily
+from polymarket_market_volume_query import load_market_volume
 
 ROOT = daily.core.ROOT
 BACKGROUND = ROOT / "assets/posters/updown_background_v1.png"
@@ -56,16 +59,22 @@ def load_data(db: sqlite3.Connection, day: date) -> PosterData:
             f"{day} 尚未完整采集：完成 {status['completed_markets']}/{status['expected_markets']} "
             "个市场；未生成海报。"
         )
+    for stamp, summary in rows.items():
+        start = date.fromisoformat(stamp)
+        volume = load_market_volume(db, start, start + timedelta(days=1))
+        summary.update(volume_basis=volume["volume_basis"], volume_micro_usdc=volume["volume_micro_usdc"])
     return PosterData(day, rows[day.isoformat()], rows.get((day - timedelta(days=1)).isoformat()))
 
 
-def amount_text(micro_usdc: int) -> str:
+def amount_text(micro_usdc: int | None) -> str:
+    if micro_usdc is None:
+        return "N/A"
     amount = (Decimal(micro_usdc) / 1_000_000).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return f"{amount:,.2f}"
 
 
-def percent_text(numerator: int, denominator: int | None, *, change: bool = False) -> str:
-    if denominator is None or denominator == 0:
+def percent_text(numerator: int | None, denominator: int | None, *, change: bool = False) -> str:
+    if numerator is None or denominator is None or denominator == 0:
         return "N/A"
     percentage = Decimal(numerator) / Decimal(denominator) * 100
     percentage = percentage.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -80,6 +89,8 @@ def display_values(data: PosterData) -> dict[str, str]:
     def change(field: str) -> tuple[str, str]:
         if previous is None:
             return "N/A", "prior day unavailable"
+        if current[field] is None or previous[field] is None:
+            return "N/A", "market volume unavailable"
         if previous[field] == 0:
             return "N/A", "prior day = 0"
         return percent_text(current[field] - previous[field], previous[field], change=True), "vs. previous day"
@@ -97,14 +108,14 @@ def display_values(data: PosterData) -> dict[str, str]:
         "wallet_change_caption": wallet_caption,
         "bot_wallets": f"{current['suspected_bot_wallets']:,}",
         "bot_volume": amount_text(current["suspected_bot_volume_micro_usdc"]),
-        "bot_volume_share": percent_text(current["suspected_bot_volume_micro_usdc"], current["volume_micro_usdc"]),
+        "bot_volume_share": percent_text(current["suspected_bot_volume_micro_usdc"], current["wallet_volume_micro_usdc"]),
     }
 
 
 def render_tweet(data: PosterData) -> str:
     values = display_values(data)
     volume = values["volume"]
-    if data.current["volume_micro_usdc"] >= 1_000_000_000_000:
+    if data.current["volume_micro_usdc"] is not None and data.current["volume_micro_usdc"] >= 1_000_000_000_000:
         millions = (Decimal(data.current["volume_micro_usdc"]) / 1_000_000_000_000).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP)
         volume = f"{millions:,.2f}M"
@@ -118,9 +129,9 @@ def render_tweet(data: PosterData) -> str:
     lines = [
         f"Polymarket Crypto Up/Down | {MONTHS[data.day.month - 1]} {data.day.day}, {data.day.year} UTC",
         "",
-        f"{volume} USDC wallet volume ({change_text('volume')})",
+        f"{volume} USDC market volume ({change_text('volume')})",
         f"{values['unique_wallets']} trading wallets ({change_text('wallet')})",
-        f"{values['bot_wallets']} suspected bot wallets: {values['bot_volume_share']} of volume",
+        f"{values['bot_wallets']} suspected bot wallets: {values['bot_volume_share']} of wallet volume",
         "",
     ]
     # 只描述显示值明确的涨跌，避免把缺失环比或舍入到零的变化写成趋势。
@@ -129,7 +140,7 @@ def render_tweet(data: PosterData) -> str:
     if wallets and volume_direction:
         lines.append(f"{wallets} wallets, {volume_direction} volume.")
     lines.extend([
-        "Markets ending that day; buys + sells. Bot criteria in chart.",
+        "Markets ending that day; taker side once. Bot criteria in chart.",
         "#Polymarket",
     ])
     return "\n".join(lines) + "\n"
@@ -205,7 +216,7 @@ def render_poster(values: dict[str, str], background: Path = BACKGROUND) -> tupl
     canvas.text("Market Overview", 100, 219, 78, weight=800, color=WHITE)
     canvas.text(values["date"], 103, 302, 31)
 
-    canvas.text("Wallet Trading Volume", 105, 373, 31)
+    canvas.text("Market Volume", 105, 373, 31)
     canvas.money(values["volume"], 100, 422, 104)
     canvas.change(values["volume_change"], values["volume_change_caption"], 106, 525, width=925, size=43)
 
@@ -219,18 +230,18 @@ def render_poster(values: dict[str, str], background: Path = BACKGROUND) -> tupl
 
     canvas.rule((82, 808, 1037, 808))
     canvas.text("Suspected Bot Activity", 104, 838, 40, weight=750, color=WHITE)
-    canvas.text("Trading Volume", 105, 899, 29)
+    canvas.text("Wallet Trading Volume", 105, 899, 29)
     canvas.money(values["bot_volume"], 102, 942, 82)
     canvas.rule((560, 1040, 560, 1149))
     canvas.text("Wallets", 105, 1040, 27, width=425)
-    canvas.text("Share of Total Volume", 610, 1040, 27, width=425)
+    canvas.text("Share of Wallet Volume", 610, 1040, 27, width=425)
     canvas.text(values["bot_wallets"], 103, 1080, 74, weight=750, color=WHITE, width=425)
     canvas.text(values["bot_volume_share"], 607, 1080, 74, weight=750, color=WHITE, width=428)
 
     # 页脚也保持干净底色，避免背景中的边缘线路穿过小字。
     canvas.draw.rectangle(tuple(round(v * SCALE) for v in (98, 1181, 760, 1267)), fill=BASE)
     canvas.text("Markets ending on the UTC date shown.", 106, 1189, 20, weight=400)
-    canvas.text("Volume counts buys + sells.", 106, 1215, 20, weight=400)
+    canvas.text("Market volume counts the taker side once.", 106, 1215, 20, weight=400)
     canvas.text(f"Suspected bots: avg. interval ≤{MAX_INTERVAL_SECONDS}s; span ≥{MIN_SPAN_MINUTES}m.",
                 106, 1241, 20, weight=400)
     return canvas.image, canvas.text_boxes
@@ -264,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     poster.save(image_path, format="PNG")
     payload = {
         "date_utc": args.date.isoformat(), "date_basis": "market_end_utc",
+        "volume_basis": "taker_only", "bot_volume_basis": "wallet_buys_plus_sells",
         "previous_date_utc": (args.date - timedelta(days=1)).isoformat(),
         "current": data.current, "previous": data.previous,
         "bot_rule": {"max_mean_interval_seconds": MAX_INTERVAL_SECONDS,
@@ -272,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     data_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tweet_path.write_text(render_tweet(data), encoding="utf-8")
+    write_sidecars(args.output_dir / f"{stem}.json")
     print(f"海报：{image_path}\n数据：{data_path}\n推文：{tweet_path}")
     return 0
 

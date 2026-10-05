@@ -35,6 +35,7 @@ class PosterTests(unittest.TestCase):
                         "INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) VALUES (?,?,?,?,?)",
                         (slug, (day-timedelta(days=1)).isoformat(), slug, series, f"{day}T00:00:00Z"))
                     self.db.execute("INSERT INTO collection_progress(market_slug,completed_at) VALUES (?,'done')", (slug,))
+                    self.db.execute("INSERT INTO market_volume(market_slug,completed_at) VALUES (?,'done')", (slug,))
 
     def add_trades(self, wallet, count, span, *, day=DAY, series="btc-up-or-down-5m", page=1, price="1"):
         slug = f"{series}-{day}-0"
@@ -44,6 +45,9 @@ class PosterTests(unittest.TestCase):
                      side="BUY", outcome="Up", outcome_index=0, token_id="token", price=price, size="1")
                 for i in range(count)]
         poster.daily.core.commit_page(self.db, slug, page, {"data": rows, "pagination": {"next_cursor": None}})
+        self.db.execute("UPDATE market_volume SET amount_micro_usdc=amount_micro_usdc+? WHERE market_slug=?",
+                        (sum(poster.daily.core.micro_usdc(r['price'], r['size']) for r in rows), slug))
+        self.db.commit()
 
     def test_classification_boundaries_and_cross_market_wallets(self):
         self.seed_day(DAY-timedelta(days=1))
@@ -138,59 +142,78 @@ class PosterTests(unittest.TestCase):
         self.assertEqual(result["display"]["volume"], "1.00")
         self.assertEqual(result["display"]["volume_change"], "N/A")
         tweet = (out/f"updown_{DAY}_tweet.md").read_text(encoding="utf-8")
-        self.assertIn("1.00 USDC wallet volume (N/A; prior day unavailable)", tweet)
+        self.assertIn("1.00 USDC market volume (N/A; prior day unavailable)", tweet)
         self.assertIn("1 trading wallets (N/A; prior day unavailable)", tweet)
         self.assertTrue(tweet.endswith("#Polymarket\n"))
 
     def test_tweet_matches_reference_metrics_and_updates_trend(self):
         current = dict(total_markets=3295, unique_wallets=14774, volume_micro_usdc=20111703726273,
+                       wallet_volume_micro_usdc=20111703726273,
                        suspected_bot_wallets=293, suspected_bot_volume_micro_usdc=11084715613058)
         previous = dict(unique_wallets=12917, volume_micro_usdc=20367207857854)
         text = poster.render_tweet(poster.PosterData(DAY, current, previous))
         self.assertEqual(text, (
             "Polymarket Crypto Up/Down | Sep 17, 2026 UTC\n\n"
-            "20.11M USDC wallet volume (-1.25%)\n"
+            "20.11M USDC market volume (-1.25%)\n"
             "14,774 trading wallets (+14.38%)\n"
-            "293 suspected bot wallets: 55.12% of volume\n\n"
+            "293 suspected bot wallets: 55.12% of wallet volume\n\n"
             "More wallets, lower volume.\n"
-            "Markets ending that day; buys + sells. Bot criteria in chart.\n"
+            "Markets ending that day; taker side once. Bot criteria in chart.\n"
             "#Polymarket\n"
         ))
         current.update(unique_wallets=11731, volume_micro_usdc=22763114385171)
         previous.update(unique_wallets=14774, volume_micro_usdc=20111703726273)
         text = poster.render_tweet(poster.PosterData(DAY+timedelta(days=1), current, previous))
         self.assertIn("Sep 18, 2026 UTC", text)
-        self.assertIn("22.76M USDC wallet volume (+13.18%)", text)
+        self.assertIn("22.76M USDC market volume (+13.18%)", text)
         self.assertIn("11,731 trading wallets (-20.60%)", text)
         self.assertIn("Fewer wallets, higher volume.", text)
 
     def test_tweet_missing_zero_and_rounded_changes_do_not_claim_a_trend(self):
-        current = dict(total_markets=3295, unique_wallets=0, volume_micro_usdc=0,
+        current = dict(total_markets=3295, unique_wallets=0, volume_micro_usdc=0, wallet_volume_micro_usdc=0,
                        suspected_bot_wallets=0, suspected_bot_volume_micro_usdc=0)
         for previous, reason in ((None, "prior day unavailable"),
                                  (dict(unique_wallets=0, volume_micro_usdc=0), "prior day = 0")):
             with self.subTest(reason=reason):
                 text = poster.render_tweet(poster.PosterData(DAY, current, previous))
-                self.assertIn(f"0.00 USDC wallet volume (N/A; {reason})", text)
-                self.assertIn("0 suspected bot wallets: N/A of volume", text)
+                self.assertIn(f"0.00 USDC market volume (N/A; {reason})", text)
+                self.assertIn("0 suspected bot wallets: N/A of wallet volume", text)
                 self.assertNotIn("More wallets", text)
                 self.assertNotIn("Fewer wallets", text)
 
         current.update(unique_wallets=100001, volume_micro_usdc=20000000000001)
         previous = dict(unique_wallets=100000, volume_micro_usdc=20000000000000)
         text = poster.render_tweet(poster.PosterData(DAY, current, previous))
-        self.assertIn("20.00M USDC wallet volume (0.00%)", text)
+        self.assertIn("20.00M USDC market volume (0.00%)", text)
         self.assertIn("100,001 trading wallets (0.00%)", text)
         self.assertNotIn("More wallets", text)
 
+    def test_missing_market_volume_keeps_wallet_metrics(self):
+        current = dict(total_markets=1, unique_wallets=2, volume_micro_usdc=None,
+                       wallet_volume_micro_usdc=20_000_000, suspected_bot_wallets=1,
+                       suspected_bot_volume_micro_usdc=5_000_000)
+        previous = dict(unique_wallets=1, volume_micro_usdc=10_000_000)
+        data = poster.PosterData(DAY, current, previous)
+        values = poster.display_values(data)
+        self.assertEqual(values["volume"], "N/A")
+        self.assertEqual(values["volume_change"], "N/A")
+        self.assertEqual(values["wallet_change"], "+100.00%")
+        self.assertEqual(values["bot_volume_share"], "25.00%")
+        self.assertIn("N/A USDC market volume", poster.render_tweet(data))
+        current["volume_micro_usdc"] = 10_000_000
+        previous["volume_micro_usdc"] = None
+        self.assertEqual(poster.display_values(data)["volume_change"], "N/A")
+        self.assertEqual(poster.display_values(data)["bot_volume_share"], "25.00%")
+
     def test_tweet_millions_round_from_raw_amount_without_double_rounding(self):
         current = dict(total_markets=3295, unique_wallets=1, volume_micro_usdc=20114999999999,
+                       wallet_volume_micro_usdc=20114999999999,
                        suspected_bot_wallets=0, suspected_bot_volume_micro_usdc=0)
         text = poster.render_tweet(poster.PosterData(DAY, current, None))
-        self.assertIn("20.11M USDC wallet volume", text)
+        self.assertIn("20.11M USDC market volume", text)
         current["volume_micro_usdc"] = 20115000000000
         text = poster.render_tweet(poster.PosterData(DAY, current, None))
-        self.assertIn("20.12M USDC wallet volume", text)
+        self.assertIn("20.12M USDC market volume", text)
 
     def test_long_values_and_missing_baseline_do_not_overlap_or_overflow(self):
         values = poster.display_values(poster.load_data(self.db, DAY))

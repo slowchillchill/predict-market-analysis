@@ -164,13 +164,16 @@ See the [monthly poster guide](docs/updown_monthly_poster.md).
 | Metric or behavior | Definition |
 | --- | --- |
 | Date | UTC date of the market's `endDate`, not its settlement confirmation or individual trade date. All returned trades for selected markets are included, including early and cross-day trades. |
+| Market volume | Sum `price × size` from `taker_only=true`: each fill is counted once on its taker side. Used for poster totals, trends, and asset shares. |
 | Wallet volume | Buy expenditure plus sell proceeds. Each record's `price × size` is rounded using `ROUND_HALF_UP` to integer micro-USDC before summing. This is not a single-sided market-volume metric. |
 | Unique wallets | Lowercase wallet addresses deduplicated across all selected markets in the day, week, or month. Weekly and monthly counts are not sums of daily wallet counts. |
 | Top 200 | Wallets ranked by aggregated volume descending, then address ascending to break ties. |
 | Suspected bots in posters | Wallets with an average trade interval of at most 60 seconds and a first-to-last trade span of at least 90 minutes, across the selected markets. No minimum market count is required. This is a behavioral heuristic, not identity verification. |
 | Completeness | Expected per-series market counts plus completed trade pagination. This is API collection coverage, not a full on-chain reconciliation. |
 
-The collector uses `/v2/trades` with `taker_only=false`, `filter_type=TOKENS`, `filter_amount=1e-18`, and `limit=1000`, following cursors until `next_cursor=null`. It preserves returned records rather than deduplicating by transaction hash.
+The collector uses `/v2/trades` with `taker_only=false`, `filter_type=TOKENS`, `filter_amount=1e-18`, and `limit=1000`, following cursors until `next_cursor=null`. It preserves returned records rather than deduplicating by transaction hash. A separate `taker_only=true` feed accumulates market volume with independent per-market pagination progress. Bot volume and bot shares continue to use two-sided wallet volume.
+
+This change does not backfill history. The existing scheduled job begins collecting single-sided volume on October 6, 2026, for markets ending on October 5 UTC. Missing historical market volume is `N/A`; totals and comparisons never substitute wallet volume or sum only the available part of a period. Existing historical reports are not rewritten.
 
 The legacy [`README_BTC5M.md`](README_BTC5M.md) describes a different workflow: BTC 5-minute summaries use the **UTC market start date** and top 10 wallets. Its manual bot-analysis query also uses different date and threshold rules. Use the definitions above for the all-series workflow.
 

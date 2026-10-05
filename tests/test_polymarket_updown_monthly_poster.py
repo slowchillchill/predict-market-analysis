@@ -21,6 +21,7 @@ class MonthlyTests(unittest.TestCase):
             CREATE TABLE updown_target_series(series_slug TEXT,first_end_time TEXT);
             CREATE TABLE markets(slug TEXT,series_slug TEXT,end_time TEXT);
             CREATE TABLE trades(market_slug TEXT,wallet TEXT,timestamp INTEGER,amount_micro_usdc INTEGER);
+            CREATE TABLE market_volume(market_slug TEXT PRIMARY KEY,amount_micro_usdc INTEGER,completed_at TEXT);
             INSERT INTO updown_target_series VALUES ('btc-up-or-down-5m',NULL);
             INSERT INTO updown_target_series VALUES ('zec-up-or-down-5m','2026-08-04T21:40:00+00:00');
         ''')
@@ -34,6 +35,7 @@ class MonthlyTests(unittest.TestCase):
     def trade(self,day,wallet,amount):
         slug=str(self.db.execute('SELECT COUNT(*) FROM markets').fetchone()[0])
         self.db.execute('INSERT INTO markets VALUES (?, ?, ?)',(slug,'btc-up-or-down-5m',day+'T00:00:00Z'))
+        self.db.execute("INSERT INTO market_volume VALUES (?,?,'done')", (slug,amount))
         # 成交时间在统计月份外，仍随市场结束日归属。
         self.db.execute('INSERT INTO trades VALUES (?, ?, 1, ?)',(slug,wallet,amount))
 
@@ -47,7 +49,7 @@ class MonthlyTests(unittest.TestCase):
         volumes={str(start+timedelta(days=i)):amount//days for i in range(days)}
         volumes[str(start)]+=amount-sum(volumes.values())
         return {'start_date_utc':str(start),'end_date_utc_exclusive':str(end),
-                'total_markets':3295*days,'volume_micro_usdc':amount,'unique_wallets':40000,
+                'total_markets':3295*days,'volume_micro_usdc':amount,'wallet_volume_micro_usdc':amount,'unique_wallets':40000,
                 'suspected_bot_wallets':1200,'suspected_bot_volume_micro_usdc':amount//2,
                 'daily_volume_micro_usdc':volumes,'asset_volume_micro_usdc':{'BTC':amount}}
 
@@ -107,10 +109,33 @@ class MonthlyTests(unittest.TestCase):
                     text=monthly.render_tweet(current,prior,changes)
                     self.assertTrue(text.isascii())
                     self.assertLessEqual(len(text),280)
-                    self.assertIn('wallet volume',text)
+                    self.assertIn('market volume',text)
                     self.assertIn('unique wallets',text)
-                    self.assertIn('of volume',text)
+                    self.assertIn('of wallet volume',text)
                     if changes:self.assertIn('ZEC added during Aug 2026',text)
+
+    def test_missing_market_volume_has_no_average_or_asset_mix(self):
+        current=self.sample(amount=60_000_000)
+        current.update(volume_micro_usdc=None, asset_volume_micro_usdc=None)
+        current['daily_volume_micro_usdc']={day:None for day in current['daily_volume_micro_usdc']}
+        previous=self.sample('2026-08',30_000_000)
+        previous['suspected_bot_volume_micro_usdc']=3_000_000
+        values=monthly.display_values(current,previous)
+        self.assertEqual(values['average_daily_volume'],'N/A')
+        self.assertEqual(values['volume_change'][0],'N/A')
+        self.assertEqual(values['average_daily_volume_change'][0],'N/A')
+        self.assertEqual(values['bot_share'],'50.00%')
+        self.assertEqual(values['bot_share_change'][0],'+40.00 pp')
+        text=monthly.render_tweet(current,previous,[])
+        self.assertIn('N/A USDC market volume',text)
+        self.assertIn('50.00% of wallet volume',text)
+        self.assertLessEqual(len(text),280)
+        _,boxes=monthly.render(current,previous,[])
+        labels=[box['text'] for box in boxes]
+        self.assertIn('N/A USDC',labels)
+        self.assertIn('N/A: market volume incomplete',labels)
+        self.assertNotIn('BTC 100.00%',labels)
+        self.assertFalse(any(label.startswith('PEAK') for label in labels))
 
     def test_render_31_days_large_values_and_zero(self):
         for current in (self.sample('2026-08'),self.sample('2026-08',2**63-1),self.sample('2026-02',0)):
@@ -140,7 +165,7 @@ class MonthlyTests(unittest.TestCase):
                 status=monthly.main(['--month','2026-09','--db',str(path),'--output-dir',str(output)])
             self.assertEqual(status,0)
             stem='updown_monthly_2026-09'
-            self.assertEqual({p.name for p in output.iterdir()},{stem+'.png',stem+'.json',stem+'_tweet.md'})
+            self.assertEqual({p.name for p in output.iterdir()},{stem+'.png',stem+'.json',stem+'_tweet.md',stem+'_caption_zh.md',stem+'_publish.json'})
             payload=json.loads((output/(stem+'.json')).read_text())
             self.assertEqual(payload['current']['volume_micro_usdc'],1_000_000)
             self.assertIsNotNone(payload['previous'])

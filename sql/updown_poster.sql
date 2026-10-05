@@ -19,7 +19,7 @@ WITH wallet_features AS (
 )
 SELECT c.date_utc, c.completed_markets AS total_markets,
        COUNT(w.wallet) AS unique_wallets,
-       COALESCE(SUM(w.amount_micro_usdc), 0) AS volume_micro_usdc,
+       COALESCE(SUM(w.amount_micro_usdc), 0) AS wallet_volume_micro_usdc,
        COALESCE(SUM(w.suspected_bot), 0) AS suspected_bot_wallets,
        COALESCE(SUM(CASE WHEN w.suspected_bot THEN w.amount_micro_usdc ELSE 0 END), 0)
            AS suspected_bot_volume_micro_usdc

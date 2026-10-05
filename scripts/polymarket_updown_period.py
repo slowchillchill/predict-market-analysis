@@ -1,16 +1,18 @@
 """周、月报告共用的只读区间聚合；按日处理钱包特征，保留区间钱包并集。"""
 
-from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 import sqlite3
 
 import polymarket_updown_poster as daily
+from polymarket_market_volume_query import load_market_volume
 
 
 def changes(current: dict, previous: dict | None, field: str, period: str) -> tuple[str, str]:
     if previous is None:
         return "N/A", f"prior {period} unavailable"
+    if current[field] is None or previous[field] is None:
+        return "N/A", "market volume unavailable"
     if previous[field] == 0:
         return "N/A", f"prior {period} = 0"
     return daily.percent_text(current[field]-previous[field],previous[field],change=True), f"vs prior {period}"
@@ -19,15 +21,17 @@ def changes(current: dict, previous: dict | None, field: str, period: str) -> tu
 def bot_share_change(current: dict, previous: dict | None, period: str) -> tuple[str, str]:
     if previous is None:
         return "N/A", f"prior {period} unavailable"
-    if not current["volume_micro_usdc"] or not previous["volume_micro_usdc"]:
+    if not current["wallet_volume_micro_usdc"] or not previous["wallet_volume_micro_usdc"]:
         return "N/A", "zero volume denominator"
-    delta = ((Decimal(current["suspected_bot_volume_micro_usdc"])/current["volume_micro_usdc"]
-              - Decimal(previous["suspected_bot_volume_micro_usdc"])/previous["volume_micro_usdc"])*100)
+    delta = ((Decimal(current["suspected_bot_volume_micro_usdc"])/current["wallet_volume_micro_usdc"]
+              - Decimal(previous["suspected_bot_volume_micro_usdc"])/previous["wallet_volume_micro_usdc"])*100)
     delta = delta.quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)
     return (f"{delta:+.2f} pp" if delta else "0.00 pp"), f"vs prior {period}"
 
 
-def millions(value: int) -> str:
+def millions(value: int | None) -> str:
+    if value is None:
+        return "N/A"
     return str((Decimal(value)/10**12).quantize(Decimal("0.01"),rounding=ROUND_HALF_UP))
 
 
@@ -41,8 +45,7 @@ def load_period(db: sqlite3.Connection, start: date, end: date, *, required: boo
             raise daily.IncompleteDay("以下日期尚未完整采集，未生成海报：" + ", ".join(missing))
         return None
     wallets, bot_wallets = set(), set()
-    assets = defaultdict(int)
-    volumes = dict.fromkeys(days,0)
+    wallet_volume = 0
     bot_volume = 0
     query = (daily.ROOT / "sql/updown_period.sql").read_text(encoding="utf-8")
     for day in days:
@@ -50,10 +53,7 @@ def load_period(db: sqlite3.Connection, start: date, end: date, *, required: boo
         for r in db.execute(query,{"start": day, "end": str(date.fromisoformat(day)+timedelta(days=1))}):
             wallet, amount = r["wallet"], r["amount_micro_usdc"]
             wallets.add(wallet)
-            volumes[day] += amount
-            coin = r["series_slug"].split("-",1)[0]
-            coin = {"solana":"sol", "dogecoin":"doge"}.get(coin,coin).upper()
-            assets[coin] += amount
+            wallet_volume += amount
             if wallet not in wallet_days:
                 wallet_days[wallet] = [0,r["first_timestamp"],r["last_timestamp"],0]
             f = wallet_days[wallet]
@@ -71,8 +71,7 @@ def load_period(db: sqlite3.Connection, start: date, end: date, *, required: boo
         "start_date_utc":str(start), "end_date_utc_exclusive":str(end),
         "coverage":[coverage[d] for d in days],
         "total_markets":sum(coverage[d]["completed_markets"] for d in days),
-        "volume_micro_usdc":sum(volumes.values()), "unique_wallets":len(wallets),
+        "wallet_volume_micro_usdc":wallet_volume, "unique_wallets":len(wallets),
         "suspected_bot_wallets":len(bot_wallets), "suspected_bot_volume_micro_usdc":bot_volume,
-        "daily_volume_micro_usdc":volumes,
-        "asset_volume_micro_usdc":dict(sorted(assets.items(),key=lambda pair:(-pair[1],pair[0]))),
+        **load_market_volume(db, start, end),
     }

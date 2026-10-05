@@ -31,6 +31,7 @@ class WeeklyTests(unittest.TestCase):
             CREATE TABLE updown_target_series(series_slug TEXT);
             CREATE TABLE markets(slug TEXT, series_slug TEXT, end_time TEXT);
             CREATE TABLE trades(market_slug TEXT, wallet TEXT, timestamp INTEGER, amount_micro_usdc INTEGER);
+            CREATE TABLE market_volume(market_slug TEXT PRIMARY KEY, amount_micro_usdc INTEGER, completed_at TEXT);
         """)
         for i in range(7):
             self.db.execute("INSERT INTO updown_coverage VALUES (?,1,3)", (str(self.start+timedelta(days=i)),))
@@ -46,6 +47,7 @@ class WeeklyTests(unittest.TestCase):
         slug = str(self.market_index)
         day = self.start + timedelta(days=offset)
         self.db.execute("INSERT INTO markets VALUES (?,?,?)", (slug, series, f"{day}T00:00:00Z"))
+        self.db.execute("INSERT INTO market_volume VALUES (?,?,'done')", (slug, amount*count))
         # 成交发生于统计周之外：归属必须由市场结束日决定。
         self.db.executemany("INSERT INTO trades VALUES (?,?,?,?)", [
             (slug, wallet, 100000 + (span*i//(count-1) if count > 1 else 0), amount)
@@ -79,18 +81,18 @@ class WeeklyTests(unittest.TestCase):
         self.assertEqual(weekly.changes({}, None, "unique_wallets"), ("N/A", "prior week unavailable"))
 
     def test_percentage_points_use_unrounded_ratios(self):
-        current = {"volume_micro_usdc": 3, "suspected_bot_volume_micro_usdc": 1}
-        prior = {"volume_micro_usdc": 7, "suspected_bot_volume_micro_usdc": 2}
+        current = {"wallet_volume_micro_usdc": 3, "volume_micro_usdc": 3, "suspected_bot_volume_micro_usdc": 1}
+        prior = {"wallet_volume_micro_usdc": 7, "volume_micro_usdc": 7, "suspected_bot_volume_micro_usdc": 2}
         self.assertEqual(weekly.bot_share_change(current, prior)[0], "+4.76 pp")
         self.assertEqual(weekly.changes({"v":150}, {"v":125}, "v")[0], "+20.00%")
         self.assertEqual(weekly.changes({"v":1}, {"v":0}, "v")[0], "N/A")
-        current["volume_micro_usdc"] = 0
+        current["wallet_volume_micro_usdc"] = 0
         self.assertEqual(weekly.bot_share_change(current, prior)[0], "N/A")
 
     def test_tweet_values_and_no_observation(self):
         current = {
             "start_date_utc": "2026-09-14", "end_date_utc_exclusive": "2026-09-21",
-            "volume_micro_usdc": 150_000_000_000_000, "unique_wallets": 48600,
+            "volume_micro_usdc": 150_000_000_000_000, "wallet_volume_micro_usdc": 150_000_000_000_000, "unique_wallets": 48600,
             "suspected_bot_wallets": 840, "suspected_bot_volume_micro_usdc": 78_000_000_000_000,
         }
         prior = {"volume_micro_usdc": 125_000_000_000_000, "unique_wallets": 45000,
@@ -98,24 +100,43 @@ class WeeklyTests(unittest.TestCase):
         self.assertEqual(weekly.render_tweet(current, prior),
             "#Polymarket Crypto Up/Down | Weekly\n"
             "2026-09-14/2026-09-20 UTC\n"
-            "150.00M USDC wallet volume (+20.00% WoW)\n"
+            "150.00M USDC market volume (+20.00% WoW)\n"
             "48,600 unique wallets (+8.00% WoW)\n"
-            "840 suspected bot wallets: 52.00% of volume\n"
-            "Market end dates; buys+sells. Bot rules in chart.\n"
+            "840 suspected bot wallets: 52.00% of wallet volume\n"
+            "Market end dates; taker side once. Rules in chart.\n"
             )
 
     def test_tweet_missing_baseline_zero_volume_and_cross_year(self):
         current = {"start_date_utc":"2025-12-29", "end_date_utc_exclusive":"2026-01-05",
-                   "volume_micro_usdc": 1_005_000, "unique_wallets": 1,
+                   "volume_micro_usdc": 1_005_000, "wallet_volume_micro_usdc": 1_005_000, "unique_wallets": 1,
                    "suspected_bot_wallets":0, "suspected_bot_volume_micro_usdc":0}
         text = weekly.render_tweet(current, None)
         self.assertIn("2025-12-29/2026-01-04 UTC", text)
-        self.assertIn("1.01 USDC wallet volume (N/A: no prior week)", text)
-        zero = {**current, "volume_micro_usdc":0, "unique_wallets":0}
+        self.assertIn("1.01 USDC market volume (N/A: no prior week)", text)
+        zero = {**current, "volume_micro_usdc":0, "wallet_volume_micro_usdc":0, "unique_wallets":0}
         text = weekly.render_tweet(zero, zero)
-        self.assertIn("0.00 USDC wallet volume (N/A: zero base)", text)
+        self.assertIn("0.00 USDC market volume (N/A: zero base)", text)
         self.assertIn("0 unique wallets (N/A: zero base)", text)
-        self.assertIn("N/A (zero volume)", text)
+        self.assertIn("N/A (zero wallet volume)", text)
+
+    def test_missing_market_volume_keeps_daily_gaps_and_wallet_share(self):
+        current = {"start_date_utc":"2026-09-14", "end_date_utc_exclusive":"2026-09-21",
+                   "volume_micro_usdc":None, "wallet_volume_micro_usdc":20_000_000,
+                   "unique_wallets":2, "suspected_bot_wallets":1, "suspected_bot_volume_micro_usdc":5_000_000,
+                   "daily_volume_micro_usdc":{str(self.start+timedelta(days=i)):None if i<6 else 10_000_000 for i in range(7)},
+                   "asset_volume_micro_usdc":None}
+        previous = {"volume_micro_usdc":None, "wallet_volume_micro_usdc":10_000_000,
+                    "unique_wallets":1, "suspected_bot_volume_micro_usdc":1_000_000}
+        text = weekly.render_tweet(current, previous)
+        self.assertIn("N/A USDC market volume", text)
+        self.assertIn("25.00% of wallet volume", text)
+        self.assertIn("+100.00% WoW", text)
+        self.assertLessEqual(len(text),280)
+        _, boxes = weekly.render(current, previous)
+        labels = [box["text"] for box in boxes]
+        self.assertGreaterEqual(labels.count("N/A"),6)
+        self.assertIn("N/A: market volume incomplete",labels)
+        self.assertIn("+15.00 pp",labels)
 
     def test_cli_creates_tweet_alongside_poster_and_json(self):
         self.trades(0, "wallet", 1, 0, amount=1_000_000_000_000)
@@ -133,9 +154,9 @@ class WeeklyTests(unittest.TestCase):
             self.assertEqual(result, 0)
             stem = "updown_weekly_2026-09-14_2026-09-20"
             self.assertEqual({p.name for p in output.iterdir()},
-                             {f"{stem}.png", f"{stem}.json", f"{stem}_tweet.md"})
+                             {f"{stem}.png", f"{stem}.json", f"{stem}_tweet.md", f"{stem}_caption_zh.md", f"{stem}_publish.json"})
             text = (output / f"{stem}_tweet.md").read_text(encoding="utf-8")
-            self.assertIn("1.00M USDC wallet volume (N/A: no prior week)", text)
+            self.assertIn("1.00M USDC market volume (N/A: no prior week)", text)
             self.assertIn("1 unique wallets (N/A: no prior week)", text)
             data = json.loads((output / f"{stem}.json").read_text())
             self.assertEqual(data["current"]["volume_micro_usdc"], 1_000_000_000_000)
@@ -144,13 +165,13 @@ class WeeklyTests(unittest.TestCase):
     def test_tweet_fits_x_with_missing_zero_and_large_values(self):
         # ASCII 模板不含链接，按 X 官方规则每个字符（包括换行）权重为 1。
         current = {"start_date_utc":"2026-09-14", "end_date_utc_exclusive":"2026-09-21",
-                   "volume_micro_usdc":144675200934478, "unique_wallets":29458,
+                   "volume_micro_usdc":144675200934478, "wallet_volume_micro_usdc":144675200934478, "unique_wallets":29458,
                    "suspected_bot_wallets":697, "suspected_bot_volume_micro_usdc":79480660514454}
         prior = {"volume_micro_usdc":147290101021781, "unique_wallets":25280,
                  "suspected_bot_volume_micro_usdc":83393159647792}
-        zero = {**current, "volume_micro_usdc":0, "unique_wallets":0,
+        zero = {**current, "volume_micro_usdc":0, "wallet_volume_micro_usdc":0, "unique_wallets":0,
                 "suspected_bot_wallets":0, "suspected_bot_volume_micro_usdc":0}
-        large = {**current, "volume_micro_usdc":2**63-1, "unique_wallets":2**63-1,
+        large = {**current, "volume_micro_usdc":2**63-1, "wallet_volume_micro_usdc":2**63-1, "unique_wallets":2**63-1,
                  "suspected_bot_wallets":2**63-1, "suspected_bot_volume_micro_usdc":2**63-1}
         small = {"volume_micro_usdc":1,"unique_wallets":1,"suspected_bot_volume_micro_usdc":0}
         for now, before in [(current,prior),(current,None),(current,zero),(zero,zero),
@@ -160,9 +181,9 @@ class WeeklyTests(unittest.TestCase):
                 self.assertTrue(text.isascii())
                 self.assertNotIn("http", text)
                 self.assertLessEqual(len(text),280)
-                self.assertIn("wallet volume", text)
+                self.assertIn("market volume", text)
                 self.assertIn("unique wallets", text)
-                self.assertIn("of volume", text)
+                self.assertIn("of wallet volume", text)
 
 
 if __name__ == "__main__":
