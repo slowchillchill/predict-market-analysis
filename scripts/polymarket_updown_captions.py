@@ -45,7 +45,7 @@ def render_zh(payload: dict) -> tuple[str, str]:
     label, previous_label = {'daily': ('日报', '前日'), 'weekly': ('周报', '前周'), 'monthly': ('月报', '前月')}[kind]
     current, previous = payload['current'], payload.get('previous')
     title_date = target if kind != 'weekly' else start[5:]+'至'+end[5:]
-    title = f'{title_date}涨跌市场{label}'
+    title = f'{title_date}地址观察{label}'
     # Keep the displayed USDC amount exact to cents; no float or 万/亿 conversion.
     amount = 'N/A' if current['volume_micro_usdc'] is None else f"{(Decimal(current['volume_micro_usdc'])/1_000_000).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
 
@@ -59,20 +59,24 @@ def render_zh(payload: dict) -> tuple[str, str]:
         return f'较{previous_label} {percent(current[field]-previous[field], previous[field], signed=True)}'
 
     market_volume = current.get('volume_basis') == 'taker_only'
-    volume_label = '市场成交额' if market_volume else '钱包交易量'
+    volume_label = '市场成交额' if market_volume else '地址侧买入与卖出金额合计'
     wallet_volume = current['wallet_volume_micro_usdc'] if market_volume else current['volume_micro_usdc']
     share = percent(current['suspected_bot_volume_micro_usdc'], wallet_volume)
-    share = '不适用（钱包成交额为0）' if share == 'N/A' else share
-    lines = [f'Polymarket 加密资产涨跌市场{label}', f'统计区间：{start}'+(f' 至 {end}' if end != start else '')+'（UTC）', '',
-             f'{volume_label}：{amount} USDC（{comparison("volume_micro_usdc")}）',
-             f'去重交易钱包：{current["unique_wallets"]:,} 个（{comparison("unique_wallets")}）',
-             f'疑似机器人钱包：{current["suspected_bot_wallets"]:,} 个，占钱包成交额 {share}', '',
-             ('按市场结束日期统计；市场成交额仅计吃单方一次。钱包成交额为所有钱包买入＋卖出。' if market_volume
-              else '按市场结束日期统计；钱包交易量为买入＋卖出。')]
+    share = '不适用（地址侧买入与卖出金额合计为0）' if share == 'N/A' else share
+    lines = [f'交易地址行为观察·{label}', f'统计区间：{start}'+(f' 至 {end}' if end != start else '')+'（UTC）', '',
+             f'本期发生交易的去重地址：{current["unique_wallets"]:,} 个（{comparison("unique_wallets")}）。',
+             '地址数不等于参与人数：同一人可能使用多个地址。', '',
+             f'符合高频活动筛选条件的地址：{current["suspected_bot_wallets"]:,} 个。',
+             f'这些地址的买入与卖出金额合计，占全部地址对应金额的 {share}。']
     rule = payload['bot_rule']
-    lines.append(f'疑似机器人判定：平均交易间隔≤{rule["max_mean_interval_seconds"]}秒，交易跨度≥{rule["min_span_minutes"]}分钟。')
+    lines.append(f'筛选条件：平均交易间隔≤{rule["max_mean_interval_seconds"]}秒，交易跨度≥{rule["min_span_minutes"]}分钟。')
+    lines.append('这是基于活动频率的规则筛选，不代表已确认由自动程序控制。')
     if kind != 'daily':
-        lines.append('疑似机器人按日判定；周期钱包数取每日名单并集，机器人成交额汇总每日被标记钱包的成交额。')
+        lines.append('按日筛选；本期地址数取每日名单并集，筛选地址的金额仅汇总其被标记当日的买入与卖出金额。')
+    lines.extend(['', f'{volume_label}：{amount} USDC（{comparison("volume_micro_usdc")}）。',
+                  ('市场成交额仅计吃单方一次；上述地址侧金额为买入＋卖出，两者口径不同。' if market_volume
+                   else '金额按地址侧买入＋卖出统计，不等于仅计吃单方一次的市场成交额。'), '',
+                  '数据来源：Polymarket 公开数据；范围为上述 UTC 区间结束的 Up/Down 类市场。'])
     groups = sorted({(r['series_slug'].split('-', 1)[0].upper(), r['first_end_time'][:7]) for r in payload.get('scope_changes', []) if r.get('first_end_time')})
     for asset, month in groups:
         lines.append(f'统计范围变化：{asset} 于 {month} 加入。')
@@ -81,7 +85,7 @@ def render_zh(payload: dict) -> tuple[str, str]:
         slots = adjustment['excluded_unavailable_slots']
         count = len(slots) if isinstance(slots, list) else int(slots)
         lines.append(f'比较期口径：{adjustment["comparison_month"]} 排除 {count} 个不可用市场时段；该调整仅适用于本次报告。')
-    lines.extend(['', '#Polymarket #数据分析'])
+    lines.extend(['', '用于历史数据与统计方法说明，不提供参与指引或投资建议。', '#数据分析 #统计方法'])
     return title, '\n'.join(lines)+'\n'
 
 

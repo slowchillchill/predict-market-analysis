@@ -26,7 +26,7 @@ class CaptionTests(unittest.TestCase):
         p['current']['volume_micro_usdc']=0
         p['current']['wallet_volume_micro_usdc']=0
         self.assertIn('前日基数为0',captions.render_zh(p)[1])
-        self.assertIn('钱包成交额为0',captions.render_zh(p)[1])
+        self.assertIn('地址侧买入与卖出金额合计为0',captions.render_zh(p)[1])
         self.assertEqual(captions.percent(-1,10000000,signed=True),'0.00%')
 
     def test_market_volume_missing_and_legacy_wallet_caption(self):
@@ -35,15 +35,27 @@ class CaptionTests(unittest.TestCase):
         text=captions.render_zh(p)[1]
         self.assertIn('市场成交额：N/A USDC',text)
         self.assertIn('单边市场成交额数据不完整',text)
-        self.assertIn('占钱包成交额 9.50%',text)
+        self.assertIn('占全部地址对应金额的 9.50%',text)
         self.assertIn('较前日 -25.00%',text)
         p=self.sample()
         del p['current']['volume_basis']
         del p['current']['wallet_volume_micro_usdc']
         text=captions.render_zh(p)[1]
-        self.assertIn('钱包交易量：123.46 USDC',text)
+        self.assertIn('地址侧买入与卖出金额合计：123.46 USDC',text)
         self.assertNotIn('市场成交额：',text)
-        self.assertIn('占钱包成交额 19.00%',text)
+        self.assertIn('占全部地址对应金额的 19.00%',text)
+
+    def test_research_wording_preserves_source_and_screening_limits(self):
+        title, text = captions.render_zh(self.sample())
+        self.assertEqual(title, '2026-09-30地址观察日报')
+        self.assertIn('地址数不等于参与人数', text)
+        self.assertIn('平均交易间隔≤60秒，交易跨度≥90分钟', text)
+        self.assertIn('不代表已确认由自动程序控制', text)
+        self.assertIn('数据来源：Polymarket 公开数据', text)
+        self.assertIn('Up/Down 类市场', text)
+        self.assertIn('两者口径不同', text)
+        self.assertNotIn('#Polymarket', text)
+        self.assertNotIn('疑似机器人钱包', text)
 
     def test_calendar_and_scope(self):
         p=self.sample(); del p['date_utc']
@@ -54,7 +66,7 @@ class CaptionTests(unittest.TestCase):
         p['scope_changes']=[{'series_slug':'zec-up-or-down-5m','first_end_time':'2026-08-04T21:40:00Z'}]
         p['coverage_adjustment']={'comparison_month':'2026-08','excluded_unavailable_slots':[{}]*214}
         text=captions.render_zh(p)[1]
-        self.assertIn('去重交易钱包：3 个',text)
+        self.assertIn('本期发生交易的去重地址：3 个',text)
         self.assertIn('ZEC 于 2026-08 加入',text)
         self.assertIn('排除 214 个',text)
 
@@ -70,6 +82,7 @@ class CaptionTests(unittest.TestCase):
             self.assertEqual(before,[p.read_bytes() for p in paths])
             self.assertEqual(result['platforms']['tiktok']['body'],'Original English\n')
             self.assertEqual(result['platforms']['x']['body'],'Original English\n')
+            self.assertEqual(result['platforms']['linkedin']['body'],'Original English\n')
             self.assertLessEqual(captions.utf16_length(result['platforms']['douyin']['title']),20)
             tweet.write_text('x'*4001)
             with self.assertRaises(ValueError): captions.write_sidecars(source)
