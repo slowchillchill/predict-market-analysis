@@ -43,7 +43,7 @@ class YesterdayTests(unittest.TestCase):
             ("collect", ["collect", "--start-date", "2026-12-31", "--end-date", "2027-01-01",
                          "--proxy", "socks5h://127.0.0.1:12345", "--db", "local data/shared.sqlite3"]),
             ("poster", ["--date", "2026-12-31", "--db", "local data/shared.sqlite3",
-                        "--output-dir", "local output"]),
+                        "--output-dir", "local output", "--with-distribution"]),
         ])
 
     def test_incomplete_failed_or_interrupted_collection_never_generates_poster(self):
@@ -64,7 +64,9 @@ class YesterdayTests(unittest.TestCase):
                              "socks5h://127.0.0.1:20810")
             self.assertEqual(collection_args[-1], str(workflow.daily.core.DEFAULT_DB))
             self.assertEqual(poster_args[3], str(workflow.daily.core.DEFAULT_DB))
-            self.assertEqual(poster_args[-1], str(workflow.daily.core.ROOT / "outputs/posters"))
+            self.assertEqual(poster_args[poster_args.index("--output-dir") + 1],
+                             str(workflow.daily.core.ROOT / "outputs/posters"))
+            self.assertIn("--with-distribution", poster_args)
 
     def test_unhandled_collection_error_does_not_start_poster(self):
         with patch.object(workflow.daily, "main", side_effect=RuntimeError("download failed")), \

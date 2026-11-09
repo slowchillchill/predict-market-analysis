@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""经香港代理采集 UTC 昨日市场，完成后生成英文海报、数据 JSON 和推文。"""
+"""采集 UTC 昨日市场，完成后生成总览、新版 BUY 分布及完整发布图文包。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     # 固定本次日期，采集跨 UTC 午夜时仍为同一天生成海报。
     today = datetime.now(timezone.utc).date()
     yesterday = today - timedelta(days=1)
-    print(f"目标市场结束日：{yesterday}（UTC）；采集完成后生成海报和推文。", flush=True)
+    print(f"目标市场结束日：{yesterday}（UTC）；采集完成后生成总览、新版 BUY 分布、推文和抖音图文包。", flush=True)
     try:
         result = daily.main([
             "collect", "--start-date", yesterday.isoformat(), "--end-date", today.isoformat(),
@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         return poster.main([
             "--date", yesterday.isoformat(), "--db", str(args.db),
             "--output-dir", str(args.output_dir),
+            "--with-distribution",
         ])
     except KeyboardInterrupt:
         print("流程已中断。", file=sys.stderr)

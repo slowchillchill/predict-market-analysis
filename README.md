@@ -52,7 +52,7 @@ After installing both dependencies, run directly. The script defaults to the loc
 .venv-btc5m/bin/python scripts/polymarket_updown_yesterday.py
 ```
 
-This fixes yesterday's UTC date at startup using the system clock, collects that day's markets using existing download progress, then generates the English poster, JSON, and post text only after collection succeeds. It uses the built-in proxy address without switching VPN nodes or checking the exit location; use `--proxy` to override the address in another environment. Previously completed markets are reused. Day-over-day comparisons use existing prior-day data; missing prior-day data displays `N/A`. A rerun after UTC midnight targets the new yesterday; use the explicit-date commands below to finish an older date.
+This fixes yesterday's UTC date at startup using the system clock, collects that day's markets using existing download progress, then generates the overview, an all-series BUY distribution poster, their JSON data, and post text only after collection succeeds. It uses the built-in proxy address without switching VPN nodes or checking the exit location; use `--proxy` to override the address in another environment. Previously completed markets are reused. Day-over-day comparisons use existing prior-day data; missing prior-day data displays `N/A`. A rerun after UTC midnight targets the new yesterday; use the explicit-date commands below to finish an older date.
 
 ### 2. Collect data
 
@@ -92,16 +92,33 @@ For a complete day, this writes:
 
 An incomplete day produces only the coverage report. Rerun collection to address gaps.
 
+Export all-series BUY distribution statistics separately, using only the Python standard library:
+
+```bash
+python3 scripts/polymarket_updown_daily.py distribution \
+  --date 2026-11-07 --db data/raw/btc5m.sqlite3 --output-dir outputs/updown
+```
+
+This writes `updown_buy_trade_distribution_all_series_2026-11-07.json` with reconstructed trade counts,
+Shares, Up-equivalent notional, and explicit percentage denominators. It reads local data only and returns
+`2` without exporting new statistics if coverage or reconstruction validation fails.
+
 ### 4. Generate an English poster and post text
 
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_updown_poster.py \
   --date 2026-09-18 \
   --db data/raw/btc5m.sqlite3 \
-  --output-dir outputs/posters
+  --output-dir outputs/posters --with-distribution
 ```
 
 This writes `updown_2026-09-18.png`, `updown_2026-09-18.json`, and `updown_2026-09-18_tweet.md`. The Markdown file contains the English post body. The script generates files locally; publishing to X is a separate step. Generating the same date again replaces its output files.
+
+`--with-distribution` also writes `updown_buy_trade_distribution_all_series_2026-09-18.png` and matching JSON.
+It also updates the English caption and Chinese Douyin caption with both BUY populations. The four Douyin cards become overview, all-wallet BUY distribution, suspected-bot BUY distribution, and methods. English platform manifests include the overview and distribution images in order; see [publishing rules](docs/updown_publishing.md).
+The overview JSON links both assets with SHA256 hashes. Yesterday's automated workflow enables this flag;
+omitting it manually retains overview-only generation. Distribution notional uses Up-equivalent price × shares
+and does not replace the overview's taker-side market volume. See [distribution definitions](docs/updown_bot_price_poster.md).
 
 The current day must be complete. If the previous day is incomplete or its comparison value is zero, the affected day-over-day comparison displays `N/A`. The background and Inter font are bundled, so rendering needs no image-generation service or system font installation.
 
@@ -121,7 +138,8 @@ The default selects the previous complete Monday-to-Sunday week using the UTC da
 
 This writes `updown_weekly_2026-09-14_2026-09-20.png`, matching `.json`, and `_tweet.md` files under `outputs/posters/`. It reads the local database without collecting data. All seven target days must be complete; comparisons use the preceding complete week and display `N/A` for missing or zero baselines.
 
-Weekly wallets are deduplicated across the entire week. Suspected bots are classified daily: the weekly count is the union of flagged wallets, and bot volume includes only each flagged wallet's volume in the corresponding day's markets. Post text keeps the core figures, leaves detailed methodology in the chart, and includes no narrative takeaway. The template uses a 280-character budget and shortens supporting text when numbers require more space.
+Weekly wallets are deduplicated across the entire week. Suspected-bot labels persist from the first qualifying UTC market-end date onward. The weekly count is the union of active labelled wallets; volume includes their activity on and after that first date. Future labels never apply to earlier dates. Post text uses a 280-character budget.
+The default weekly entry also generates the approved all-wallet/suspected-bot BUY distribution PNG/JSON, updates English and Chinese captions, and writes two English images and six Douyin cards to the publish manifest. Use `--without-distribution` for the original package.
 
 For scheduling, run the command without a date argument so each invocation selects the previous week automatically. Timers are local configuration and are not installed by cloning this repository. See the [weekly poster guide](docs/updown_weekly_poster.md).
 
@@ -142,7 +160,8 @@ The UTC date at startup selects the previous complete calendar month and compare
 
 This writes `updown_monthly_2026-09.png`, matching `.json`, and `_tweet.md` files. Rerunning the same month replaces its outputs. The monthly palette uses ivory, forest green, and graphite to distinguish it from the dark blue daily and burgundy-and-gold weekly posters. Post text uses the ordinary X post budget of 280 characters.
 
-Wallets are deduplicated across the month, and daily averages use each month's actual day count. Suspected bots are classified daily: monthly wallets are the union of flagged wallets, and bot volume sums each flagged wallet's volume in the corresponding day's markets. Monthly share changes are expressed in percentage points. The poster includes daily trends and asset shares; changes caused by series launches are disclosed in the poster and post text.
+Wallets are deduplicated across the month, and daily averages use each month's actual day count. Bot labels persist from the first qualifying date onward; monthly counts use active-wallet unions and exclude activity before the first hit. Monthly share changes use percentage points. The poster includes daily trends and asset shares; series launches are disclosed in the poster and post text.
+The monthly entry includes the approved BUY distribution page by default, with matching English text, Chinese text, six Douyin cards and a two-image English manifest. Both BUY populations use the same reconstruction and persistent-label rules as daily reports. `--without-distribution` keeps the original package. See [publishing rules](docs/updown_publishing.md).
 
 Weekly and monthly reports share a query that aggregates one day at a time, with both comparison periods read in one read-only transaction. Monthly reporting does not collect data. Initialize the views through the collector and prepare both months before running it. An incomplete target month exits with code `2` without generating new files; an incomplete prior month or a zero comparison baseline displays `N/A` for the affected comparison.
 
@@ -168,10 +187,10 @@ See the [monthly poster guide](docs/updown_monthly_poster.md).
 | Wallet volume | Buy expenditure plus sell proceeds. Each record's `price × size` is rounded using `ROUND_HALF_UP` to integer micro-USDC before summing. This is not a single-sided market-volume metric. |
 | Unique wallets | Lowercase wallet addresses deduplicated across all selected markets in the day, week, or month. Weekly and monthly counts are not sums of daily wallet counts. |
 | Top 200 | Wallets ranked by aggregated volume descending, then address ascending to break ties. |
-| Suspected bots in posters | Wallets with an average trade interval of at most 60 seconds and a first-to-last trade span of at least 90 minutes, across the selected markets. No minimum market count is required. This is a behavioral heuristic, not identity verification. |
+| Suspected bots in posters | First observed daily hit across all crypto Up/Down series: average trade interval ≤60 seconds and span ≥90 minutes. Labels persist from that date onward, with no future backfill. Daily, weekly and monthly statistics share the registry. This is a behavioral heuristic, not identity verification. |
 | Completeness | Expected per-series market counts plus completed trade pagination. This is API collection coverage, not a full on-chain reconciliation. |
 
-The collector uses `/v2/trades` with `taker_only=false`, `filter_type=TOKENS`, `filter_amount=1e-18`, and `limit=1000`, following cursors until `next_cursor=null`. It preserves returned records rather than deduplicating by transaction hash. A separate `taker_only=true` feed accumulates market volume with independent per-market pagination progress. Bot volume and bot shares continue to use two-sided wallet volume.
+The collector uses `/v2/trades` with `taker_only=false`, `filter_type=TOKENS`, `filter_amount=1e-18`, and `limit=1000`, following cursors until `next_cursor=null`. It preserves source records; the shared reconstruction deduplicates report events. A separate `taker_only=true` feed accumulates market volume. Poster wallet amounts now sum BUY only. With a distribution, the overview bot panel uses the same reconstructed BUY-event totals and Up-equivalent denominator as the distribution; the ratio measures participation coverage, not labelled wallets' own cash contribution. Classification features retain the original BUY+SELL activity rule.
 
 This change does not backfill history. The existing scheduled job begins collecting single-sided volume on October 6, 2026, for markets ending on October 5 UTC. Missing historical market volume is `N/A`; totals and comparisons never substitute wallet volume or sum only the available part of a period. Existing historical reports are not rewritten.
 

@@ -16,6 +16,8 @@ from pathlib import Path
 
 import polymarket_updown_poster as daily
 import polymarket_updown_period as period
+from polymarket_updown_buy_metrics import BASIS, event_summary, amount as event_amount, percentage
+from polymarket_updown_period_package import load_period_distribution, render_distribution_tweet, write_package
 
 ROOT = daily.ROOT
 BACKGROUND = ROOT / "assets/posters/updown_monthly_background_v1.png"
@@ -51,15 +53,28 @@ def average_change(current: dict, previous: dict | None) -> tuple[str, str]:
     return daily.percent_text(now-before,before,change=True), "vs prior month"
 
 
-def display_values(current: dict, previous: dict | None) -> dict:
-    return {
+def display_values(current: dict, previous: dict | None, distribution_data: dict | None = None) -> dict:
+    values = {
         "volume_change":period.changes(current,previous,"volume_micro_usdc","month"),
         "wallet_change":period.changes(current,previous,"unique_wallets","month"),
         "average_daily_volume":daily.amount_text(None if current["volume_micro_usdc"] is None else Decimal(current["volume_micro_usdc"])/days_in_period(current)),
         "average_daily_volume_change":average_change(current,previous),
         "bot_share":daily.percent_text(current["suspected_bot_volume_micro_usdc"],current["wallet_volume_micro_usdc"]),
         "bot_share_change":period.bot_share_change(current,previous,"month"),
+        'bot_panel_basis':'wallet_buys_only',
+        'bot_volume':daily.amount_text(current['suspected_bot_volume_micro_usdc']),
+        'bot_denominator':daily.amount_text(current['wallet_volume_micro_usdc']),
+        'bot_volume_share':daily.percent_text(current['suspected_bot_volume_micro_usdc'],current['wallet_volume_micro_usdc']),
     }
+    if distribution_data is not None:
+        summary = event_summary(distribution_data)
+        values.update(bot_panel_basis=BASIS,
+                      bot_volume=event_amount(summary['suspected_bots']['notional_usdc_exact']),
+                      bot_denominator=event_amount(summary['all_wallets']['notional_usdc_exact']),
+                      bot_volume_share=percentage(summary['bot_up_notional_coverage_percent']),
+                      bot_share=percentage(summary['bot_up_notional_coverage_percent']),
+                      bot_share_change=('N/A','prior BUY distribution unavailable'))
+    return values
 
 
 def scope_changes(db: sqlite3.Connection, start: date, end: date) -> list[dict]:
@@ -75,7 +90,10 @@ def scope_note(changes: list[dict]) -> str:
     return "Scope: " + "; ".join(f"{coin} added during {month}" for coin,month in groups) + "." if groups else ""
 
 
-def render_tweet(current: dict, previous: dict | None, scope: list[dict]) -> str:
+def render_tweet(current: dict, previous: dict | None, scope: list[dict],
+                 distribution_data: dict | None = None) -> str:
+    if distribution_data is not None:
+        return render_distribution_tweet(current, distribution_data, 'monthly', scope_note=scope_note(scope))
     start = date.fromisoformat(current["start_date_utc"])
     prior = previous_month_start(start)
     amount = current["volume_micro_usdc"]
@@ -98,7 +116,7 @@ def render_tweet(current: dict, previous: dict | None, scope: list[dict]) -> str
         f"{start:%b %Y} vs {prior:%b %Y} UTC",
         f"{volume} USDC market volume ({comparison('volume_change')})",
         f"{current['unique_wallets']:,} unique wallets ({comparison('wallet_change')})",
-        f"Suspected bots: {share} of wallet volume",
+        f"Suspected bots: {share} of wallet BUY amount",
         "Market end dates; taker side once. Rules in chart.",
     ]
     note = scope_note(scope)
@@ -126,12 +144,12 @@ class Canvas(daily.PosterCanvas):
         self.text(caption,box[2]+12,y+size-19,18,width=1030-box[2]-12)
 
 
-def render(current: dict, previous: dict | None, scope: list[dict]):
+def render(current: dict, previous: dict | None, scope: list[dict], distribution_data: dict | None = None):
     c = Canvas(BACKGROUND)
     start = date.fromisoformat(current["start_date_utc"])
     last = date.fromisoformat(current["end_date_utc_exclusive"])-timedelta(days=1)
     prior = previous_month_start(start)
-    values = display_values(current,previous)
+    values = display_values(current,previous,distribution_data)
     c.text("POLYMARKET / CRYPTO UP/DOWN",86,47,20,weight=650,color=GREEN)
     c.text("MONTHLY REPORT",81,84,65,weight=800,color=INK,width=955)
     c.text(f"{start:%B %Y}".upper(),86,163,27,weight=650,color=GREEN)
@@ -203,19 +221,22 @@ def render(current: dict, previous: dict | None, scope: list[dict]):
         c.text(f"{coin} {daily.percent_text(amount,total)}",x+19,1018,20,weight=650,color=INK,width=213)
     c.line((84,1065,1034,1065))
 
-    c.text("SUSPECTED BOT ACTIVITY",87,1086,22,weight=650,color=INK)
+    c.text("SUSPECTED BOT BUY PARTICIPATION",87,1086,22,weight=650,color=INK)
     box = c.text(values["bot_share"],82,1127,59,weight=780,color=GREEN,width=335)
-    c.text("of wallet volume",box[2]+22,1132,21,width=560)
+    c.text('Up-weighted event coverage' if distribution_data is not None else 'of wallet BUY amount',box[2]+22,1132,21,width=560)
     c.change(*values["bot_share_change"],box[2]+22,1167,width=226,size=25)
     c.text(f"{current['suspected_bot_wallets']:,} wallets",87,1220,27,weight=700,color=INK,width=413)
-    c.text(period.millions(current["suspected_bot_volume_micro_usdc"])+"M USDC",607,1220,27,
+    c.text(values['bot_volume']+' USDC',607,1220,25,
            weight=700,color=INK,width=427)
+    denominator = 'All BUY Up-equivalent notional' if distribution_data is not None else 'All wallet BUY amount'
+    c.text(f'{denominator}: {values["bot_denominator"]} USDC',87,1199,15,width=947)
     c.line((84,1267,1034,1267))
     footnotes = [
         "UTC market end dates; market volume counts the taker side once.",
         "Wallets deduplicated across the month; daily average uses calendar days.",
-        "Bots flagged daily: mean gap <=60s, span >=90min; monthly wallet union.",
-        "Bot share uses wallet buys + sells; flagged wallet-days. Behavioral estimate.",
+        "Bots retained from first daily hit: mean gap <=60s, span >=90min.",
+        ('Coverage: Up-weighted BUY events with a bot buyer; denominator is all BUY events.'
+         if distribution_data is not None else 'Bot share: own BUY amount / all wallet BUY amount; SELL excluded.'),
     ]
     if scope:
         footnotes.append(scope_note(scope))
@@ -229,6 +250,12 @@ def main(argv=None):
     parser.add_argument("--month",type=month_start,help="UTC 自然月 YYYY-MM；默认上一个完整月")
     parser.add_argument("--db",type=Path,default=daily.daily.core.DEFAULT_DB)
     parser.add_argument("--output-dir",type=Path,default=ROOT/"outputs/posters")
+    distribution_flags = parser.add_mutually_exclusive_group()
+    distribution_flags.add_argument('--with-distribution', dest='with_distribution', action='store_true',
+                                    help='同时生成买入分布及配套图文（默认启用）')
+    distribution_flags.add_argument('--without-distribution', dest='with_distribution', action='store_false',
+                                    help='仅生成兼容旧版的总览图文')
+    parser.set_defaults(with_distribution=True)
     args = parser.parse_args(argv)
     start = args.month or previous_month_start(datetime.now(timezone.utc).date())
     end,prior = next_month(start),previous_month_start(start)
@@ -236,35 +263,48 @@ def main(argv=None):
     db = sqlite3.connect(args.db.resolve().as_uri()+"?mode=ro",uri=True)
     db.row_factory = sqlite3.Row
     try:
+        db.execute('PRAGMA query_only=ON')
+        from polymarket_updown_bot_registry import load_first_seen
+        first_seen = load_first_seen(db, end-timedelta(days=1))
         db.execute("BEGIN")
-        current = period.load_period(db,start,end)
+        current = period.load_period(db,start,end,bot_first_seen=first_seen)
         print("目标月汇总完成。",flush=True)
-        previous = period.load_period(db,prior,start,required=False)
+        previous = period.load_period(db,prior,start,required=False,bot_first_seen=first_seen)
         print("前月汇总完成。",flush=True)
         scope = scope_changes(db,prior,end)
-    except daily.IncompleteDay as exc:
+    except (ValueError, sqlite3.Error) as exc:
         print(exc,file=sys.stderr)
         return 2
     finally:
         db.close()
-    args.output_dir.mkdir(parents=True,exist_ok=True)
     stem = f"updown_monthly_{start:%Y-%m}"
-    image,_ = render(current,previous,scope)
-    image.save(args.output_dir/f"{stem}.png")
     payload = {
         "date_basis":"market_end_utc", "current":current, "previous":previous,
-        "volume_basis":"taker_only", "bot_volume_basis":"wallet_buys_plus_sells",
+        "volume_basis":"taker_only", "bot_volume_basis":"wallet_buys_only",
         "scope_changes":scope,
         "bot_rule":{"max_mean_interval_seconds":daily.MAX_INTERVAL_SECONDS,
-                    "min_span_minutes":daily.MIN_SPAN_MINUTES,"classification":"daily",
-                    "monthly_wallets":"union_of_daily_flagged_wallets",
-                    "monthly_volume":"sum_of_daily_flagged_wallet_volume"},
+                    "min_span_minutes":daily.MIN_SPAN_MINUTES,"classification":"first_hit_day_onward",
+                    "classification_scope":"all_crypto_updown_series", "first_seen_basis":"market_end_utc",
+                    "future_labels_applied":False,"monthly_wallets":"union_of_active_retained_wallets",
+                    "monthly_volume":"wallet_volume_from_first_hit_onward"},
+        "bot_history":dict(getattr(first_seen, 'metadata', {})),
         "display":display_values(current,previous),
     }
-    (args.output_dir/f"{stem}.json").write_text(json.dumps(payload,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
-    (args.output_dir/f"{stem}_tweet.md").write_text(render_tweet(current,previous,scope),encoding="utf-8")
-    write_sidecars(args.output_dir / f"{stem}.json")
-    print(f"海报：{args.output_dir/f'{stem}.png'}\n数据：{args.output_dir/f'{stem}.json'}\n推文：{args.output_dir/f'{stem}_tweet.md'}")
+    try:
+        distribution_data = (load_period_distribution(args.db, start, end, 'monthly', first_seen)
+                             if args.with_distribution else None)
+        tweet = render_tweet(current, previous, scope, distribution_data)
+        payload['display'] = display_values(current,previous,distribution_data)
+        image,_ = render(current,previous,scope,distribution_data)
+        paths = write_package(args.output_dir, stem, payload, image, tweet, distribution_data,
+                              sidecars_writer=write_sidecars)
+    except (ValueError, sqlite3.Error, OSError) as exc:
+        print(f'未生成月报图文：{exc}', file=sys.stderr)
+        return 2
+    print(f"海报：{paths['image']}\n数据：{paths['source']}\n推文：{paths['tweet']}")
+    if distribution_data is not None:
+        from polymarket_updown_price_distribution import statistics_stem
+        print(f"交易分布海报：{Path(args.output_dir).resolve()/(statistics_stem(distribution_data)+'.png')}")
     return 0
 
 

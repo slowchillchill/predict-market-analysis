@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "accounts": {
+    "x": {
+      "handle": "slowchillchill",
+      "url": "https://x.com/slowchillchill"
+    },
+    "linkedin": {
+      "name": "邱秋",
+      "url": "https://www.linkedin.com/in/qiuqiuchillchill/"
+    },
+    "douyin": {
+      "name": "slowchillchill",
+      "douyin_id": "1350887770",
+      "creator_url": "https://creator.douyin.com/"
+    },
+    "tiktok": {
+      "handle": "slowchillchill",
+      "url": "https://www.tiktok.com/@slowchillchill"
+    }
+  },
+  "music": {
+    "douyin": {
+      "required": true,
+      "on_unavailable": "select_available",
+      "candidates": [
+        {
+          "title": "Aesthetic",
+          "artist": "Tollan Kim",
+          "duration": "01:00",
+          "selection": "exact title/artist/duration; if duplicates choose highest displayed usage"
+        },
+        {
+          "title": "Aesthetic",
+          "artist": "Tollan Kim",
+          "duration": "02:14"
+        },
+        {
+          "title": "柔情似水(纯音乐)",
+          "artist": "李璟崎KevinGee",
+          "duration": "01:55"
+        }
+      ]
+    },
+    "tiktok": {
+      "required": true,
+      "on_unavailable": "block_platform",
+      "candidates": [
+        {
+          "title": "Aesthetic",
+          "artist": "Tollan Kim",
+          "duration": "01:00",
+          "music_url": "https://www.tiktok.com/music/Aesthetic-7072513628145977346"
+        },
+        {
+          "title": "snowfall",
+          "artist": "Øneheart & reidenshi",
+          "duration": "01:00"
+        },
+        {
+          "title": "Little Things",
+          "artist": "Adrián Berenguer",
+          "duration": "01:00"
+        }
+      ]
+    }
+  }
+}

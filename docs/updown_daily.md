@@ -55,8 +55,15 @@
 也不检测代理出口所在地。其他环境可用 `--proxy` 覆盖默认地址，`--db` 和 `--output-dir` 可指定数据库和输出目录。
 
 采集复用现有数据库与续传逻辑，已完成市场不重新下载成交。只有采集入口成功返回后才运行海报入口，
-生成 `updown_YYYY-MM-DD.png`、`updown_YYYY-MM-DD.json` 和 `updown_YYYY-MM-DD_tweet.md`。
+并自动传入 `--with-distribution`：生成 `updown_YYYY-MM-DD.png`、`updown_YYYY-MM-DD.json`、
+`updown_YYYY-MM-DD_tweet.md`，以及 `updown_buy_trade_distribution_all_series_YYYY-MM-DD.png` 和同名 JSON。
+两套图文共用启动时固定的目标日期、数据库及输出目录；分布覆盖数据库中的全部加密系列。
 采集有缺口、失败或中断时，本次不进入生成步骤，原有输出文件保留。退出码沿用两个入口的结果。
+分布完整性或重建校验失败时海报入口返回 `2`，不新写本次图文；总览发布侧文件在图文全部生成后才写入。
+
+每日全系列分布页现使用已批准的图表版：顶部三张卡片显示两组 Trades、Shares、Up 等价名义金额及机器人买方参与比例；下方两张横向条形图按十美分价档显示成交笔数、本组笔数占比、Up 等价名义金额（USDC）及占全部 BUY 名义金额的比例。每档 Shares 完整保留在分布 JSON。总览引用记录 `layout_version=buy_price_distribution_chart_v1`。英文推文和抖音四卡同步生成，清单最后更新；每日期共 11 个文件。采集、成交重建和持续机器人标签规则沿用原口径。
+
+当前用户级 `polymarket-updown-yesterday.timer` 每天 Asia/Tokyo 09:30 执行上述原入口。入口及默认路径保持一致，更新脚本后下一次定时运行会自动使用新版，无需增加第二个定时任务。
 
 只下载 UTC 昨日；环比使用数据库已有的前日数据，前日缺失时沿用海报的 `N/A` 规则。
 同一天重跑可继续下载，完成后覆盖该日期的输出；跨 UTC 日期重跑会自动改为新的昨日，补旧日期请使用下方指定日期命令。
@@ -101,6 +108,13 @@
 需要发布英文数据海报时，使用[海报生成脚本](updown_poster.md)。输入日期即可生成固定版式的 PNG，
 包含市场数、成交额、去重钱包数、环比及疑似机器人指标。
 
+每日海报与买入分布共用 `first_hit_day_onward` 标签：从当前数据库最早相关市场结束日开始，
+每天将全部加密系列的同一钱包 BUY＋SELL 记录合并，首次满足记录数大于 1、平均间隔≤60秒、
+首末跨度≥90分钟时标记。从首次命中当日及以后持续归为疑似机器人，不用未来命中回算更早日期。
+同一钱包之后即使当天未再达到频率条件，也仍纳入相应机器人统计。
+历史未完整采集的日期只提供现库首次观察证据，不能据此确定真实首次操作日；
+相关覆盖信息与标签规则在分布 JSON 的 `bot_history`／`bot_rule` 中保留。
+
 ```bash
 python3 scripts/polymarket_updown_daily.py report \
   --date 2026-09-17 --db data/raw/btc5m.sqlite3 --output-dir outputs/updown
@@ -113,6 +127,21 @@ python3 scripts/polymarket_updown_daily.py report \
 市场成交额显示缺失，不用零替代。钱包采集缺口日仍只输出覆盖报告。报告只读，不联网。
 
 本次从 2026-10-06 定时任务开始采集 UTC 2026-10-05 结束市场，不补采此前单边数据。
+
+### 单独导出买入分布统计
+
+```bash
+python3 scripts/polymarket_updown_daily.py distribution \
+  --date 2026-11-07 --db data/raw/btc5m.sqlite3 --output-dir outputs/updown
+```
+
+仅用 Python 标准库执行只读短查询，输出 `updown_buy_trade_distribution_all_series_2026-11-07.json`。
+原始成交记录不改动；两个群体分别统计买入参与的重建成交、Shares、Up 等价名义金额及比例。
+重建按每市场、交易哈希组首条汇总记录与后续对手明细配对，每条明细形成一笔成交；
+汇总行不另计，双方均为机器人买入也只计一次。日、周、月分布使用同一个内核与同一套持续标签。
+成交比例以各群体笔数为分母，名义金额比例以全部钱包 BUY 总名义金额为分母。
+Up 等价名义金额不替代总览中每笔只计吃单方一次的市场成交额。
+不完整或不满足重建规则时返回 `2`，不导出新文件。详细规则见[买入分布说明](updown_bot_price_poster.md)。
 
 退出码 `0` 表示完整，`2` 表示仍有缺口，`130` 表示采集被中断。
 

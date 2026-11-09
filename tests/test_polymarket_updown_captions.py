@@ -35,7 +35,7 @@ class CaptionTests(unittest.TestCase):
         text=captions.render_zh(p)[1]
         self.assertIn('市场成交额：N/A USDC',text)
         self.assertIn('单边市场成交额数据不完整',text)
-        self.assertIn('占全部地址对应金额的 9.50%',text)
+        self.assertIn('金额占比：9.50%（分母为全部地址侧金额）',text)
         self.assertIn('较前日 -25.00%',text)
         p=self.sample()
         del p['current']['volume_basis']
@@ -43,7 +43,7 @@ class CaptionTests(unittest.TestCase):
         text=captions.render_zh(p)[1]
         self.assertIn('地址侧买入与卖出金额合计：123.46 USDC',text)
         self.assertNotIn('市场成交额：',text)
-        self.assertIn('占全部地址对应金额的 19.00%',text)
+        self.assertIn('金额占比：19.00%（分母为全部地址侧金额）',text)
 
     def test_research_wording_preserves_source_and_screening_limits(self):
         title, text = captions.render_zh(self.sample())
@@ -57,6 +57,17 @@ class CaptionTests(unittest.TestCase):
         self.assertNotIn('#Polymarket', text)
         self.assertNotIn('疑似机器人钱包', text)
 
+    def test_daily_current_rule_count_is_separate_from_retained_active_wallets(self):
+        payload = self.sample()
+        payload['bot_rule']['classification'] = 'first_hit_day_onward'
+        payload['current'].update(unique_wallets=10444, suspected_bot_wallets=1189,
+                                  wallets_meeting_daily_frequency_rule=334)
+        text = captions.render_zh(payload)[1]
+        self.assertIn('历史命中后持续归类、本期活跃：1,189 个疑似机器人地址。', text)
+        self.assertIn('当天符合上述规则：334个地址。', text)
+        del payload['current']['wallets_meeting_daily_frequency_rule']
+        self.assertNotIn('当天符合上述规则', captions.render_zh(payload)[1])
+
     def test_calendar_and_scope(self):
         p=self.sample(); del p['date_utc']
         p['current'].update(start_date_utc='2024-02-01',end_date_utc_exclusive='2024-03-01')
@@ -66,7 +77,7 @@ class CaptionTests(unittest.TestCase):
         p['scope_changes']=[{'series_slug':'zec-up-or-down-5m','first_end_time':'2026-08-04T21:40:00Z'}]
         p['coverage_adjustment']={'comparison_month':'2026-08','excluded_unavailable_slots':[{}]*214}
         text=captions.render_zh(p)[1]
-        self.assertIn('本期发生交易的去重地址：3 个',text)
+        self.assertIn('去重交易地址：3 个',text)
         self.assertIn('ZEC 于 2026-08 加入',text)
         self.assertIn('排除 214 个',text)
 

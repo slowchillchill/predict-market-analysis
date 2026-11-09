@@ -294,9 +294,34 @@ def main(argv: list[str] | None = None) -> int:
     rp = commands.add_parser("report", help="完全离线生成按市场结束日统计的报告")
     rp.add_argument("--date", type=date.fromisoformat, required=True)
     rp.add_argument("--output-dir", type=Path, default=core.ROOT / "outputs/updown")
-    for sub in (cp, rp):
+    dp = commands.add_parser("distribution", help="只读现库，导出全部加密系列的买入成交分布 JSON")
+    dp.add_argument("--date", type=date.fromisoformat, required=True, help="市场结束日，UTC YYYY-MM-DD")
+    dp.add_argument("--output-dir", type=Path, default=core.ROOT / "outputs/updown")
+    for sub in (cp, rp, dp):
         sub.add_argument("--db", type=Path, default=core.DEFAULT_DB)
     args = parser.parse_args(argv)
+    if args.command == "distribution":
+        # 按需加载纯统计模块；此路径不依赖 Pillow，也不启动采集。
+        import polymarket_updown_price_distribution as distribution
+
+        db = None
+        try:
+            db = sqlite3.connect(args.db.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.25)
+            db.execute("PRAGMA query_only=ON")
+            data = distribution.load_data(db, args.date, series_slug=None)
+        except (ValueError, sqlite3.Error) as exc:
+            print(f"买入成交分布统计失败：{exc}", file=sys.stderr)
+            return 2
+        finally:
+            if db is not None:
+                db.close()
+        try:
+            destination = distribution.save_statistics(data, args.output_dir)
+        except (ValueError, OSError) as exc:
+            print(f"买入成交分布导出失败：{exc}", file=sys.stderr)
+            return 2
+        print(f"买入成交分布统计：{destination}")
+        return 0
     if args.command == "report":
         db = sqlite3.connect(args.db.resolve().as_uri() + "?mode=ro", uri=True)
         db.row_factory = sqlite3.Row

@@ -65,6 +65,7 @@ class PosterTests(unittest.TestCase):
         self.assertEqual(data.current["unique_wallets"], 5)
         self.assertEqual(data.current["volume_micro_usdc"], 374000000)
         self.assertEqual(data.current["suspected_bot_wallets"], 2)
+        self.assertEqual(data.current["wallets_meeting_daily_frequency_rule"], 2)
         self.assertEqual(data.current["suspected_bot_volume_micro_usdc"], 183000000)
         values = poster.display_values(data)
         self.assertEqual(values["volume_change"], "-6.50%")
@@ -79,6 +80,28 @@ class PosterTests(unittest.TestCase):
             self.db.execute("INSERT INTO collection_progress(market_slug,completed_at) VALUES ('next','done')")
             self.db.execute("INSERT INTO trades VALUES ('next',1,0,'excluded','hash',1789650000,'BUY','Up',0,'token','1000','1',1000000000)")
         self.assertEqual(poster.load_data(self.db, DAY).current["volume_micro_usdc"], 1000000)
+
+    def test_first_hit_is_retained_on_later_day_without_future_backfill(self):
+        previous = DAY-timedelta(days=1)
+        future = DAY+timedelta(days=1)
+        self.seed_day(previous)
+        self.seed_day(future)
+        self.add_trades('retained', 91, 5400, day=previous, page=1)
+        self.add_trades('retained', 1, 0, page=1, price='9')
+        self.add_trades('new-today', 1, 0, day=previous, page=2)
+        self.add_trades('new-today', 91, 5400, page=2)
+        self.add_trades('future-only', 1, 0, page=3)
+        self.add_trades('future-only', 91, 5400, day=future, page=1)
+        # 加载含未来命中的名单，仍必须按被统计日判断标签生效时间。
+        from polymarket_updown_bot_registry import load_first_seen
+        first_seen = load_first_seen(self.db, future)
+        data = poster.load_data(self.db, DAY, bot_first_seen=first_seen)
+        self.assertEqual(data.current['suspected_bot_wallets'], 2)
+        self.assertEqual(data.current['suspected_bot_volume_micro_usdc'], 100_000_000)
+        self.assertEqual(data.previous['suspected_bot_wallets'], 1)
+        self.assertEqual(data.current['wallets_meeting_daily_frequency_rule'], 1)
+        self.assertEqual(data.previous['wallets_meeting_daily_frequency_rule'], 1)
+        self.assertEqual(data.previous['suspected_bot_volume_micro_usdc'], 91_000_000)
 
     def test_partial_previous_day_does_not_create_false_growth(self):
         previous = DAY-timedelta(days=1)
@@ -156,7 +179,7 @@ class PosterTests(unittest.TestCase):
             "Polymarket Crypto Up/Down | Sep 17, 2026 UTC\n\n"
             "20.11M USDC market volume (-1.25%)\n"
             "14,774 trading wallets (+14.38%)\n"
-            "293 suspected bot wallets: 55.12% of wallet volume\n\n"
+            "293 suspected bot wallets: 55.12% of wallet BUY amount\n\n"
             "More wallets, lower volume.\n"
             "Markets ending that day; taker side once. Bot criteria in chart.\n"
             "#Polymarket\n"
@@ -177,7 +200,7 @@ class PosterTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 text = poster.render_tweet(poster.PosterData(DAY, current, previous))
                 self.assertIn(f"0.00 USDC market volume (N/A; {reason})", text)
-                self.assertIn("0 suspected bot wallets: N/A of wallet volume", text)
+                self.assertIn("0 suspected bot wallets: N/A of wallet BUY amount", text)
                 self.assertNotIn("More wallets", text)
                 self.assertNotIn("Fewer wallets", text)
 

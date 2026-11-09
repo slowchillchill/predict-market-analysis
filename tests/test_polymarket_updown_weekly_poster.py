@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import polymarket_updown_weekly_poster as weekly
@@ -23,6 +24,9 @@ class WeeklyTests(unittest.TestCase):
                 self.assertEqual(weekly.previous_week_start(today),expected)
 
     def setUp(self):
+        registry = patch('polymarket_updown_bot_registry.load_first_seen', return_value={'repeated':'2026-09-14'})
+        registry.start()
+        self.addCleanup(registry.stop)
         self.start = date(2026, 9, 14)
         self.db = sqlite3.connect(":memory:")
         self.db.row_factory = sqlite3.Row
@@ -30,7 +34,7 @@ class WeeklyTests(unittest.TestCase):
             CREATE TABLE updown_coverage(date_utc TEXT, is_complete INTEGER, completed_markets INTEGER);
             CREATE TABLE updown_target_series(series_slug TEXT);
             CREATE TABLE markets(slug TEXT, series_slug TEXT, end_time TEXT);
-            CREATE TABLE trades(market_slug TEXT, wallet TEXT, timestamp INTEGER, amount_micro_usdc INTEGER);
+            CREATE TABLE trades(market_slug TEXT, wallet TEXT, timestamp INTEGER, side TEXT, amount_micro_usdc INTEGER);
             CREATE TABLE market_volume(market_slug TEXT PRIMARY KEY, amount_micro_usdc INTEGER, completed_at TEXT);
         """)
         for i in range(7):
@@ -49,8 +53,8 @@ class WeeklyTests(unittest.TestCase):
         self.db.execute("INSERT INTO markets VALUES (?,?,?)", (slug, series, f"{day}T00:00:00Z"))
         self.db.execute("INSERT INTO market_volume VALUES (?,?,'done')", (slug, amount*count))
         # 成交发生于统计周之外：归属必须由市场结束日决定。
-        self.db.executemany("INSERT INTO trades VALUES (?,?,?,?)", [
-            (slug, wallet, 100000 + (span*i//(count-1) if count > 1 else 0), amount)
+        self.db.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", [
+            (slug, wallet, 100000 + (span*i//(count-1) if count > 1 else 0), 'BUY', amount)
             for i in range(count)])
 
     def test_week_union_daily_bot_classification_and_end_boundary(self):
@@ -67,7 +71,7 @@ class WeeklyTests(unittest.TestCase):
         result = weekly.load_week(self.db, self.start)
         self.assertEqual(result["unique_wallets"], 4)
         self.assertEqual(result["suspected_bot_wallets"], 1)
-        self.assertEqual(result["suspected_bot_volume_micro_usdc"], 182_000_000)
+        self.assertEqual(result["suspected_bot_volume_micro_usdc"], 191_000_000)
         self.assertEqual(result["volume_micro_usdc"], 374_000_000)
         self.assertEqual(result["asset_volume_micro_usdc"], {"BTC":327_000_000,"ETH":45_000_000,"SOL":2_000_000})
         self.assertEqual(result["daily_volume_micro_usdc"]["2026-09-15"], 11_000_000)
@@ -102,7 +106,7 @@ class WeeklyTests(unittest.TestCase):
             "2026-09-14/2026-09-20 UTC\n"
             "150.00M USDC market volume (+20.00% WoW)\n"
             "48,600 unique wallets (+8.00% WoW)\n"
-            "840 suspected bot wallets: 52.00% of wallet volume\n"
+            "840 suspected bot wallets: 52.00% of wallet BUY amount\n"
             "Market end dates; taker side once. Rules in chart.\n"
             )
 
@@ -129,7 +133,7 @@ class WeeklyTests(unittest.TestCase):
                     "unique_wallets":1, "suspected_bot_volume_micro_usdc":1_000_000}
         text = weekly.render_tweet(current, previous)
         self.assertIn("N/A USDC market volume", text)
-        self.assertIn("25.00% of wallet volume", text)
+        self.assertIn("25.00% of wallet BUY amount", text)
         self.assertIn("+100.00% WoW", text)
         self.assertLessEqual(len(text),280)
         _, boxes = weekly.render(current, previous)
@@ -150,11 +154,12 @@ class WeeklyTests(unittest.TestCase):
             output = Path(folder) / "posters"
             with contextlib.redirect_stdout(io.StringIO()):
                 result = weekly.main(["--week-start", str(self.start), "--db", str(path),
-                                      "--output-dir", str(output)])
+                                      "--output-dir", str(output), '--without-distribution'])
             self.assertEqual(result, 0)
             stem = "updown_weekly_2026-09-14_2026-09-20"
             self.assertEqual({p.name for p in output.iterdir()},
-                             {f"{stem}.png", f"{stem}.json", f"{stem}_tweet.md", f"{stem}_caption_zh.md", f"{stem}_publish.json"})
+                             {f"{stem}.png", f"{stem}.json", f"{stem}_tweet.md", f"{stem}_caption_zh.md", f"{stem}_publish.json"}
+                             | {f"{stem}_douyin_{i:02}.png" for i in range(1,5)})
             text = (output / f"{stem}_tweet.md").read_text(encoding="utf-8")
             self.assertIn("1.00M USDC market volume (N/A: no prior week)", text)
             self.assertIn("1 unique wallets (N/A: no prior week)", text)
@@ -183,7 +188,7 @@ class WeeklyTests(unittest.TestCase):
                 self.assertLessEqual(len(text),280)
                 self.assertIn("market volume", text)
                 self.assertIn("unique wallets", text)
-                self.assertIn("of wallet volume", text)
+                self.assertIn("of wallet BUY amount", text)
 
 
 if __name__ == "__main__":

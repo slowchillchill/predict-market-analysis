@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 import polymarket_updown_monthly_poster as monthly
@@ -14,13 +15,16 @@ import polymarket_updown_monthly_poster as monthly
 
 class MonthlyTests(unittest.TestCase):
     def setUp(self):
+        registry = patch('polymarket_updown_bot_registry.load_first_seen', return_value={})
+        registry.start()
+        self.addCleanup(registry.stop)
         self.db=sqlite3.connect(':memory:')
         self.db.row_factory=sqlite3.Row
         self.db.executescript('''
             CREATE TABLE updown_coverage(date_utc TEXT,is_complete INTEGER,completed_markets INTEGER);
             CREATE TABLE updown_target_series(series_slug TEXT,first_end_time TEXT);
             CREATE TABLE markets(slug TEXT,series_slug TEXT,end_time TEXT);
-            CREATE TABLE trades(market_slug TEXT,wallet TEXT,timestamp INTEGER,amount_micro_usdc INTEGER);
+            CREATE TABLE trades(market_slug TEXT,wallet TEXT,timestamp INTEGER,side TEXT,amount_micro_usdc INTEGER);
             CREATE TABLE market_volume(market_slug TEXT PRIMARY KEY,amount_micro_usdc INTEGER,completed_at TEXT);
             INSERT INTO updown_target_series VALUES ('btc-up-or-down-5m',NULL);
             INSERT INTO updown_target_series VALUES ('zec-up-or-down-5m','2026-08-04T21:40:00+00:00');
@@ -37,7 +41,7 @@ class MonthlyTests(unittest.TestCase):
         self.db.execute('INSERT INTO markets VALUES (?, ?, ?)',(slug,'btc-up-or-down-5m',day+'T00:00:00Z'))
         self.db.execute("INSERT INTO market_volume VALUES (?,?,'done')", (slug,amount))
         # 成交时间在统计月份外，仍随市场结束日归属。
-        self.db.execute('INSERT INTO trades VALUES (?, ?, 1, ?)',(slug,wallet,amount))
+        self.db.execute("INSERT INTO trades VALUES (?, ?, 1, 'BUY', ?)",(slug,wallet,amount))
 
     def load(self):
         return monthly.period.load_period(self.db,date(2026,9,1),date(2026,10,1))
@@ -111,7 +115,7 @@ class MonthlyTests(unittest.TestCase):
                     self.assertLessEqual(len(text),280)
                     self.assertIn('market volume',text)
                     self.assertIn('unique wallets',text)
-                    self.assertIn('of wallet volume',text)
+                    self.assertIn('of wallet BUY amount',text)
                     if changes:self.assertIn('ZEC added during Aug 2026',text)
 
     def test_missing_market_volume_has_no_average_or_asset_mix(self):
@@ -128,7 +132,7 @@ class MonthlyTests(unittest.TestCase):
         self.assertEqual(values['bot_share_change'][0],'+40.00 pp')
         text=monthly.render_tweet(current,previous,[])
         self.assertIn('N/A USDC market volume',text)
-        self.assertIn('50.00% of wallet volume',text)
+        self.assertIn('50.00% of wallet BUY amount',text)
         self.assertLessEqual(len(text),280)
         _,boxes=monthly.render(current,previous,[])
         labels=[box['text'] for box in boxes]
@@ -162,10 +166,12 @@ class MonthlyTests(unittest.TestCase):
             original=path.read_bytes()
             output=Path(folder)/'posters'
             with contextlib.redirect_stdout(io.StringIO()):
-                status=monthly.main(['--month','2026-09','--db',str(path),'--output-dir',str(output)])
+                status=monthly.main(['--month','2026-09','--db',str(path),'--output-dir',str(output),'--without-distribution'])
             self.assertEqual(status,0)
             stem='updown_monthly_2026-09'
-            self.assertEqual({p.name for p in output.iterdir()},{stem+'.png',stem+'.json',stem+'_tweet.md',stem+'_caption_zh.md',stem+'_publish.json'})
+            self.assertEqual({p.name for p in output.iterdir()},
+                             {stem+'.png',stem+'.json',stem+'_tweet.md',stem+'_caption_zh.md',stem+'_publish.json'}
+                             | {f'{stem}_douyin_{i:02}.png' for i in range(1,5)})
             payload=json.loads((output/(stem+'.json')).read_text())
             self.assertEqual(payload['current']['volume_micro_usdc'],1_000_000)
             self.assertIsNotNone(payload['previous'])
