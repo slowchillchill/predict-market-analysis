@@ -18,6 +18,12 @@ def trade(price, size="1", side="BUY", outcome="Up"):
             "transaction_hash": "same-hash"}
 
 
+def wallet_trade(price, size="1", side="BUY", outcome="Up", tx="same-hash", wallet="wallet"):
+    return {**trade(price, size, side, outcome), "transaction_hash": tx,
+            "proxy_wallet": wallet, "timestamp": 1, "outcome_index": int(outcome == "Down"),
+            "token_id": outcome.lower()}
+
+
 class MarketVolumeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -120,6 +126,84 @@ class MarketVolumeTests(unittest.TestCase):
         volume.collect_market(self.db, client, "market")
         self.assertEqual(client.get.call_args.args[1]["cursor"], "page-2")
         self.assertEqual(self.state()["amount_micro_usdc"], 500000)
+
+    def seed_wallet_progress(self):
+        with self.db:
+            self.db.execute("INSERT INTO collection_progress(market_slug) VALUES ('market')")
+
+    def test_derived_volume_uses_first_row_for_pair_and_preserves_all_wallet_rows(self):
+        self.seed_wallet_progress()
+        up.core.commit_page(self.db, "market", 1, payload([
+            wallet_trade(".7", "10", "SELL", wallet="taker"),
+            wallet_trade(".7", "10", "BUY", wallet="maker")]))
+        self.assertEqual(volume.derive_market_volume(self.db, "market"), 7000000)
+        self.assertEqual(self.state()["amount_micro_usdc"], 7000000)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 2)
+
+    def test_derived_volume_handles_multifill_complementary_buys_and_page_boundary(self):
+        self.seed_wallet_progress()
+        up.core.commit_page(self.db, "market", 1, payload([
+            wallet_trade(".8", "10", "SELL", tx="multi"),
+            wallet_trade(".8", "4", "BUY", tx="multi")], "page-2"))
+        up.core.commit_page(self.db, "market", 2, payload([
+            wallet_trade(".8", "6", "BUY", tx="multi"),
+            wallet_trade(".2", "10", "BUY", "Down", tx="complement"),
+            wallet_trade(".8", "10", "BUY", "Up", tx="complement")]))
+        self.assertEqual(volume.derive_market_volume(self.db, "market"), 10000000)
+        amounts = self.db.execute("SELECT SUM(amount_micro_usdc),"
+                                  "SUM(CASE WHEN side='BUY' THEN amount_micro_usdc ELSE 0 END) FROM trades").fetchone()
+        self.assertEqual(tuple(amounts), (26000000, 18000000))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 5)
+
+    def test_derived_volume_uses_stored_per_row_decimal_rounding(self):
+        self.seed_wallet_progress()
+        precise = "0.333333333333333333333333333333"
+        up.core.commit_page(self.db, "market", 1, payload([
+            wallet_trade("0.0000005", tx="micro"),
+            wallet_trade("0.0000005", tx="micro"),
+            wallet_trade(precise, "3", tx="precise"),
+            wallet_trade(precise, "3", tx="precise")]))
+        self.assertEqual(volume.derive_market_volume(self.db, "market"), 1000001)
+        self.assertEqual(self.db.execute("SELECT raw_price FROM trades WHERE transaction_hash='precise' LIMIT 1").fetchone()[0], precise)
+
+    def test_derived_volume_requires_completed_wallet_and_keeps_previous_volume_on_failure(self):
+        with self.assertRaises(ValueError):
+            volume.derive_market_volume(self.db, "market")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM market_volume").fetchone()[0], 0)
+        self.seed_wallet_progress()
+        with self.db:
+            self.db.execute("INSERT INTO market_volume(market_slug,amount_micro_usdc,next_cursor) "
+                            "VALUES ('market',900000,'api-cursor')")
+        before = self.state()
+        with self.assertRaises(ValueError):
+            volume.derive_market_volume(self.db, "market")
+        self.assertEqual(self.state(), before)
+
+    def test_derived_volume_replaces_old_summary_idempotently_and_resets_api_progress(self):
+        self.seed_wallet_progress()
+        up.core.commit_page(self.db, "market", 1, payload([wallet_trade(".3")]))
+        with self.db:
+            self.db.execute("INSERT INTO market_volume VALUES ('market',999999,5,'old-cursor',NULL,'old-error')")
+        volume.derive_market_volume(self.db, "market")
+        volume.derive_market_volume(self.db, "market")
+        state = self.state()
+        self.assertEqual(state["amount_micro_usdc"], 300000)
+        self.assertEqual(state["committed_page"], 0)
+        self.assertIsNone(state["next_cursor"])
+        self.assertIsNone(state["last_error"])
+        self.assertIsNotNone(state["completed_at"])
+
+    def test_empty_completed_wallet_derives_zero_and_hashes_are_scoped_to_market(self):
+        self.seed_wallet_progress()
+        up.core.commit_page(self.db, "market", 1, payload([]))
+        self.assertEqual(volume.derive_market_volume(self.db, "market"), 0)
+        with self.db:
+            self.db.execute("INSERT INTO markets(slug,date_utc,condition_id) VALUES ('other','2026-10-05','other')")
+            self.db.execute("INSERT INTO collection_progress(market_slug) VALUES ('other')")
+        up.core.commit_page(self.db, "market", 2, payload([wallet_trade(".1")]))
+        up.core.commit_page(self.db, "other", 1, payload([wallet_trade(".9")]))
+        self.assertEqual(volume.derive_market_volume(self.db, "market"), 100000)
+        self.assertEqual(volume.derive_market_volume(self.db, "other"), 900000)
 
 
 if __name__ == "__main__":

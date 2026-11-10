@@ -1,4 +1,4 @@
-"""累计 taker_only=true 的成交金额，独立保留可续传分页进度。"""
+"""独立采集单边金额，或从已完成钱包明细的交易首行推导金额。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,29 @@ import sqlite3
 from typing import Callable
 
 import polymarket_btc5m_daily as core
+
+
+def derive_market_volume(db: sqlite3.Connection, slug: str) -> int:
+    """按现有页/行顺序取每个交易哈希的首行；只替换金额，不改钱包明细。"""
+    progress = db.execute("SELECT completed_at FROM collection_progress WHERE market_slug=?", (slug,)).fetchone()
+    if progress is None or progress[0] is None:
+        raise ValueError(f"{slug} 钱包成交尚未完成，不能推导单边金额")
+    seen = set()
+    amount = 0
+    for transaction_hash, row_amount in db.execute(
+            "SELECT transaction_hash,amount_micro_usdc FROM trades WHERE market_slug=? "
+            "ORDER BY page_number,row_number", (slug,)):
+        if transaction_hash not in seen:
+            seen.add(transaction_hash)
+            amount += row_amount
+    # 来源由发布元数据说明；复用原表，不把推导量伪装成已请求的 API 页数。
+    with db:
+        db.execute(
+            "INSERT INTO market_volume(market_slug,amount_micro_usdc,committed_page,next_cursor,completed_at,last_error) "
+            "VALUES (?,?,0,NULL,?,NULL) ON CONFLICT(market_slug) DO UPDATE SET "
+            "amount_micro_usdc=excluded.amount_micro_usdc,committed_page=0,next_cursor=NULL,"
+            "completed_at=excluded.completed_at,last_error=NULL", (slug, amount, core.utc_now()))
+    return amount
 
 
 def commit_page(db: sqlite3.Connection, slug: str, page: int, payload: dict) -> None:

@@ -265,6 +265,49 @@ class UpdownTests(unittest.TestCase):
         self.assertEqual(result, 0)
         client.assert_called_once_with(None)
 
+    def test_derived_volume_opt_in_resumes_wallet_complete_without_trade_requests(self):
+        self.discover([event("done-wallet", "2026-09-17T00:00:00Z")])
+        up.core.commit_page(self.db, "done-wallet", 1, {"data": [trade("wallet", 1, ".2")],
+                                                      "pagination": {"next_cursor": None}})
+        client = Mock()
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
+             patch.object(up.market_volume, "collect_market", side_effect=AssertionError("No second API route")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            up.collect(self.db, client, START, END, derive_volume=True)
+        client.get.assert_not_called()
+        state = self.db.execute("SELECT * FROM market_volume WHERE market_slug='done-wallet'").fetchone()
+        self.assertEqual(state["amount_micro_usdc"], 200000)
+        self.assertEqual(state["committed_page"], 0)
+        self.assertIsNotNone(state["completed_at"])
+
+    def test_derived_volume_after_wallet_retry_skips_no_market_and_calls_only_false_route(self):
+        self.discover([event("retry-wallet", "2026-09-17T00:00:00Z")])
+        client = Mock()
+        client.get.side_effect = [up.core.FetchError("HTTP 503", status_code=503),
+                                  {"data": [trade("wallet", 1, ".4")], "pagination": {"next_cursor": None}}]
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            up.collect(self.db, client, START, END, derive_volume=True)
+        self.assertEqual(client.get.call_count, 2)
+        self.assertTrue(all(call.args[1]["taker_only"] == "false" for call in client.get.call_args_list))
+        self.assertEqual(self.db.execute("SELECT amount_micro_usdc FROM market_volume WHERE market_slug='retry-wallet'").fetchone()[0], 400000)
+
+    def test_derived_volume_pause_after_summary_commit_does_not_record_market_error(self):
+        self.discover([event("done-wallet", "2026-09-17T00:00:00Z")])
+        up.core.commit_page(self.db, "done-wallet", 1, {"data": [], "pagination": {"next_cursor": None}})
+
+        def pause_after_derivation():
+            return self.db.execute("SELECT 1 FROM market_volume WHERE completed_at IS NOT NULL").fetchone() is not None
+
+        client = Mock()
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
+             contextlib.redirect_stdout(io.StringIO()), self.assertRaises(up.core.CollectionPaused):
+            up.collect(self.db, client, START, END, derive_volume=True, should_yield=pause_after_derivation)
+        client.get.assert_not_called()
+        state = self.db.execute("SELECT * FROM market_volume WHERE market_slug='done-wallet'").fetchone()
+        self.assertIsNotNone(state["completed_at"])
+        self.assertIsNone(state["last_error"])
+
     def test_collect_exit_failure_when_single_side_is_incomplete(self):
         with patch.object(up, "collect"), patch.object(up.core, "Client"), patch.object(up, "coverage", return_value={
                 "is_complete": 1, "market_volume_is_complete": 0}), contextlib.redirect_stdout(io.StringIO()):

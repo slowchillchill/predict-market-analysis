@@ -228,7 +228,8 @@ def coverage(db: sqlite3.Connection, day: str) -> dict:
 
 
 def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date, *,
-            should_yield: Callable[[], bool] | None = None, retry_failed: bool = True) -> None:
+            should_yield: Callable[[], bool] | None = None, retry_failed: bool = True,
+            derive_volume: bool = False) -> None:
     first_ends = series_first_end(db)
     for index, series in enumerate(TARGET_SERIES, 1):
         core.check_pause(should_yield)
@@ -245,12 +246,12 @@ def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date,
     blocked: set[tuple[str, str]] = set()
     for _ in range(2 if retry_failed else 1):
         discover_missing_markets(db, client, start, end, should_yield=should_yield)
-        _collect_pending(db, client, start, end, blocked, should_yield=should_yield)
+        _collect_pending(db, client, start, end, blocked, should_yield=should_yield, derive_volume=derive_volume)
 
 
 def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, end: date,
                      blocked: set[tuple[str, str]], *,
-                     should_yield: Callable[[], bool] | None = None) -> None:
+                     should_yield: Callable[[], bool] | None = None, derive_volume: bool = False) -> None:
     pending = db.execute(
         "SELECT m.slug FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug "
         "JOIN collection_progress p ON p.market_slug=m.slug "
@@ -280,8 +281,10 @@ def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, e
         "SELECT m.slug FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug "
         "LEFT JOIN market_volume v ON v.market_slug=m.slug "
         "WHERE date(m.end_time)>=? AND date(m.end_time)<? AND m.condition_id IS NOT NULL "
-        "AND v.completed_at IS NULL ORDER BY m.series_slug,m.end_time,m.slug",
-        (start.isoformat(), end.isoformat()),
+        "AND v.completed_at IS NULL AND (?=0 OR EXISTS (SELECT 1 FROM collection_progress p "
+        "WHERE p.market_slug=m.slug AND p.completed_at IS NOT NULL)) "
+        "ORDER BY m.series_slug,m.end_time,m.slug",
+        (start.isoformat(), end.isoformat(), int(derive_volume)),
     ).fetchall()
     for index, row in enumerate(pending_volume, 1):
         slug = row["slug"]
@@ -289,8 +292,14 @@ def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, e
             continue
         core.check_pause(should_yield)
         try:
-            market_volume.collect_market(db, client, slug, should_yield=should_yield)
-            print(f"单边成交 [{index}/{len(pending_volume)}] {slug} 完成", flush=True)
+            if derive_volume:
+                market_volume.derive_market_volume(db, slug)
+                core.check_pause(should_yield)
+                label = "推导单边成交"
+            else:
+                market_volume.collect_market(db, client, slug, should_yield=should_yield)
+                label = "单边成交"
+            print(f"{label} [{index}/{len(pending_volume)}] {slug} 完成", flush=True)
         except core.RateLimitError as exc:
             with db:
                 db.execute("UPDATE market_volume SET last_error=? WHERE market_slug=?", (str(exc), slug))

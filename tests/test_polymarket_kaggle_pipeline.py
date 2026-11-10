@@ -121,7 +121,8 @@ class PipelineTests(unittest.TestCase):
         self.catalog = patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1}, clear=True)
         self.catalog.start()
         self.addCleanup(self.catalog.stop)
-        self.pipeline = producer.Pipeline(self.store, self.root / "work", today=lambda: self.clock[0], client=self.client)
+        self.pipeline = producer.Pipeline(self.store, self.root / "work", today=lambda: self.clock[0],
+                                          client=self.client, derive_volume=False)
 
     def quiet(self):
         return contextlib.redirect_stdout(io.StringIO())
@@ -148,6 +149,31 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(bundle["payload"]["current"]["volume_micro_usdc"], 2000000)
         self.assertFalse((self.root / "work/raw" / str(YESTERDAY)).exists())
         self.assertEqual(self.store.published[0], (slug, 1, "complete"))
+
+    def test_wallet_only_production_keeps_the_same_amount_without_second_api_route(self):
+        self.pipeline.derive_volume = True
+        with self.quiet():
+            self.pipeline.process_day(YESTERDAY)
+        self.assertEqual(self.client.trades, [(str(YESTERDAY), "false", None)])
+        raw = json.loads(self.latest_files(f"pm-updown-raw-{YESTERDAY}")["collection_status.json"])
+        self.assertEqual(raw["status"], "complete")
+        self.assertEqual(raw["volume_sources"], {"taker_api": 0, "wallet_tx_anchor_v1": 1})
+        bundle = json.loads(self.latest_files("pm-updown-analysis-2026-11")[f"daily_{YESTERDAY}.json"])
+        self.assertEqual(bundle["payload"]["current"]["volume_micro_usdc"], 2000000)
+
+    def test_wallet_only_resume_rebuilds_summary_without_redownloading_committed_wallets(self):
+        self.pipeline.derive_volume = True
+        self.client.after_wallet = lambda _: setattr(self.pipeline, "stopping", True)
+        with self.quiet(), self.assertRaises(producer.core.CollectionPaused):
+            self.pipeline.process_day(YESTERDAY)
+        self.pipeline.stopping = False
+        self.client.after_wallet = None
+        with self.quiet():
+            self.pipeline.process_day(YESTERDAY)
+        self.assertEqual(self.client.trades, [(str(YESTERDAY), "false", None)])
+        raw = json.loads(self.latest_files(f"pm-updown-raw-{YESTERDAY}")["collection_status.json"])
+        self.assertEqual(raw["status"], "complete")
+        self.assertEqual(raw["volume_sources"], {"taker_api": 0, "wallet_tx_anchor_v1": 1})
 
     def test_sustained_429_still_publishes_recoverable_incomplete_day(self):
         self.client.wallet_error = producer.core.RateLimitError("HTTP 429", status_code=429, retry_after=7)
@@ -222,7 +248,8 @@ class PipelineTests(unittest.TestCase):
         producer.core.collect_market(db, self.client, market)
         db.close()
         self.store.publish(slug, folder)
-        resumed = producer.Pipeline(self.store, self.root / "resumed", today=lambda: TODAY, client=self.client)
+        resumed = producer.Pipeline(self.store, self.root / "resumed", today=lambda: TODAY,
+                                    client=self.client, derive_volume=False)
         self.assertEqual(resumed.state["raw_days"][str(YESTERDAY)]["version"], 1)
         self.client.trades.clear()
         with self.quiet():
