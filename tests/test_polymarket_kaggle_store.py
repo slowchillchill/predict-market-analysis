@@ -104,6 +104,12 @@ class KaggleStoreTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 2)
         sleep.assert_called_once_with(60)
 
+    def test_cli_printed_creation_error_is_failure_even_with_zero_exit_code(self):
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "Dataset creation error: quota exceeded\n", ""))
+        store = cloud.KaggleStore("owner", self.root / "printed-error", runner=runner)
+        with self.assertRaisesRegex(cloud.KaggleError, "quota exceeded"):
+            store._run("datasets", "create", "-p", "folder")
+
 
 if __name__ == "__main__":
     unittest.main()

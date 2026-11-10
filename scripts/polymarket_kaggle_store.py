@@ -41,6 +41,9 @@ class KaggleStore:
             result = self.runner(["kaggle", *map(str, arguments)], text=True, capture_output=True)
             output = (result.stdout or "") + (result.stderr or "")
             if result.returncode == 0:
+                # These CLI wrappers print API failures but still exit zero.
+                if "Dataset creation error:" in output or "Dataset version creation error:" in output:
+                    raise KaggleError(output.strip())
                 return result.stdout.strip()
             if ("429" in output or "Too many requests" in output) and attempt < 2:
                 delay = 60 * (attempt + 1)

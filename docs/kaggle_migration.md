@@ -25,16 +25,23 @@ GitHub 项目代码保留 MIT；Kaggle 启动脚本采用 Apache 2.0。整理数
 
 代码入口为 `kaggle/notebook.py`，配置为 `kaggle/kernel-metadata.json`。Notebook 启用 Internet，使用 CPU，按固定 Git 提交加载项目代码。
 
-在 Kaggle 的 Secrets 界面创建名为 `KAGGLE_API_TOKEN` 的 Secret，并对该 Notebook 启用访问。Token 不写入代码、数据集或日志。然后在 Notebook 的调度设置中启用 Daily。
-
-使用已配置的 Kaggle CLI 更新代码：
+使用已配置的 Kaggle CLI 上传代码时，必须加 `--no-run`，只上传源码：
 
 ```bash
-kaggle kernels push -p kaggle
+kaggle kernels push -p kaggle --no-run
 kaggle kernels status qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis
 ```
 
-`push` 会触发运行。生产 Notebook 每次启动先恢复云端进度，再采集最新已结束的 UTC 日期，并修复近期未完成市场。新日期处理后，继续从旧到新补采历史。首次历史发现固定各系列可取得的历史范围，后续会话沿用该范围。
+上传后，在网页完成以下操作：
+
+1. 打开 Notebook 编辑页，在 Secrets 界面创建名为 `KAGGLE_API_TOKEN` 的 Secret。
+2. 勾选该 Secret，允许当前 Notebook 访问；已有 Secret 也须确认已勾选。
+3. 选择 **Save Version → Save & Run All**，运行带有 Secret 授权的版本。
+4. 确认该版本能够读取 Secret，再启用原生 **Daily** 调度，使后续任务沿用该版本。
+
+本次部署实测，直接通过 CLI `push` 运行的新版本未携带 Secret 授权，在 `get_secret` 处返回 HTTP 400，尚未发送采集请求。因此，CLI 上传或运行成功不代表 Secret 已授权；代码更新后仍需通过上述网页步骤保存运行版本。Token 不写入代码、数据集或日志。
+
+生产 Notebook 每次启动先恢复云端进度，再采集最新已结束的 UTC 日期，并修复近期未完成市场。新日期处理后，继续从旧到新补采历史。首次历史发现固定各系列可取得的历史范围，后续会话沿用该范围。
 
 历史采集在每页事务提交后检查日更优先级。出现新的已结束 UTC 日期时，保存当前历史日库，处理新日期，然后恢复历史。单次会话结束后，下次 Daily 运行继续；生产没有每日补采日期数量上限。
 

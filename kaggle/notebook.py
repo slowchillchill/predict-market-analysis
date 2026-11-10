@@ -20,7 +20,8 @@ from pathlib import Path
 import subprocess
 import sys
 
-SOURCE_COMMIT = "3a4c0a232d9507139d84d0deeb342709c6a2a3a6"
+SOURCE_COMMIT = "f5168a1c7fe83b7e114d251379e2c6baf8ed9e5a"
+RUN_ARGUMENTS = ["--max-days", "2"]  # Initial acceptance: one fresh day and one historical day.
 SOURCE_URL = "https://github.com/slowchillchill/predict-market-analysis.git"
 
 
@@ -39,7 +40,7 @@ def main():
                     str(source / "requirements-kaggle.txt")], check=True)
     sys.path.insert(0, str(source / "scripts"))
     from polymarket_kaggle_pipeline import main as run
-    raise SystemExit(run())
+    raise SystemExit(run(RUN_ARGUMENTS))
 
 
 if __name__ == "__main__":
