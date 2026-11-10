@@ -13,7 +13,7 @@ from pathlib import Path
 import polymarket_btc5m_daily as core
 import polymarket_updown_daily as collector
 import polymarket_kaggle_analysis as analysis
-from polymarket_kaggle_store import KaggleStore, TITLE, OWNER, write_json
+from polymarket_kaggle_store import KaggleError, KaggleStore, TITLE, OWNER, write_json
 
 
 def utc_today() -> date:
@@ -138,12 +138,22 @@ class Pipeline:
         bundle = analysis.load_day(self.sources_for(previous, day), previous)
         return bundle["payload"]["current"] if bundle else None
 
-    def _raw_path(self, day: date, reference: dict | None) -> Path:
+    def _raw_path(self, day: date, reference: dict | None, *, latest: bool = False) -> Path:
         folder = self.work_dir / "raw" / str(day)
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / "data.sqlite3"
-        if not path.exists() and reference:
-            self.store.download_file(reference["slug"], "data.sqlite3", reference["version"], path)
+        if not path.exists():
+            if latest:
+                # Raw publication can succeed before the monthly progress
+                # publication. Resume its latest durable version, not the
+                # possibly stale reference in progress.json. restore waits
+                # for a processing Dataset version before downloading it.
+                version = self.store.restore(f"pm-updown-raw-{day}", folder)
+                if reference and (version is None or version < reference["version"]):
+                    path.unlink(missing_ok=True)
+                    raise KaggleError(f"Cannot resume {day} from an older or missing raw Dataset version")
+            elif reference:
+                self.store.download_file(reference["slug"], "data.sqlite3", reference["version"], path)
         return path
 
     def _first_ends(self) -> dict | None:
@@ -159,11 +169,7 @@ class Pipeline:
         print(f"Collecting {stamp} ({'historical' if historical else 'fresh'})", flush=True)
         slug = f"pm-updown-raw-{stamp}"
         reference = self.state["raw_days"].get(stamp)
-        if reference is None:
-            version = self.store.version(slug)
-            if version:
-                reference = {"slug": slug, "version": version, "status": "incomplete"}
-        path = self._raw_path(day, reference)
+        path = self._raw_path(day, reference, latest=True)
         db = collector.connect_database(path, series_first_end=self._first_ends())
         paused = None
         collection_error = None

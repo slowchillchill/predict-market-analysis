@@ -79,13 +79,28 @@ def expected_slots(series: str, day: date, *, first_ends: dict[str, str | None] 
     """给出已知系列计划中的结束时点；详情返回的市场元数据决定最终归属。"""
     count = TARGET_SERIES[series]
     step = timedelta(seconds=86400 // count)
+    first = (first_ends if first_ends is not None else SERIES_FIRST_END_UTC).get(series)
+    first = utc_time(first) if first is not None else None
+    stop = midnight(day + timedelta(days=1))
+    if series.endswith("-4h"):
+        # 四小时系列按纽约的 00/04/08/12/16/20 点安排。冬令时的
+        # UTC 结束点因此是 01/05/09/13/17/21，而非夏令时的 00/04/08/12/16/20。
+        # 转换每个本地边界，不能先转换一次再在 UTC 上跨夏令时加四小时。
+        local_day = midnight(day).astimezone(ZoneInfo("America/New_York")).date()
+        local_end = datetime.combine(local_day, datetime.min.time(), ZoneInfo("America/New_York"))
+        while True:
+            ended = local_end.astimezone(timezone.utc)
+            if ended >= stop:
+                return
+            if ended >= midnight(day) and (first is None or ended >= first):
+                yield ended
+            local_end += timedelta(hours=4)
     ended = midnight(day)
     if count == 1:
         ended = datetime.combine(day, datetime.min.time(), ZoneInfo("America/New_York")).replace(
             hour=12).astimezone(timezone.utc)
-    first = (first_ends if first_ends is not None else SERIES_FIRST_END_UTC).get(series)
-    while ended < midnight(day + timedelta(days=1)):
-        if first is None or ended >= utc_time(first):
+    while ended < stop:
+        if first is None or ended >= first:
             yield ended
         ended += step
 
@@ -93,6 +108,8 @@ def expected_slots(series: str, day: date, *, first_ends: dict[str, str | None] 
 def market_slug(series: str, ended: datetime) -> str:
     coin, period = series.split("-", 1)[0], series.rsplit("-", 1)[1]
     if period in ("5m", "15m", "4h"):
+        # Gamma 实际四小时市场仍按四个经过小时命名，包括 DST 转换日。
+        # 例：2026-03-08T05:00Z 开始、09:00Z 结束；不按纽约墙钟倒减四小时。
         began = ended - timedelta(seconds=86400 // TARGET_SERIES[series])
         return f"{coin}-updown-{period}-{int(began.timestamp())}"
     coin = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana", "doge": "dogecoin"}.get(coin, coin)
@@ -163,16 +180,23 @@ def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start:
                              should_yield: Callable[[], bool] | None = None) -> None:
     """补查列表接口未返回的预期时段；404 等失败保留为覆盖缺口。"""
     existing = {}
+    discovered_counts = {}
     for row in db.execute(
         "SELECT series_slug,end_time FROM markets WHERE date(end_time)>=? AND date(end_time)<? "
         "AND condition_id IS NOT NULL", (str(start), str(end))):
         ended = utc_time(row["end_time"])
-        existing.setdefault((row["series_slug"], ended.date()), set()).add(ended)
+        key = row["series_slug"], ended.date()
+        existing.setdefault(key, set()).add(ended)
+        discovered_counts[key] = discovered_counts.get(key, 0) + 1
     day = start
     first_ends = series_first_end(db)
     while day < end:
         for series in TARGET_SERIES:
-            for ended in expected_slots(series, day, first_ends=first_ends):
+            slots = list(expected_slots(series, day, first_ends=first_ends))
+            # 完整列表是实际元数据。达到预期数量时，不再凭推算时刻补查不存在的 slug。
+            if discovered_counts.get((series, day), 0) >= len(slots):
+                continue
+            for ended in slots:
                 if ended in existing.get((series, day), set()):
                     continue
                 slug = market_slug(series, ended)

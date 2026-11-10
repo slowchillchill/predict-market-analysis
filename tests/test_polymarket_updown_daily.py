@@ -350,6 +350,64 @@ class UpdownTests(unittest.TestCase):
         self.assertEqual(next(up.expected_slots('btc-up-or-down-daily',date(2026,12,1))).hour,17)
         self.assertEqual(up.coverage(self.db,'2026-08-01')['expected_markets'],2905)
 
+    def test_four_hour_slots_follow_new_york_winter_and_summer_phases(self):
+        series = 'btc-up-or-down-4h'
+        for day, hours in ((date(2026, 11, 9), [1, 5, 9, 13, 17, 21]),
+                           (date(2026, 9, 15), [0, 4, 8, 12, 16, 20])):
+            with self.subTest(day=day):
+                slots = list(up.expected_slots(series, day))
+                self.assertEqual([stamp.hour for stamp in slots], hours)
+                self.assertTrue(all(stamp.date() == day and stamp.tzinfo == timezone.utc for stamp in slots))
+        # 直接核对 Gamma 详情返回的真实开始/结束时间，不能把冬令时市场平移一小时。
+        self.assertEqual(up.market_slug(series, datetime(2026, 11, 9, 21, tzinfo=timezone.utc)),
+                         'btc-updown-4h-1794243600')
+        self.assertEqual(up.market_slug(series, datetime(2026, 9, 15, 20, tzinfo=timezone.utc)),
+                         'btc-updown-4h-1789488000')
+
+    def test_four_hour_dst_boundaries_convert_each_new_york_wall_time(self):
+        series = 'btc-up-or-down-4h'
+        self.assertEqual([stamp.hour for stamp in up.expected_slots(series, date(2026, 3, 8))],
+                         [1, 5, 8, 12, 16, 20])
+        self.assertEqual([stamp.hour for stamp in up.expected_slots(series, date(2026, 11, 1))],
+                         [0, 4, 9, 13, 17, 21])
+        # 转换日的真实历史市场可有重叠/缺口；slug 仍使用 Gamma 证实的四个经过小时。
+        self.assertEqual(up.market_slug(series, datetime(2026, 3, 8, 9, tzinfo=timezone.utc)),
+                         'btc-updown-4h-1772946000')
+
+    def test_complete_series_does_not_lookup_predicted_missing_slots(self):
+        day = date(2026, 11, 9)
+        series = 'btc-up-or-down-4h'
+        # 即使实际时间不匹配推算网格，已达到预期市场数量也不能继续猜 slug。
+        with self.db:
+            for index, hour in enumerate((0, 4, 8, 12, 16, 20)):
+                self.db.execute('INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) '
+                                'VALUES (?,?,?,?,?)',
+                                (f'listed-{index}', str(day), f'condition-{index}', series,
+                                 datetime(2026, 11, 9, hour, tzinfo=timezone.utc).isoformat()))
+        client = Mock()
+        with patch.dict(up.TARGET_SERIES, {series: 6}, clear=True):
+            up.discover_missing_markets(self.db, client, day, day + timedelta(days=1))
+        client.get.assert_not_called()
+
+    def test_four_hour_winter_gap_queries_only_correct_missing_slug(self):
+        day = date(2026, 11, 9)
+        series = 'btc-up-or-down-4h'
+        missing_end = datetime(2026, 11, 9, 21, tzinfo=timezone.utc)
+        with self.db:
+            for ended in up.expected_slots(series, day):
+                if ended == missing_end:
+                    continue
+                slug = up.market_slug(series, ended)
+                self.db.execute('INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) '
+                                'VALUES (?,?,?,?,?)',
+                                (slug, str(day), slug, series, ended.isoformat()))
+        slug = up.market_slug(series, missing_end)
+        client = Mock()
+        client.get.return_value = event(slug, '2026-11-09T21:00:00Z', '2026-11-09T17:00:00Z', series)
+        with patch.dict(up.TARGET_SERIES, {series: 6}, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            up.discover_missing_markets(self.db, client, day, day + timedelta(days=1))
+        client.get.assert_called_once_with(up.GAMMA_EVENT_SLUG + 'btc-updown-4h-1794243600', {})
+
 
 if __name__ == "__main__":
     unittest.main()

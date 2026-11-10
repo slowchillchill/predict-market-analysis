@@ -24,6 +24,7 @@ class MemoryStore:
         self.datasets = {}
         self.published = []
         self.downloads = []
+        self.restores = []
 
     def ref(self, slug):
         return "owner/" + slug
@@ -36,6 +37,7 @@ class MemoryStore:
 
     def restore(self, slug, destination):
         version = self.version(slug)
+        self.restores.append((slug, version))
         destination.mkdir(parents=True, exist_ok=True)
         if version:
             for name, data in self.datasets[slug][version].items():
@@ -198,7 +200,72 @@ class PipelineTests(unittest.TestCase):
         history_wallet_calls = [call for call in self.client.trades if call[:2] == (str(historical), "false")]
         self.assertEqual(len(history_wallet_calls), 1)
         self.assertEqual(len([call for call in self.client.trades if call[:2] == (str(historical), "true")]), 1)
-        self.assertIn((f"pm-updown-raw-{historical}", "data.sqlite3", 1), self.store.downloads)
+        self.assertIn((f"pm-updown-raw-{historical}", 1), self.store.restores)
+
+    def test_resume_uses_newer_raw_snapshot_when_monthly_progress_is_stale(self):
+        slug = f"pm-updown-raw-{YESTERDAY}"
+        folder = self.root / "raw-publication"
+        path = folder / "data.sqlite3"
+        db = producer.collector.connect_database(path)
+        producer.collector.discover_series(db, self.client, SERIES, YESTERDAY, TODAY)
+        producer.write_json(folder / "collection_status.json", {"status": "incomplete"})
+        db.close()
+        self.store.publish(slug, folder)
+        self.pipeline.state["raw_days"][str(YESTERDAY)] = {
+            "slug": slug, "version": 1, "status": "incomplete"}
+        self.pipeline.save()
+
+        # The raw version advances, then the producer dies before publishing
+        # the corresponding monthly progress snapshot.
+        db = producer.collector.connect_database(path)
+        market = db.execute("SELECT slug FROM markets").fetchone()[0]
+        producer.core.collect_market(db, self.client, market)
+        db.close()
+        self.store.publish(slug, folder)
+        resumed = producer.Pipeline(self.store, self.root / "resumed", today=lambda: TODAY, client=self.client)
+        self.assertEqual(resumed.state["raw_days"][str(YESTERDAY)]["version"], 1)
+        self.client.trades.clear()
+        with self.quiet():
+            resumed.process_day(YESTERDAY)
+        self.assertIn((slug, 2), self.store.restores)
+        self.assertEqual(self.client.trades, [(str(YESTERDAY), "true", None)])
+        self.assertEqual(resumed.state["raw_days"][str(YESTERDAY)]["version"], 3)
+        self.assertEqual(resumed.state["raw_days"][str(YESTERDAY)]["status"], "complete")
+
+    def test_existing_work_database_keeps_commits_newer_than_published_snapshot(self):
+        slug = f"pm-updown-raw-{YESTERDAY}"
+        folder = self.root / "raw-publication"
+        db = producer.collector.connect_database(folder / "data.sqlite3")
+        producer.collector.discover_series(db, self.client, SERIES, YESTERDAY, TODAY)
+        db.close()
+        producer.write_json(folder / "collection_status.json", {"status": "incomplete"})
+        self.store.publish(slug, folder)
+        self.pipeline.state["raw_days"][str(YESTERDAY)] = {
+            "slug": slug, "version": 1, "status": "incomplete"}
+        work = self.root / "work" / "raw" / str(YESTERDAY) / "data.sqlite3"
+        db = producer.collector.connect_database(work)
+        producer.collector.discover_series(db, self.client, SERIES, YESTERDAY, TODAY)
+        producer.core.collect_market(db, self.client, db.execute("SELECT slug FROM markets").fetchone()[0])
+        db.close()
+        self.client.trades.clear()
+        with self.quiet():
+            self.pipeline.process_day(YESTERDAY)
+        self.assertNotIn((slug, 1), self.store.restores)
+        self.assertEqual(self.client.trades, [(str(YESTERDAY), "true", None)])
+
+    def test_resume_refuses_to_downgrade_a_recorded_raw_version(self):
+        slug = f"pm-updown-raw-{YESTERDAY}"
+        folder = self.root / "raw-publication"
+        db = producer.collector.connect_database(folder / "data.sqlite3")
+        db.close()
+        self.store.publish(slug, folder)
+        self.pipeline.state["raw_days"][str(YESTERDAY)] = {
+            "slug": slug, "version": 2, "status": "incomplete"}
+        with self.quiet(), self.assertRaisesRegex(producer.KaggleError, "older or missing"):
+            self.pipeline.process_day(YESTERDAY)
+        self.assertFalse((self.root / "work/raw" / str(YESTERDAY) / "data.sqlite3").exists())
+        with self.quiet(), self.assertRaisesRegex(producer.KaggleError, "older or missing"):
+            self.pipeline.process_day(YESTERDAY)
 
     def test_stop_signal_flag_saves_last_committed_page_and_leaves_history_pointer(self):
         historical = YESTERDAY - timedelta(days=1)
