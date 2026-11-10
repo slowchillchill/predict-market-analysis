@@ -21,7 +21,7 @@ import subprocess
 import sys
 
 SOURCE_COMMIT = "c16edb8353aa78fe6229bc3e164f13788d1e1296"
-RUN_ARGUMENTS = ["--migrate-only"]  # One-time cloud conversion; restore [] after validation.
+RUN_ARGUMENTS = []  # Production: fresh UTC days, then continuous historical backfill.
 SOURCE_URL = "https://github.com/slowchillchill/predict-market-analysis.git"
 
 
