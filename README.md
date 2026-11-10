@@ -70,26 +70,13 @@ The first run records the deployment date. Pending report periods stay fixed and
 
 The remaining examples use the environment installed above. Collection examples write to `data/raw/manual_updown.sqlite3`; the preserved `data/raw/btc5m.sqlite3` is available for read-only reports and is protected from collection writes. Production scheduling uses the Kaggle JSON consumer above. Offline CSV/Markdown reporting uses only the Python standard library; poster rendering uses Pillow.
 
-### Run yesterday's complete workflow
-
-Using the environment above, run the manual workflow with an explicit database. The script defaults to the local Hong Kong proxy at `socks5h://127.0.0.1:20810`:
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_yesterday.py --db data/raw/manual_updown.sqlite3
-```
-
-This fixes yesterday's UTC date at startup using the system clock, collects that day's markets using existing download progress, then generates the overview, an all-series BUY distribution poster, their JSON data, and post text only after collection succeeds. It uses the built-in proxy address without switching VPN nodes or checking the exit location; use `--proxy` to override the address in another environment. Previously completed markets are reused. Day-over-day comparisons use existing prior-day data; missing prior-day data displays `N/A`. A rerun after UTC midnight targets the new yesterday; use the explicit-date commands below to finish an older date.
-
 ### 2. Collect data
 
-The collector connects directly when `--proxy` is omitted. It does not read proxy settings from environment variables automatically. The manual example below uses the existing local proxy setup; enter your configured URL, for example `socks5h://127.0.0.1:PORT` with your actual port:
+To collect an explicit UTC market-end range manually:
 
 ```bash
-read -r -p 'Local Hong Kong proxy URL: ' UPDOWN_PROXY
-
 .venv-btc5m/bin/python scripts/polymarket_updown_daily.py collect \
   --start-date 2026-09-17 --end-date 2026-09-19 \
-  --proxy "$UPDOWN_PROXY" \
   --db data/raw/manual_updown.sqlite3
 ```
 

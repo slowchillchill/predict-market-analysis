@@ -1,8 +1,9 @@
 # Polymarket BTC 5 分钟数据使用指南
 
 项目已增加全部 38 个加密货币 Up/Down 系列的采集入口，**按市场结束日（UTC）**筛选；
-见 [全系列采集说明](docs/updown_daily.md)。两者共用原数据库和逐笔数据，无须删除、迁移或重新下载
-已完成市场。本页旧 `btc5m_*` 命令与视图继续按 BTC 5 分钟市场开始日统计，供历史结果对照。
+见 [全系列采集说明](docs/updown_daily.md)。本页旧 `btc5m_*` 命令与视图继续按 BTC 5 分钟
+市场开始日统计，供手动分析和历史结果对照。下方采集及报告示例统一使用独立的
+`data/raw/manual_btc5m.sqlite3`；保留的原数据库只作只读分析，不用于这些采集示例。
 
 英文 X 数据海报见 [海报使用说明](docs/updown_poster.md)，可按指定 UTC 结束日离线生成。
 
@@ -19,23 +20,15 @@ python3 -m venv .venv-btc5m
 sqlite3 --version
 ```
 
-下载通过本机香港代理进行。运行下面命令，在提示后输入实际代理 URL，
-格式为 `socks5h://127.0.0.1:端口`；代理地址和凭据只保存在当前终端变量中。
-
-```bash
-read -r -p '请输入本机香港代理 URL：' BTC5M_HK_PROXY
-```
-
 ## 2. 启动下载与断点续传
 
-下载 UTC 2026-09-15、2026-09-16 两天所属市场的全部成交：
+直接联网，下载 UTC 2026-09-15、2026-09-16 两天所属市场的全部成交：
 
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_btc5m_daily.py collect \
   --start-date 2026-09-15 \
   --end-date 2026-09-17 \
-  --proxy "$BTC5M_HK_PROXY" \
-  --db data/raw/btc5m.sqlite3
+  --db data/raw/manual_btc5m.sqlite3
 ```
 
 `--start-date` 包含当天，`--end-date` 不包含当天。日期按市场的 `eventStartTime`
@@ -52,7 +45,7 @@ read -r -p '请输入本机香港代理 URL：' BTC5M_HK_PROXY
 查看采集覆盖情况：
 
 ```bash
-sqlite3 -readonly -header -column data/raw/btc5m.sqlite3 <<'SQL'
+sqlite3 -readonly -header -column data/raw/manual_btc5m.sqlite3 <<'SQL'
 SELECT date_utc, expected_markets, discovered_markets,
        completed_markets, committed_pages, is_complete
 FROM btc5m_coverage
@@ -70,10 +63,10 @@ SQL
 
 ```bash
 python3 scripts/polymarket_btc5m_daily.py report \
-  --date 2026-09-15 --db data/raw/btc5m.sqlite3 --output-dir outputs/btc5m
+  --date 2026-09-15 --db data/raw/manual_btc5m.sqlite3 --output-dir outputs/btc5m
 
 python3 scripts/polymarket_btc5m_daily.py report \
-  --date 2026-09-16 --db data/raw/btc5m.sqlite3 --output-dir outputs/btc5m
+  --date 2026-09-16 --db data/raw/manual_btc5m.sqlite3 --output-dir outputs/btc5m
 ```
 
 终端直接显示结果，并为每个完整日生成：
@@ -83,12 +76,12 @@ python3 scripts/polymarket_btc5m_daily.py report \
 - `outputs/btc5m/btc5m_daily_日期.md`：中文报告及采集覆盖情况。
 
 缺口日只生成进度报告，暂不生成金额统计。命令退出码 `0` 表示完成，`2` 表示有缺口，
-`130` 表示下载被用户中断。`report` 只需要 Python 标准库，不需要代理。
+`130` 表示下载被用户中断。`report` 只需要 Python 标准库，全程离线。
 
 也可以直接查询两天的成交额和去重钱包数：
 
 ```bash
-sqlite3 -readonly -header -column data/raw/btc5m.sqlite3 <<'SQL'
+sqlite3 -readonly -header -column data/raw/manual_btc5m.sqlite3 <<'SQL'
 SELECT date_utc,
        unique_wallets,
        printf('%d.%06d', wallet_total_micro_usdc / 1000000,
@@ -102,7 +95,7 @@ SQL
 查询某一天 Top10 钱包的成交额：
 
 ```bash
-sqlite3 -readonly -header -column data/raw/btc5m.sqlite3 <<'SQL'
+sqlite3 -readonly -header -column data/raw/manual_btc5m.sqlite3 <<'SQL'
 SELECT wallet_rank, wallet,
        printf('%d.%06d', amount_micro_usdc / 1000000,
                         amount_micro_usdc % 1000000) AS amount_usdc
@@ -143,7 +136,7 @@ SQL
 `parameters` 中的 `60`、`6`、`48` 可比较不同阈值：
 
 ```bash
-sqlite3 -readonly -header -column data/raw/btc5m.sqlite3 <<'SQL'
+sqlite3 -readonly -header -column data/raw/manual_btc5m.sqlite3 <<'SQL'
 WITH parameters AS (
     SELECT 60 AS max_avg_interval_seconds,
            6 AS min_span_hours,

@@ -75,28 +75,13 @@ python3 -m venv .venv-btc5m
 
 下方命令仅用于手动采集和分析，沿用上述环境。采集示例统一写入独立的 `data/raw/manual_updown.sqlite3`，不写保留的 `data/raw/btc5m.sqlite3`。只读报告、分布和海报工具也可显式指定旧库进行离线分析；不要用旧库路径运行采集或初始化。
 
-### 一次运行昨日完整流程
-
-手动运行昨日采集及图文生成，显式指定独立数据库；脚本内置香港代理地址 `socks5h://127.0.0.1:20810`：
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_yesterday.py --db data/raw/manual_updown.sqlite3
-```
-
-脚本启动时按系统时钟固定 UTC 昨日，复用已有下载进度采集当天市场，采集成功后生成英文总览、全系列买入分布海报、配套 JSON 和推文。
-它默认使用内置代理，其他环境可用 `--proxy` 覆盖地址，不切换 VPN 节点或检测出口所在地。已完成市场不重新下载成交；环比使用数据库已有前日数据，缺失时显示 `N/A`。
-跨 UTC 午夜重跑会改为新的昨日，补旧日期请使用下方指定日期命令。
-
 ### 2. 采集数据
 
-采集器省略 `--proxy` 时直接联网，不会自动读取环境变量中的代理配置。下方手动示例沿用本机代理配置；请输入已配置的代理 URL，例如将 `socks5h://127.0.0.1:PORT` 中的端口替换为实际端口：
+手动指定市场 UTC 结束日期范围采集：
 
 ```bash
-read -r -p '请输入本机香港代理 URL：' UPDOWN_PROXY
-
 .venv-btc5m/bin/python scripts/polymarket_updown_daily.py collect \
   --start-date 2026-09-17 --end-date 2026-09-19 \
-  --proxy "$UPDOWN_PROXY" \
   --db data/raw/manual_updown.sqlite3
 ```
 
