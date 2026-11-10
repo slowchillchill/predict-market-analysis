@@ -20,7 +20,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-SOURCE_COMMIT = "d985c1177b355482510b69371769081163581ad6"
+SOURCE_COMMIT = "154998f352cce96d36f8646f7547d3acec17073a"
 RUN_ARGUMENTS = []  # Production: daily collection, then continuous historical backfill.
 SOURCE_URL = "https://github.com/slowchillchill/predict-market-analysis.git"
 
