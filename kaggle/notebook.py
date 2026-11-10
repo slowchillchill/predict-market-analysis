@@ -20,8 +20,8 @@ from pathlib import Path
 import subprocess
 import sys
 
-SOURCE_COMMIT = "f5168a1c7fe83b7e114d251379e2c6baf8ed9e5a"
-RUN_ARGUMENTS = ["--max-days", "2"]  # Initial acceptance: one fresh day and one historical day.
+SOURCE_COMMIT = "d985c1177b355482510b69371769081163581ad6"
+RUN_ARGUMENTS = []  # Production: daily collection, then continuous historical backfill.
 SOURCE_URL = "https://github.com/slowchillchill/predict-market-analysis.git"
 
 
