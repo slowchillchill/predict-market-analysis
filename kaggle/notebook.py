@@ -20,8 +20,8 @@ from pathlib import Path
 import subprocess
 import sys
 
-SOURCE_COMMIT = "154998f352cce96d36f8646f7547d3acec17073a"
-RUN_ARGUMENTS = []  # Production: daily collection, then continuous historical backfill.
+SOURCE_COMMIT = "c16edb8353aa78fe6229bc3e164f13788d1e1296"
+RUN_ARGUMENTS = ["--migrate-only"]  # One-time cloud conversion; restore [] after validation.
 SOURCE_URL = "https://github.com/slowchillchill/predict-market-analysis.git"
 
 
