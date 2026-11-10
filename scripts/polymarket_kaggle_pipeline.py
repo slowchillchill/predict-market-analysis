@@ -7,6 +7,8 @@ import calendar
 import json
 import shutil
 import signal
+import sqlite3
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,6 +16,11 @@ import polymarket_btc5m_daily as core
 import polymarket_updown_daily as collector
 import polymarket_kaggle_analysis as analysis
 from polymarket_kaggle_store import KaggleError, KaggleStore, TITLE, OWNER, write_json
+import polymarket_trade_groups as trade_groups
+
+
+RAW_SCHEMA_VERSION = 2
+VOLUME_METHOD = "wallet_group_first_row_v1"
 
 
 def utc_today() -> date:
@@ -40,10 +47,15 @@ def window_start(today: date) -> date:
 DESCRIPTION = """Public Polymarket Crypto Updown Markets Analysis research data.
 Source: https://gamma-api.polymarket.com and https://data-api.polymarket.com/v2/trades.
 Markets are grouped by UTC market end date, retaining all available trades of each market.
-Full wallet records (taker_only=false) retain both sides of each matched trade.
-Market volume is reconstructed from the first stored row per market/transaction group;
-previous API-based reference summaries remain valid. collection_status.json records
-how many completed market summaries came from each method.
+The collector requests taker_only=false once and retains every returned wallet row.
+Completed SQLite files store short group_id values, scoped to each market, instead
+of transaction hash strings. Unfinished markets alone retain a pending hash mapping
+for cursor recovery; completed files contain markets, collection_progress and trades.
+Market volume is computed from each group's first stored page/row, not collected
+through a second API request or stored in a market_volume table. This project rule
+matched the old taker API amounts for the validated 2026-11-09 sample; it is not an
+official guarantee of future row ordering. collection_status.json records the format
+and calculation method. Old Dataset versions remain historical snapshots.
 Amounts use exact decimal prices and sizes with the project's existing rounding rules.
 Source code, schema, methodology and reproducible analysis:
 https://github.com/slowchillchill/predict-market-analysis
@@ -54,12 +66,10 @@ An incomplete daily version is a recovery point, not a finished statistical repo
 
 
 class Pipeline:
-    def __init__(self, store: KaggleStore, work_dir: Path, *, today=utc_today, client=None,
-                 derive_volume: bool = True):
+    def __init__(self, store: KaggleStore, work_dir: Path, *, today=utc_today, client=None):
         self.store, self.work_dir, self.today = store, Path(work_dir), today
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.client = client or core.Client(None)
-        self.derive_volume = derive_volume
         self.current_month = month_of(today())
         self.months: dict[str, Path] = {}
         self.changed_months: set[str] = set()
@@ -180,23 +190,15 @@ class Pipeline:
         collection_error = None
         try:
             collector.collect(db, self.client, day, day + timedelta(days=1),
-                              should_yield=self._should_yield if historical else lambda: self.stopping,
-                              derive_volume=self.derive_volume)
+                              should_yield=self._should_yield if historical else lambda: self.stopping)
         except (core.CollectionPaused, core.RateLimitError, KeyboardInterrupt) as exc:
             paused = exc
         except Exception as exc:
             collection_error = f"{type(exc).__name__}: {exc}"
         finally:
             coverage = collector.coverage(db, stamp)
-            counts = db.execute("""
-                SELECT COALESCE(SUM(v.completed_at IS NOT NULL AND v.committed_page>0),0),
-                       COALESCE(SUM(v.completed_at IS NOT NULL AND v.committed_page=0),0)
-                FROM market_volume v JOIN markets m ON m.slug=v.market_slug
-                WHERE date(m.end_time)=?
-            """, (stamp,)).fetchone()
-            volume_sources = {"taker_api": counts[0], "wallet_tx_anchor_v1": counts[1]}
             db.close()
-        complete = bool(coverage["is_complete"] and coverage["market_volume_is_complete"])
+        complete = bool(coverage["is_complete"])
         features = bundle = labels = None
         changed = {}
         if complete and not paused and not collection_error:
@@ -206,6 +208,8 @@ class Pipeline:
                     history_metadata=self.history_metadata())
                 bundle = analysis.export_day(path, day, labels, history_metadata=labels.metadata,
                                               previous=self._previous_day(day))
+                with closing(sqlite3.connect(path)) as final_db:
+                    trade_groups.finalize_database(final_db)
             except Exception as exc:
                 collection_error = f"Statistics: {type(exc).__name__}: {exc}"
                 complete = False
@@ -216,19 +220,22 @@ class Pipeline:
             "date_utc": stamp, "status": status, "coverage": coverage,
             "error": collection_error or (str(paused) if paused else None),
             "date_basis": "market_end_utc",
-            "volume_sources": volume_sources,
+            "schema_version": RAW_SCHEMA_VERSION,
+            "group_key": ["market_slug", "group_id"],
+            "volume_method": VOLUME_METHOD,
         })
         (path.parent / "README.md").write_text(DESCRIPTION)
         version = self.store.publish(slug, path.parent, title=f"Polymarket Updown Raw {stamp}",
                                      description=DESCRIPTION, message=f"{stamp}: {status}")
         reference = {"slug": slug, "version": version, "status": status, "coverage": coverage,
-                     "volume_sources": volume_sources}
+                     "raw_schema_version": RAW_SCHEMA_VERSION, "volume_method": VOLUME_METHOD}
         self.state["raw_days"][stamp] = reference
         if complete:
             self.state["first_seen"] = dict(labels)
             self.state["history_metadata"] = labels.metadata
             bundle["source_versions"] = {stamp: {"dataset": self.store.ref(slug), "version": version}}
-            bundle["volume_sources"] = {stamp: volume_sources}
+            bundle["raw_schema_version"] = RAW_SCHEMA_VERSION
+            bundle["volume_method"] = VOLUME_METHOD
             analysis.save_day(self.month(month_of(day)) / "features.sqlite3", features, bundle, first_seen=labels)
             self.put_bundle(bundle)
             if changed:
@@ -278,8 +285,8 @@ class Pipeline:
             bundle = analysis.export_day(path, day, self.state["first_seen"],
                 history_metadata=self.history_metadata(), previous=self._previous_day(day),
                 source_reference={"dataset": self.store.ref(reference["slug"]), "version": reference["version"]})
-            bundle["volume_sources"] = {stamp: reference.get("volume_sources", {
-                "taker_api": reference.get("coverage", {}).get("market_volume_completed_markets", 0)})}
+            bundle["raw_schema_version"] = reference.get("raw_schema_version", 1)
+            bundle["volume_method"] = reference.get("volume_method", "legacy_taker_api")
             analysis.save_day(self.month(month_of(day)) / "features.sqlite3", features, bundle,
                               first_seen=self.state["first_seen"])
             self.put_bundle(bundle)
@@ -436,13 +443,17 @@ def main(argv=None) -> int:
     parser.add_argument("--owner", default=OWNER)
     parser.add_argument("--work-dir", type=Path, default=Path("/tmp/polymarket-pipeline"))
     parser.add_argument("--max-days", type=int, help="Explicit finite acceptance run; production has no day cap")
+    parser.add_argument("--migrate-only", action="store_true", help="Upgrade completed cloud snapshots without collecting trades")
     args = parser.parse_args(argv)
     if not Path("/kaggle/working").is_dir():
         parser.error("The producer runs only on Kaggle; local machines run polymarket_kaggle_reports.py")
     pipeline = Pipeline(KaggleStore(args.owner, args.work_dir / "downloads"), args.work_dir)
     signal.signal(signal.SIGTERM, lambda *_: setattr(pipeline, "stopping", True))
     try:
-        pipeline.run(max_days=args.max_days)
+        from polymarket_kaggle_migration import migrate_existing
+        migrate_existing(pipeline)
+        if not args.migrate_only:
+            pipeline.run(max_days=args.max_days)
     except core.RateLimitError as exc:
         print(f"Polymarket collection paused after sustained rate limiting: {exc}", flush=True)
         return 0

@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class BotPriceTests(unittest.TestCase):
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
-        self.db.executescript((ROOT / "sql/btc5m_schema.sql").read_text())
+        # Preserve the hash-based fixture to cover read-only legacy statistics.
+        self.db.executescript((ROOT / "tests/fixtures/btc5m_legacy_schema.sql").read_text())
         self.db.execute("CREATE VIEW updown_target_series(series_slug, expected_markets, first_end_time) "
                         "AS VALUES ('btc',1,NULL), ('eth',1,NULL)")
         for slug, series in (("m-btc", "btc"), ("m-eth", "eth")):

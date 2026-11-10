@@ -90,19 +90,18 @@ class PublicAPI:
         if url == producer.core.TRADES_URL:
             day = params["condition"]
             mode = params["taker_only"]
+            if mode != "false":
+                raise AssertionError("Production must not request a second trade route")
             self.trades.append((day, mode, params.get("cursor")))
-            if mode == "false":
-                if self.wallet_error:
-                    raise self.wallet_error
-                if self.after_wallet:
-                    self.after_wallet(date.fromisoformat(day))
-                timestamp = int(datetime.combine(date.fromisoformat(day), datetime.min.time(), timezone.utc).timestamp())
-                data = [{"proxy_wallet": wallet, "transaction_hash": "pair", "timestamp": timestamp,
-                         "side": side, "outcome": "Up", "outcome_index": 0, "token_id": "up",
-                         "price": "0.2", "size": "10"}
-                        for wallet, side in (("buyer", "BUY"), ("seller", "SELL"))]
-            else:
-                data = [{"price": "0.2", "size": "10"}]
+            if self.wallet_error:
+                raise self.wallet_error
+            if self.after_wallet:
+                self.after_wallet(date.fromisoformat(day))
+            timestamp = int(datetime.combine(date.fromisoformat(day), datetime.min.time(), timezone.utc).timestamp())
+            data = [{"proxy_wallet": wallet, "transaction_hash": "pair", "timestamp": timestamp,
+                     "side": side, "outcome": "Up", "outcome_index": 0, "token_id": "up",
+                     "price": "0.2", "size": "10"}
+                    for wallet, side in (("buyer", "BUY"), ("seller", "SELL"))]
             return {"data": data, "pagination": {"next_cursor": None}}
         raise AssertionError((url, params))
 
@@ -122,7 +121,7 @@ class PipelineTests(unittest.TestCase):
         self.catalog.start()
         self.addCleanup(self.catalog.stop)
         self.pipeline = producer.Pipeline(self.store, self.root / "work", today=lambda: self.clock[0],
-                                          client=self.client, derive_volume=False)
+                                          client=self.client)
 
     def quiet(self):
         return contextlib.redirect_stdout(io.StringIO())
@@ -137,32 +136,60 @@ class PipelineTests(unittest.TestCase):
     def latest_files(self, slug):
         return self.store.datasets[slug][self.store.version(slug)]
 
+    def inspect_raw(self, files):
+        path = self.root / "inspected.sqlite3"
+        path.write_bytes(files["data.sqlite3"])
+        return sqlite3.connect(path)
+
+    def assert_complete_raw_shape(self, files):
+        with contextlib.closing(self.inspect_raw(files)) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertEqual(tables, {"markets", "collection_progress", "trades"})
+            columns = {row[1] for row in db.execute("PRAGMA table_info(trades)")}
+            self.assertIn("group_id", columns)
+            self.assertNotIn("transaction_hash", columns)
+            rows = db.execute("SELECT group_id,typeof(group_id) FROM trades").fetchall()
+            self.assertTrue(rows)
+            self.assertTrue(all(value > 0 and storage_type == "integer" for value, storage_type in rows))
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+
     def test_complete_day_publishes_exact_raw_version_then_formal_result(self):
         with self.quiet():
             self.pipeline.process_day(YESTERDAY)
         slug = f"pm-updown-raw-{YESTERDAY}"
         files = self.latest_files(slug)
-        self.assertEqual(json.loads(files["collection_status.json"])["status"], "complete")
+        metadata = json.loads(files["collection_status.json"])
+        self.assertEqual(metadata["status"], "complete")
+        self.assertEqual(metadata["schema_version"], 2)
+        self.assertEqual(metadata["group_key"], ["market_slug", "group_id"])
+        self.assertEqual(metadata["volume_method"], "wallet_group_first_row_v1")
+        self.assertNotIn("volume_sources", metadata)
+        self.assertFalse(any(key.startswith("market_volume_") for key in metadata["coverage"]))
+        self.assert_complete_raw_shape(files)
         month = self.latest_files("pm-updown-analysis-2026-11")
         bundle = json.loads(month[f"daily_{YESTERDAY}.json"])
         self.assertEqual(bundle["source_versions"][str(YESTERDAY)], {"dataset": "owner/" + slug, "version": 1})
+        self.assertEqual(bundle["schema_version"], 1)
+        self.assertEqual(bundle["raw_schema_version"], 2)
+        self.assertEqual(bundle["volume_method"], "wallet_group_first_row_v1")
+        self.assertEqual(self.pipeline.state["raw_days"][str(YESTERDAY)]["raw_schema_version"], 2)
+        self.assertEqual(self.pipeline.state["raw_days"][str(YESTERDAY)]["volume_method"],
+                         "wallet_group_first_row_v1")
         self.assertEqual(bundle["payload"]["current"]["volume_micro_usdc"], 2000000)
         self.assertFalse((self.root / "work/raw" / str(YESTERDAY)).exists())
         self.assertEqual(self.store.published[0], (slug, 1, "complete"))
 
     def test_wallet_only_production_keeps_the_same_amount_without_second_api_route(self):
-        self.pipeline.derive_volume = True
         with self.quiet():
             self.pipeline.process_day(YESTERDAY)
         self.assertEqual(self.client.trades, [(str(YESTERDAY), "false", None)])
         raw = json.loads(self.latest_files(f"pm-updown-raw-{YESTERDAY}")["collection_status.json"])
         self.assertEqual(raw["status"], "complete")
-        self.assertEqual(raw["volume_sources"], {"taker_api": 0, "wallet_tx_anchor_v1": 1})
+        self.assertEqual(raw["volume_method"], "wallet_group_first_row_v1")
         bundle = json.loads(self.latest_files("pm-updown-analysis-2026-11")[f"daily_{YESTERDAY}.json"])
         self.assertEqual(bundle["payload"]["current"]["volume_micro_usdc"], 2000000)
 
     def test_wallet_only_resume_rebuilds_summary_without_redownloading_committed_wallets(self):
-        self.pipeline.derive_volume = True
         self.client.after_wallet = lambda _: setattr(self.pipeline, "stopping", True)
         with self.quiet(), self.assertRaises(producer.core.CollectionPaused):
             self.pipeline.process_day(YESTERDAY)
@@ -173,7 +200,43 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.client.trades, [(str(YESTERDAY), "false", None)])
         raw = json.loads(self.latest_files(f"pm-updown-raw-{YESTERDAY}")["collection_status.json"])
         self.assertEqual(raw["status"], "complete")
-        self.assertEqual(raw["volume_sources"], {"taker_api": 0, "wallet_tx_anchor_v1": 1})
+        self.assertEqual(raw["volume_method"], "wallet_group_first_row_v1")
+        self.assert_complete_raw_shape(self.latest_files(f"pm-updown-raw-{YESTERDAY}"))
+
+    def test_partial_page_mapping_survives_publication_and_resumes_in_a_new_session(self):
+        original_get = self.client.get
+
+        def paged_get(url, params):
+            payload = original_get(url, params)
+            if url == producer.core.TRADES_URL:
+                if params.get("cursor") is None:
+                    payload["data"] = payload["data"][:1]
+                    payload["pagination"]["next_cursor"] = "page-2"
+                    self.pipeline.stopping = True
+                else:
+                    payload["data"] = payload["data"][1:]
+            return payload
+
+        self.client.get = paged_get
+        with self.quiet(), self.assertRaises(producer.core.CollectionPaused):
+            self.pipeline.process_day(YESTERDAY)
+        slug = f"pm-updown-raw-{YESTERDAY}"
+        with contextlib.closing(self.inspect_raw(self.latest_files(slug))) as db:
+            self.assertEqual(db.execute("SELECT transaction_hash,group_id FROM pending_group_map").fetchall(),
+                             [("pair", 1)])
+            self.assertEqual(db.execute("SELECT next_cursor,completed_at FROM collection_progress").fetchone(),
+                             ("page-2", None))
+            self.assertEqual(db.execute("SELECT group_id FROM trades").fetchall(), [(1,)])
+        resumed = producer.Pipeline(self.store, self.root / "resumed", today=lambda: TODAY, client=self.client)
+        with self.quiet():
+            resumed.process_day(YESTERDAY)
+        self.assertEqual(self.client.trades, [(str(YESTERDAY), "false", None),
+                                             (str(YESTERDAY), "false", "page-2")])
+        self.assertEqual(set(self.store.datasets[slug]), {1, 2})
+        self.assert_complete_raw_shape(self.latest_files(slug))
+        with contextlib.closing(self.inspect_raw(self.latest_files(slug))) as db:
+            self.assertEqual(db.execute("SELECT group_id FROM trades ORDER BY page_number,row_number").fetchall(),
+                             [(1,), (1,)])
 
     def test_sustained_429_still_publishes_recoverable_incomplete_day(self):
         self.client.wallet_error = producer.core.RateLimitError("HTTP 429", status_code=429, retry_after=7)
@@ -204,11 +267,11 @@ class PipelineTests(unittest.TestCase):
         raw = json.loads(self.latest_files(f"pm-updown-raw-{YESTERDAY}")["collection_status.json"])
         self.assertEqual(raw["status"], "incomplete")
         self.assertEqual(raw["coverage"]["completed_markets"], 1)
-        self.assertEqual(raw["coverage"]["market_volume_completed_markets"], 1)
+        self.assertFalse(any(key.startswith("market_volume_") for key in raw["coverage"]))
         self.assertIn("OperationalError", raw["error"])
         self.assertNotIn("index.json", self.latest_files("pm-updown-analysis-2026-11"))
 
-    def test_new_utc_day_preempts_history_and_resumes_only_unfinished_mode(self):
+    def test_new_utc_day_preempts_history_and_preserves_committed_wallet_pages(self):
         historical = YESTERDAY - timedelta(days=1)
         self.seed_history(historical)
 
@@ -225,7 +288,7 @@ class PipelineTests(unittest.TestCase):
                                             (str(TODAY), "complete"), (str(historical), "complete")])
         history_wallet_calls = [call for call in self.client.trades if call[:2] == (str(historical), "false")]
         self.assertEqual(len(history_wallet_calls), 1)
-        self.assertEqual(len([call for call in self.client.trades if call[:2] == (str(historical), "true")]), 1)
+        self.assertTrue(all(call[1] == "false" for call in self.client.trades))
         self.assertIn((f"pm-updown-raw-{historical}", 1), self.store.restores)
 
     def test_resume_uses_newer_raw_snapshot_when_monthly_progress_is_stale(self):
@@ -249,13 +312,13 @@ class PipelineTests(unittest.TestCase):
         db.close()
         self.store.publish(slug, folder)
         resumed = producer.Pipeline(self.store, self.root / "resumed", today=lambda: TODAY,
-                                    client=self.client, derive_volume=False)
+                                    client=self.client)
         self.assertEqual(resumed.state["raw_days"][str(YESTERDAY)]["version"], 1)
         self.client.trades.clear()
         with self.quiet():
             resumed.process_day(YESTERDAY)
         self.assertIn((slug, 2), self.store.restores)
-        self.assertEqual(self.client.trades, [(str(YESTERDAY), "true", None)])
+        self.assertEqual(self.client.trades, [])
         self.assertEqual(resumed.state["raw_days"][str(YESTERDAY)]["version"], 3)
         self.assertEqual(resumed.state["raw_days"][str(YESTERDAY)]["status"], "complete")
 
@@ -278,7 +341,7 @@ class PipelineTests(unittest.TestCase):
         with self.quiet():
             self.pipeline.process_day(YESTERDAY)
         self.assertNotIn((slug, 1), self.store.restores)
-        self.assertEqual(self.client.trades, [(str(YESTERDAY), "true", None)])
+        self.assertEqual(self.client.trades, [])
 
     def test_resume_refuses_to_downgrade_a_recorded_raw_version(self):
         slug = f"pm-updown-raw-{YESTERDAY}"
@@ -304,7 +367,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.pipeline.state["history"]["next_date_utc"], str(historical))
         raw = json.loads(self.latest_files(f"pm-updown-raw-{historical}")["collection_status.json"])
         self.assertEqual(raw["coverage"]["completed_markets"], 1)
-        self.assertEqual(raw["coverage"]["market_volume_completed_markets"], 0)
+        self.assertFalse(any(key.startswith("market_volume_") for key in raw["coverage"]))
         self.assertEqual(raw["status"], "incomplete")
 
     def test_history_boundary_scans_later_pages_before_freezing_minimum_market_end(self):

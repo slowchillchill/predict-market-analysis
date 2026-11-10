@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import polymarket_updown_daily as up
+from polymarket_market_volume_query import load_market_volume
 
 START, END = date(2026, 9, 17), date(2026, 9, 18)
 
@@ -54,6 +55,12 @@ class UpdownTests(unittest.TestCase):
                         "VALUES (?,'2026-09-16',?,?,'2026-09-16T23:55:00Z','2026-09-17T00:00:00Z')",
                         (slug, slug, series))
                     self.db.execute("INSERT INTO collection_progress(market_slug,completed_at) VALUES (?,'done')", (slug,))
+
+    def single_market_catalog(self):
+        self.db.executescript(
+            "DROP VIEW updown_target_series; "
+            "CREATE VIEW updown_target_series(series_slug,expected_markets,first_end_time) "
+            "AS VALUES ('btc-up-or-down-5m',1,NULL);")
 
     def test_catalog_matches_documented_scope(self):
         self.assertEqual(len(up.TARGET_SERIES), 38)
@@ -111,13 +118,11 @@ class UpdownTests(unittest.TestCase):
                                    "pagination": {"next_cursor": None}}
         with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), contextlib.redirect_stdout(io.StringIO()):
             up.collect(self.db, client, START, END)
-        self.assertEqual(client.get.call_count, 3)
-        wallet_calls = [call for call in client.get.call_args_list if call.args[1]["taker_only"] == "false"]
-        single_calls = [call for call in client.get.call_args_list if call.args[1]["taker_only"] == "true"]
-        self.assertEqual(len(wallet_calls), 1)
-        self.assertEqual(wallet_calls[0].args[1]["condition"], "condition-new")
-        self.assertEqual({call.args[1]["condition"] for call in single_calls}, {"condition-keep", "condition-new"})
-        self.assertNotIn("start", wallet_calls[0].args[1])
+        client.get.assert_called_once()
+        params = client.get.call_args.args[1]
+        self.assertEqual(params["taker_only"], "false")
+        self.assertEqual(params["condition"], "condition-new")
+        self.assertNotIn("start", params)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 3)
 
     def test_complete_end_day_aggregates_and_top200_rank(self):
@@ -134,27 +139,29 @@ class UpdownTests(unittest.TestCase):
         self.assertEqual(summary["wallet_total_micro_usdc"], 20302000000)
         self.assertEqual(summary["top200_micro_usdc"], 20300000000)
         self.assertAlmostEqual(summary["top200_share"], 20300 / 20302)
-        self.assertIsNone(summary["market_volume_micro_usdc"])
+        self.assertEqual(summary["market_volume_micro_usdc"], 2000000)
         # 缺少一个完整系列时，不能把其成交当作零并声称完整。
         with self.db:
             self.db.execute("UPDATE collection_progress SET completed_at=NULL WHERE market_slug LIKE 'zec-up-or-down-4h-%'")
         self.assertFalse(up.coverage(self.db, "2026-09-17")["is_complete"])
         self.assertIsNone(self.db.execute("SELECT * FROM updown_daily_summary").fetchone())
 
-    def test_market_volume_is_nullable_until_all_markets_complete(self):
+    def test_market_volume_is_derived_only_when_all_wallet_markets_are_complete(self):
         self.fill_complete_day()
-        with self.db:
-            self.db.execute("INSERT INTO market_volume(market_slug,completed_at) SELECT slug,'done' FROM markets")
-            self.db.execute("UPDATE market_volume SET amount_micro_usdc=4995000 WHERE market_slug='btc-up-or-down-5m-0'")
+        slug = 'btc-up-or-down-5m-0'
+        buyer = trade("buyer", 1, "4.995")
+        seller = {**trade("seller", 1, "4.995"), "side": "SELL"}
+        up.core.commit_page(self.db, slug, 1, {"data": [buyer, seller], "pagination": {"next_cursor": None}})
         summary = self.db.execute("SELECT * FROM updown_daily_summary").fetchone()
         self.assertEqual(summary["market_volume_micro_usdc"], 4995000)
-        self.assertEqual(summary["wallet_total_micro_usdc"], 0)
-        self.assertTrue(up.coverage(self.db, str(START))["market_volume_is_complete"])
+        self.assertEqual(summary["wallet_total_micro_usdc"], 9990000)
+        self.assertEqual(load_market_volume(self.db, START, END)["volume_micro_usdc"], 4995000)
+        self.assertIsNone(self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_volume'").fetchone())
         with self.db:
-            self.db.execute("UPDATE market_volume SET completed_at=NULL WHERE market_slug='btc-up-or-down-5m-0'")
-        self.assertIsNone(self.db.execute("SELECT market_volume_micro_usdc FROM updown_daily_summary").fetchone()[0])
-        self.assertTrue(up.coverage(self.db, str(START))["is_complete"])
-        self.assertFalse(up.coverage(self.db, str(START))["market_volume_is_complete"])
+            self.db.execute("UPDATE collection_progress SET completed_at=NULL WHERE market_slug=?", (slug,))
+        self.assertIsNone(self.db.execute("SELECT * FROM updown_daily_summary").fetchone())
+        self.assertFalse(up.coverage(self.db, str(START))["is_complete"])
+        self.assertIsNone(load_market_volume(self.db, START, END)["volume_micro_usdc"])
 
     def test_report_legacy_summary_exposes_missing_volume_without_modifying_database(self):
         self.fill_complete_day()
@@ -174,7 +181,7 @@ class UpdownTests(unittest.TestCase):
         self.assertEqual(summary["market_volume_usdc"], "")
         self.assertEqual(summary["market_volume_micro_usdc"], "")
 
-    def test_collect_only_initializes_single_side_for_requested_range(self):
+    def test_collect_only_fetches_wallet_pages_for_requested_range(self):
         self.discover([event("yesterday", "2026-09-17T00:00:00Z")])
         with self.db:
             self.db.execute("INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) "
@@ -183,9 +190,14 @@ class UpdownTests(unittest.TestCase):
         client.get.return_value = {"data": [], "pagination": {"next_cursor": None}}
         with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), contextlib.redirect_stdout(io.StringIO()):
             up.collect(self.db, client, START, END)
-        self.assertEqual([row[0] for row in self.db.execute("SELECT market_slug FROM market_volume")], ["yesterday"])
+        client.get.assert_called_once()
+        self.assertEqual(client.get.call_args.args[1]["condition"], "condition-yesterday")
+        self.assertEqual(client.get.call_args.args[1]["taker_only"], "false")
+        self.assertIsNotNone(self.db.execute("SELECT completed_at FROM collection_progress WHERE market_slug='yesterday'").fetchone()[0])
+        self.assertIsNone(self.db.execute("SELECT 1 FROM collection_progress WHERE market_slug='old'").fetchone())
+        self.assertIsNone(self.db.execute("SELECT 1 FROM trades WHERE market_slug='old'").fetchone())
 
-    def test_targeted_retry_skips_completed_markets_and_completed_collection_mode(self):
+    def test_targeted_retry_skips_completed_markets_and_successful_wallet_pages(self):
         self.discover([event("keep", "2026-09-17T00:00:00Z"),
                        event("failed", "2026-09-17T00:05:00Z"),
                        event("other", "2026-09-17T00:10:00Z")])
@@ -207,7 +219,53 @@ class UpdownTests(unittest.TestCase):
         self.assertNotIn(("condition-keep", "false"), calls)
         self.assertEqual(calls[("condition-failed", "false")], 2)
         self.assertEqual(calls[("condition-other", "false")], 1)
-        self.assertEqual([calls[(f"condition-{slug}", "true")] for slug in ("keep", "failed", "other")], [1, 1, 1])
+        self.assertTrue(all(mode == "false" for _, mode in calls))
+        state = self.db.execute("SELECT completed_at,last_error FROM collection_progress WHERE market_slug='failed'").fetchone()
+        self.assertIsNotNone(state["completed_at"])
+        self.assertIsNone(state["last_error"])
+
+    def test_failed_page_rolls_back_new_groups_then_resumes_only_that_page(self):
+        self.discover([event("keep", "2026-09-17T00:00:00Z"),
+                       event("resume", "2026-09-17T00:05:00Z")])
+        up.core.commit_page(self.db, "keep", 1, {"data": [], "pagination": {"next_cursor": None}})
+        up.core.commit_page(self.db, "resume", 1, {"data": [trade("first", 1, ".2")],
+                                                   "pagination": {"next_cursor": "page-2"}})
+        invalid = {**trade("new-wallet", 3, "invalid-price"), "transaction_hash": "new-group"}
+        client = Mock()
+        client.get.return_value = {"data": [trade("same-group", 2, ".2"), invalid],
+                                   "pagination": {"next_cursor": None}}
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            up.collect(self.db, client, START, END)
+        client.get.assert_called_once()
+        self.assertEqual(client.get.call_args.args[1]["condition"], "condition-resume")
+        self.assertEqual(client.get.call_args.args[1]["cursor"], "page-2")
+        state = self.db.execute("SELECT * FROM collection_progress WHERE market_slug='resume'").fetchone()
+        self.assertEqual((state["committed_page"], state["next_cursor"]), (1, "page-2"))
+        self.assertIsNone(state["completed_at"])
+        self.assertTrue(state["last_error"])
+        self.assertEqual([tuple(row) for row in self.db.execute("SELECT transaction_hash,group_id FROM pending_group_map")],
+                         [("same-hash", 1)])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM trades WHERE market_slug='resume'").fetchone()[0], 1)
+
+        client.reset_mock()
+        client.get.return_value = {"data": [trade("same-group", 2, ".2"),
+                                           {**trade("new-wallet", 3, ".3"), "transaction_hash": "new-group"}],
+                                   "pagination": {"next_cursor": None}}
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            up.collect(self.db, client, START, END)
+        client.get.assert_called_once()
+        self.assertEqual(client.get.call_args.args[1]["cursor"], "page-2")
+        self.assertEqual(client.get.call_args.args[1]["taker_only"], "false")
+        rows = [tuple(row) for row in self.db.execute(
+            "SELECT page_number,row_number,group_id,typeof(group_id) FROM trades "
+            "WHERE market_slug='resume' ORDER BY page_number,row_number")]
+        self.assertEqual(rows, [(1, 0, 1, "integer"), (2, 0, 1, "integer"), (2, 1, 2, "integer")])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pending_group_map").fetchone()[0], 0)
+        state = self.db.execute("SELECT completed_at,last_error FROM collection_progress WHERE market_slug='resume'").fetchone()
+        self.assertIsNotNone(state["completed_at"])
+        self.assertIsNone(state["last_error"])
 
     def test_nonretryable_market_error_is_not_repeated_in_retry_sweep(self):
         self.discover([event("bad", "2026-09-17T00:00:00Z")])
@@ -222,12 +280,13 @@ class UpdownTests(unittest.TestCase):
         with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             up.collect(self.db, client, START, END)
-        self.assertEqual(client.get.call_count, 2)  # 一次钱包错误，一次成功单边采集。
+        client.get.assert_called_once()
+        self.assertEqual(client.get.call_args.args[1]["taker_only"], "false")
         state = self.db.execute("SELECT * FROM collection_progress WHERE market_slug='bad'").fetchone()
         self.assertIsNone(state["completed_at"])
         self.assertIn("400", state["last_error"])
 
-    def test_persistent_rate_limit_stops_all_modes_and_preserves_error(self):
+    def test_persistent_rate_limit_stops_subsequent_markets_and_preserves_error(self):
         self.discover([event("first", "2026-09-17T00:00:00Z"),
                        event("second", "2026-09-17T00:05:00Z")])
         client = Mock()
@@ -236,7 +295,9 @@ class UpdownTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()), self.assertRaises(up.core.RateLimitError):
             up.collect(self.db, client, START, END)
         client.get.assert_called_once()
-        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM market_volume").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pending_group_map").fetchone()[0], 0)
+        self.assertEqual(client.get.call_args.args[1]["taker_only"], "false")
         self.assertEqual(self.db.execute("SELECT last_error FROM collection_progress WHERE market_slug='first'").fetchone()[0],
                          "HTTP 429")
 
@@ -259,58 +320,66 @@ class UpdownTests(unittest.TestCase):
 
     def test_collect_cli_can_use_direct_network_without_proxy(self):
         with patch.object(up, "collect"), patch.object(up.core, "Client") as client, \
-             patch.object(up, "coverage", return_value={"is_complete": 1, "market_volume_is_complete": 1}), \
+             patch.object(up, "coverage", return_value={"is_complete": 1}), \
              contextlib.redirect_stdout(io.StringIO()):
             result = up.main(["collect", "--start-date", str(START), "--end-date", str(END), "--db", str(self.path)])
         self.assertEqual(result, 0)
         client.assert_called_once_with(None)
 
-    def test_derived_volume_opt_in_resumes_wallet_complete_without_trade_requests(self):
+    def test_complete_wallets_derive_amount_without_more_requests_or_summary_table(self):
         self.discover([event("done-wallet", "2026-09-17T00:00:00Z")])
+        self.single_market_catalog()
         up.core.commit_page(self.db, "done-wallet", 1, {"data": [trade("wallet", 1, ".2")],
                                                       "pagination": {"next_cursor": None}})
         client = Mock()
         with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
-             patch.object(up.market_volume, "collect_market", side_effect=AssertionError("No second API route")), \
              contextlib.redirect_stdout(io.StringIO()):
-            up.collect(self.db, client, START, END, derive_volume=True)
+            up.collect(self.db, client, START, END)
         client.get.assert_not_called()
-        state = self.db.execute("SELECT * FROM market_volume WHERE market_slug='done-wallet'").fetchone()
-        self.assertEqual(state["amount_micro_usdc"], 200000)
-        self.assertEqual(state["committed_page"], 0)
+        self.assertEqual(load_market_volume(self.db, START, END)["volume_micro_usdc"], 200000)
+        self.assertIsNone(self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_volume'").fetchone())
+        state = self.db.execute("SELECT * FROM collection_progress WHERE market_slug='done-wallet'").fetchone()
+        self.assertEqual(state["committed_page"], 1)
         self.assertIsNotNone(state["completed_at"])
 
     def test_derived_volume_after_wallet_retry_skips_no_market_and_calls_only_false_route(self):
         self.discover([event("retry-wallet", "2026-09-17T00:00:00Z")])
+        self.single_market_catalog()
         client = Mock()
         client.get.side_effect = [up.core.FetchError("HTTP 503", status_code=503),
                                   {"data": [trade("wallet", 1, ".4")], "pagination": {"next_cursor": None}}]
         with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            up.collect(self.db, client, START, END, derive_volume=True)
+            up.collect(self.db, client, START, END)
         self.assertEqual(client.get.call_count, 2)
         self.assertTrue(all(call.args[1]["taker_only"] == "false" for call in client.get.call_args_list))
-        self.assertEqual(self.db.execute("SELECT amount_micro_usdc FROM market_volume WHERE market_slug='retry-wallet'").fetchone()[0], 400000)
+        self.assertEqual(load_market_volume(self.db, START, END)["volume_micro_usdc"], 400000)
 
-    def test_derived_volume_pause_after_summary_commit_does_not_record_market_error(self):
+    def test_pause_after_wallet_page_commit_preserves_group_map_without_market_error(self):
         self.discover([event("done-wallet", "2026-09-17T00:00:00Z")])
-        up.core.commit_page(self.db, "done-wallet", 1, {"data": [], "pagination": {"next_cursor": None}})
 
-        def pause_after_derivation():
-            return self.db.execute("SELECT 1 FROM market_volume WHERE completed_at IS NOT NULL").fetchone() is not None
+        def pause_after_page_commit():
+            return self.db.execute("SELECT 1 FROM pending_group_map").fetchone() is not None
 
         client = Mock()
+        client.get.return_value = {"data": [trade("wallet", 1, ".2")], "pagination": {"next_cursor": "continue"}}
         with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
              contextlib.redirect_stdout(io.StringIO()), self.assertRaises(up.core.CollectionPaused):
-            up.collect(self.db, client, START, END, derive_volume=True, should_yield=pause_after_derivation)
-        client.get.assert_not_called()
-        state = self.db.execute("SELECT * FROM market_volume WHERE market_slug='done-wallet'").fetchone()
-        self.assertIsNotNone(state["completed_at"])
+            up.collect(self.db, client, START, END, should_yield=pause_after_page_commit)
+        client.get.assert_called_once()
+        state = self.db.execute("SELECT * FROM collection_progress WHERE market_slug='done-wallet'").fetchone()
+        self.assertEqual(state["committed_page"], 1)
+        self.assertEqual(state["next_cursor"], "continue")
+        self.assertIsNone(state["completed_at"])
         self.assertIsNone(state["last_error"])
+        self.assertEqual([tuple(row) for row in self.db.execute("SELECT transaction_hash,group_id FROM pending_group_map")],
+                         [("same-hash", 1)])
+        self.assertEqual([tuple(row) for row in self.db.execute("SELECT group_id,typeof(group_id) FROM trades")],
+                         [(1, "integer")])
 
-    def test_collect_exit_failure_when_single_side_is_incomplete(self):
+    def test_collect_exit_failure_when_wallet_coverage_is_incomplete(self):
         with patch.object(up, "collect"), patch.object(up.core, "Client"), patch.object(up, "coverage", return_value={
-                "is_complete": 1, "market_volume_is_complete": 0}), contextlib.redirect_stdout(io.StringIO()):
+                "is_complete": 0}), contextlib.redirect_stdout(io.StringIO()):
             result = up.main(["collect", "--start-date", str(START), "--end-date", str(END),
                               "--proxy", "http://proxy.invalid", "--db", str(self.path)])
         self.assertEqual(result, 2)
@@ -329,12 +398,14 @@ class UpdownTests(unittest.TestCase):
 
     def test_report_is_read_only_and_missing_series_is_visible(self):
         self.discover([event("one", "2026-09-17T00:00:00Z")])
+        before = self.path.read_bytes()
         output = Path(self.tmp.name) / "output"
         with patch.object(up.core, "Client", side_effect=AssertionError("离线报告不能联网")), contextlib.redirect_stdout(io.StringIO()):
             result = up.main(["report", "--date", "2026-09-17", "--db", str(self.path), "--output-dir", str(output)])
         self.assertEqual(result, 2)
         self.assertIn("zec-up-or-down-4h", (output / "updown_daily_2026-09-17.md").read_text())
         self.assertFalse((output / "updown_daily_2026-09-17.csv").exists())
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_historical_coverage_and_existing_database_view_upgrade(self):
         for day in (date(2026,8,1), date(2026,8,4), date(2026,8,5)):

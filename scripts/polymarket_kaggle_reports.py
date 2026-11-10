@@ -257,6 +257,9 @@ def run_pending(store, state_path: Path, output_dir: Path, *, kind: str = "all",
                   "reports": {}})
         for period in due_periods(date.fromisoformat(state["rollout_date"]), now, kind):
             state["reports"].setdefault(period.identity, {"status": "pending"})
+        for item in state["reports"].values():
+            if item.get("status") in {"generated", "preserved"}:
+                item.pop("last_error", None)
         _save_state(state_path, state)
         for identity, item in state["reports"].items():
             period = ReportPeriod.from_identity(identity)
@@ -272,6 +275,7 @@ def run_pending(store, state_path: Path, output_dir: Path, *, kind: str = "all",
                 print("Generated " + identity, flush=True)
             except ExistingArtifacts as exc:
                 item.update(status="preserved", reason=str(exc))
+                item.pop("last_error", None)
                 print(str(exc), flush=True)
             except Exception as exc:
                 # A later 30-minute invocation retries only these fixed pending periods.

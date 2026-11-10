@@ -35,7 +35,7 @@ class PriceDistributionTests(unittest.TestCase):
     def group(self, anchor, details, *, stamp=FIRST + 2700, slug="m-btc"):
         """anchor/details: (wallet, side, outcome, price, size)."""
         self.group_id += 1
-        tx = f"tx-{self.group_id}"
+        tx = self.group_id
         with self.db:
             for i, (wallet, side, outcome, price, size) in enumerate([anchor, *details]):
                 self.db.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -343,7 +343,8 @@ class PriceDistributionTests(unittest.TestCase):
                 self.assertEqual(result["populations"]["all_wallets"]["trade_count"], 1)
                 self.assertEqual(path.read_bytes(), before)
                 self.assertFalse(reader.in_transaction)
-                self.assertTrue(all(query.lstrip().upper().startswith("SELECT") for query in queries))
+                self.assertTrue(all(query.lstrip().upper().startswith(("SELECT", "PRAGMA TABLE_INFO"))
+                                    for query in queries))
                 with writer:
                     writer.execute("UPDATE collection_progress SET last_error='changed'")
             finally:

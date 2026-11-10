@@ -17,6 +17,8 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable
 
+import polymarket_trade_groups as trade_groups
+
 ROOT = Path(__file__).resolve().parents[1]
 SERIES = "btc-up-or-down-5m"
 GAMMA_EVENTS = "https://gamma-api.polymarket.com/events"
@@ -130,11 +132,18 @@ class Client:
 
 
 def connect_database(path: Path) -> sqlite3.Connection:
+    if path.resolve() == DEFAULT_DB.resolve():
+        raise ValueError("本地旧数据库保留不动；采集只使用 Kaggle 工作副本")
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
-    db.executescript((ROOT / "sql/btc5m_schema.sql").read_text())
-    db.executescript((ROOT / "sql/btc5m_daily.sql").read_text())
+    try:
+        trade_groups.upgrade_database(db)
+        db.executescript((ROOT / "sql/btc5m_schema.sql").read_text())
+        db.executescript((ROOT / "sql/btc5m_daily.sql").read_text())
+    except Exception:
+        db.close()
+        raise
     return db
 
 
@@ -217,12 +226,35 @@ def micro_usdc(price: str, size: str) -> int:
 
 def commit_page(db: sqlite3.Connection, slug: str, page: int, payload: dict) -> None:
     next_cursor = payload["pagination"]["next_cursor"]
+    legacy_hash = trade_groups.group_column(db) == "transaction_hash"
     with db:
+        db.execute("BEGIN IMMEDIATE")
+        if not legacy_hash:
+            completed = db.execute("SELECT completed_at FROM collection_progress WHERE market_slug=?", (slug,)).fetchone()
+            if completed is not None and completed[0] is not None and db.execute(
+                    "SELECT 1 FROM trades WHERE market_slug=? LIMIT 1", (slug,)).fetchone():
+                raise ValueError("已完成市场已移除哈希映射；如需修订，应整市场重采，不能直接追加")
+            trade_groups.ensure_pending_map(db)
+            next_group = db.execute("SELECT COALESCE(MAX(group_id),0)+1 FROM pending_group_map WHERE market_slug=?",
+                                    (slug,)).fetchone()[0]
         for row_number, trade in enumerate(payload["data"]):
             price, size = str(trade["price"]), str(trade["size"])
+            transaction_hash = trade["transaction_hash"]
+            if legacy_hash:
+                # 仅兼容旧调用/参考样本；正常采集连接已升级成整数成交组。
+                group_id = transaction_hash
+            else:
+                mapped = db.execute("SELECT group_id FROM pending_group_map WHERE market_slug=? AND transaction_hash=?",
+                                    (slug, transaction_hash)).fetchone()
+                if mapped is None:
+                    group_id = next_group
+                    next_group += 1
+                    db.execute("INSERT INTO pending_group_map VALUES (?,?,?)", (slug, transaction_hash, group_id))
+                else:
+                    group_id = mapped[0]
             db.execute(
                 "INSERT INTO trades VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (slug, page, row_number, trade["proxy_wallet"].lower(), trade["transaction_hash"],
+                (slug, page, row_number, trade["proxy_wallet"].lower(), group_id,
                  trade["timestamp"], trade["side"], trade["outcome"], trade["outcome_index"],
                  trade["token_id"], price, size, micro_usdc(price, size)),
             )
@@ -231,6 +263,8 @@ def commit_page(db: sqlite3.Connection, slug: str, page: int, payload: dict) -> 
             "last_error=NULL WHERE market_slug=?",
             (page, next_cursor, utc_now() if next_cursor is None else None, slug),
         )
+        if not legacy_hash and next_cursor is None:
+            db.execute("DELETE FROM pending_group_map WHERE market_slug=?", (slug,))
 
 
 def collect_market(db: sqlite3.Connection, client: Client, slug: str, *,
@@ -251,6 +285,8 @@ def collect_market(db: sqlite3.Connection, client: Client, slug: str, *,
                 # 只重建当前未完成市场；旧页与旧游标同时移除。
                 with db:
                     db.execute("DELETE FROM trades WHERE market_slug=?", (slug,))
+                    if trade_groups.group_column(db) == "group_id":
+                        db.execute("DELETE FROM pending_group_map WHERE market_slug=?", (slug,))
                     db.execute(
                         "UPDATE collection_progress SET committed_page=0, next_cursor=NULL, "
                         "last_error=NULL WHERE market_slug=?", (slug,),

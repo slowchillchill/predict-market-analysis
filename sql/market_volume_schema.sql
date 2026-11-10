@@ -1,9 +1,3 @@
--- 单边市场成交额与钱包明细分开；仅为本次请求范围内的市场创建进度。
-CREATE TABLE IF NOT EXISTS market_volume (
-    market_slug TEXT PRIMARY KEY REFERENCES markets(slug),
-    amount_micro_usdc INTEGER NOT NULL DEFAULT 0,
-    committed_page INTEGER NOT NULL DEFAULT 0,
-    next_cursor TEXT,
-    completed_at TEXT,
-    last_error TEXT
-);
+-- 已弃用：新日库不创建 market_volume 实体表。
+-- 市场金额由完成钱包明细的成交组首行在查询时计算。
+-- 旧库可只读参考原金额表；工作副本升级由 polymarket_trade_groups 移除旧表。

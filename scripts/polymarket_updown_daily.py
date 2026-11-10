@@ -14,7 +14,6 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 import polymarket_btc5m_daily as core
-import polymarket_market_volume as market_volume
 
 # 范围来自 reports/crypto_updown_market_types_2026-09-17.md。
 # 小时线和日线使用实际系列标识，不能全部由币种缩写拼接。
@@ -44,7 +43,6 @@ ENGLISH_MONTHS = ("january", "february", "march", "april", "may", "june",
 
 def connect_database(path: Path, *, series_first_end: dict[str, str] | None = None) -> sqlite3.Connection:
     db = core.connect_database(path)
-    db.executescript((core.ROOT / "sql/market_volume_schema.sql").read_text())
     set_series_first_end(db, series_first_end)
     db.executescript((core.ROOT / "sql/updown_daily.sql").read_text())
     return db
@@ -221,15 +219,11 @@ def coverage(db: sqlite3.Connection, day: str) -> dict:
                                                                   first_ends=series_first_end(db))) for s in TARGET_SERIES),
                                      discovered_markets=0, completed_markets=0,
                                      committed_pages=0, is_complete=0)
-    # 旧库仍可只读生成历史钱包报告；缺失单边数据不视为零。
-    for key in ("market_volume_completed_markets", "market_volume_committed_pages", "market_volume_is_complete"):
-        status.setdefault(key, 0)
     return status
 
 
 def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date, *,
-            should_yield: Callable[[], bool] | None = None, retry_failed: bool = True,
-            derive_volume: bool = False) -> None:
+            should_yield: Callable[[], bool] | None = None, retry_failed: bool = True) -> None:
     first_ends = series_first_end(db)
     for index, series in enumerate(TARGET_SERIES, 1):
         core.check_pause(should_yield)
@@ -246,12 +240,12 @@ def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date,
     blocked: set[tuple[str, str]] = set()
     for _ in range(2 if retry_failed else 1):
         discover_missing_markets(db, client, start, end, should_yield=should_yield)
-        _collect_pending(db, client, start, end, blocked, should_yield=should_yield, derive_volume=derive_volume)
+        _collect_pending(db, client, start, end, blocked, should_yield=should_yield)
 
 
 def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, end: date,
                      blocked: set[tuple[str, str]], *,
-                     should_yield: Callable[[], bool] | None = None, derive_volume: bool = False) -> None:
+                     should_yield: Callable[[], bool] | None = None) -> None:
     pending = db.execute(
         "SELECT m.slug FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug "
         "JOIN collection_progress p ON p.market_slug=m.slug "
@@ -277,39 +271,6 @@ def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, e
             print(f"成交 [{index}/{len(pending)}] {slug} 未完成：{exc}", file=sys.stderr, flush=True)
             if not isinstance(exc, core.FetchError) or (exc.status_code is not None and exc.status_code < 500):
                 blocked.add(("wallet", slug))
-    pending_volume = db.execute(
-        "SELECT m.slug FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug "
-        "LEFT JOIN market_volume v ON v.market_slug=m.slug "
-        "WHERE date(m.end_time)>=? AND date(m.end_time)<? AND m.condition_id IS NOT NULL "
-        "AND v.completed_at IS NULL AND (?=0 OR EXISTS (SELECT 1 FROM collection_progress p "
-        "WHERE p.market_slug=m.slug AND p.completed_at IS NOT NULL)) "
-        "ORDER BY m.series_slug,m.end_time,m.slug",
-        (start.isoformat(), end.isoformat(), int(derive_volume)),
-    ).fetchall()
-    for index, row in enumerate(pending_volume, 1):
-        slug = row["slug"]
-        if ("volume", slug) in blocked:
-            continue
-        core.check_pause(should_yield)
-        try:
-            if derive_volume:
-                market_volume.derive_market_volume(db, slug)
-                core.check_pause(should_yield)
-                label = "推导单边成交"
-            else:
-                market_volume.collect_market(db, client, slug, should_yield=should_yield)
-                label = "单边成交"
-            print(f"{label} [{index}/{len(pending_volume)}] {slug} 完成", flush=True)
-        except core.RateLimitError as exc:
-            with db:
-                db.execute("UPDATE market_volume SET last_error=? WHERE market_slug=?", (str(exc), slug))
-            raise
-        except (core.FetchError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
-            with db:
-                db.execute("UPDATE market_volume SET last_error=? WHERE market_slug=?", (str(exc), slug))
-            print(f"单边成交 [{index}/{len(pending_volume)}] {slug} 未完成：{exc}", file=sys.stderr, flush=True)
-            if not isinstance(exc, core.FetchError) or (exc.status_code is not None and exc.status_code < 500):
-                blocked.add(("volume", slug))
 
 
 def report_day(db: sqlite3.Connection, day: str, output: Path) -> bool:
@@ -322,12 +283,11 @@ def report_day(db: sqlite3.Connection, day: str, output: Path) -> bool:
              "全部提前成交和跨日成交，不按成交时间截断。原 BTC 开始日统计保持独立。",
              "钱包成交额为买入支出加卖出收入；每条 price × size 以 ROUND_HALF_UP 舍入至微 USDC 后求和。",
              "查询 /v2/trades：taker_only=false，filter_type=TOKENS，filter_amount=1e-18，limit=1000。",
-             "市场成交额单独查询 taker_only=true，逐条按相同金额规则求和；缺失单边数据不以钱包成交额替代。",
+             "新日库市场成交额在统计时按市场、成交组取分页行顺序的首行计算；旧库可只读参考既存单边汇总。",
+             "单边计价均逐条按相同规则舍入至微 USDC 后求和；金额缺失时不以钱包成交总额替代。",
              "完整指采集时以上条件下官方接口三年窗口内的全部分页，未作全量链上对账。", "",
              f"采集覆盖：发现 {status['discovered_markets']}/{status['expected_markets']} 个市场；"
              f"完成 {status['completed_markets']} 个；已提交 {status['committed_pages']} 页。", ""]
-    lines += [f"单边成交覆盖：完成 {status['market_volume_completed_markets']}/{status['expected_markets']} 个市场；"
-              f"已提交 {status['market_volume_committed_pages']} 页。", ""]
     if not status["is_complete"]:
         summary_path.unlink(missing_ok=True)
         top_path.unlink(missing_ok=True)
@@ -362,7 +322,7 @@ def report_day(db: sqlite3.Connection, day: str, output: Path) -> bool:
         core.write_csv(top_path, ["date_utc", "wallet", "amount_micro_usdc", "wallet_rank", "amount_usdc"], top)
         share = "空（钱包成交总额为零）" if summary["top200_share"] is None else f"{summary['top200_share']:.6%}"
         lines += [f"- 去重钱包数：{summary['unique_wallets']}",
-                  f"- 市场成交额：{summary['market_volume_usdc'] + ' USDC' if summary['market_volume_usdc'] is not None else '缺失（单边成交尚未采集完整）'}",
+                  f"- 市场成交额：{summary['market_volume_usdc'] + ' USDC' if summary['market_volume_usdc'] is not None else '缺失（钱包采集或金额派生未完成）'}",
                   f"- 钱包成交总额：{summary['wallet_total_usdc']} USDC",
                   f"- 前 200 钱包合计：{summary['top200_usdc']} USDC；占比：{share}", "",
                   f"日汇总：{summary_path.name}；前 200 钱包：{top_path.name}。"]
@@ -429,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
         while day < args.end_date:
             status = coverage(db, day.isoformat())
             print(f"{day}（UTC 结束日）：{json.dumps(status, ensure_ascii=False)}", flush=True)
-            complete = complete and bool(status["is_complete"] and status["market_volume_is_complete"])
+            complete = complete and bool(status["is_complete"])
             day += timedelta(days=1)
         print(f"数据库 {args.db.stat().st_size} 字节；本次耗时 {time.monotonic()-started:.2f} 秒")
         return 0 if complete else 2

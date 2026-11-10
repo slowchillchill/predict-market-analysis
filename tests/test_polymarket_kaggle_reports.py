@@ -85,8 +85,39 @@ class KaggleReportTests(unittest.TestCase):
         before = sentinel.read_bytes()
         with self.assertRaises(reports.ExistingArtifacts):
             reports.render_bundle(bundle, output)
+        state_path = self.root / "state.json"
+        now = datetime(2026, 11, 8, 0, 30, tzinfo=timezone.utc)
+        with patch.object(reports, "fetch_result", side_effect=reports.ReportNotReady("Old network failure")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            state = reports.run_pending(None, state_path, output, kind="daily", now=now)
+        self.assertEqual(state["reports"][period.identity]["last_error"], "Old network failure")
+        with patch.object(reports, "fetch_result", return_value=(bundle, {"version": 7})), \
+                contextlib.redirect_stdout(io.StringIO()):
+            state = reports.run_pending(None, state_path, output, kind="daily", now=now)
+        self.assertEqual(state["reports"][period.identity]["status"], "preserved")
+        self.assertNotIn("last_error", state["reports"][period.identity])
+        self.assertEqual(json.loads(state_path.read_text()), state)
         self.assertEqual(sentinel.read_bytes(), before)
         self.assertEqual(list(output.iterdir()), [sentinel])
+
+    def test_existing_terminal_states_clear_stale_error_without_network_or_regeneration(self):
+        state_path = self.root / "state.json"
+        original = {"schema_version": 1, "rollout_date": "2026-11-07", "reports": {
+            "daily:2026-11-06": {"status": "generated", "last_error": "Old failure",
+                                 "manifest": "existing_publish.json", "generated_at": "original timestamp"},
+            "daily:2026-11-07": {"status": "preserved", "last_error": "Old missing dataset",
+                                 "reason": "Existing local assets"},
+        }}
+        state_path.write_text(json.dumps(original))
+        with patch.object(reports, "fetch_result") as fetch, patch.object(reports, "render_bundle") as render:
+            state = reports.run_pending(None, state_path, self.root / "output", kind="daily",
+                rollout_date=date(2026, 12, 1), now=datetime(2026, 11, 8, 0, 30, tzinfo=timezone.utc))
+        fetch.assert_not_called()
+        render.assert_not_called()
+        for item in original["reports"].values():
+            item.pop("last_error")
+        self.assertEqual(state, original)
+        self.assertEqual(json.loads(state_path.read_text()), original)
 
     def test_incomplete_and_wrong_period_results_are_rejected(self):
         bundle = self.daily_bundle()

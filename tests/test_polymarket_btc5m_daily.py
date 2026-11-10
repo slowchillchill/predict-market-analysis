@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/polymarket_btc5m_daily.py"
+sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("btc5m", SCRIPT)
 btc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(btc)

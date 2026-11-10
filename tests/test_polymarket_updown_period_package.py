@@ -37,10 +37,9 @@ class PeriodPackageTests(unittest.TestCase):
                 db.execute('INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) VALUES (?,?,?,?,?)',
                            (slug,str(day-timedelta(days=1)),slug,'btc',f'{day}T00:00:00Z'))
                 db.execute("INSERT INTO collection_progress(market_slug,completed_at) VALUES (?,'done')",(slug,))
-                db.execute("INSERT INTO market_volume(market_slug,amount_micro_usdc,completed_at) VALUES (?,1000000,'done')",(slug,))
                 for index,(wallet,side) in enumerate([('buyer','BUY'),('counterparty','SELL')]):
                     db.execute('INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                        (slug,1,index,wallet,'tx-'+slug,1700000000,side,'Up',0,'token','.25','4',1000000))
+                        (slug,1,index,wallet,1,1700000000,side,'Up',0,'token','.25','4',1000000))
         labels = {'buyer':str(start)}
         stats = load_period_data(db,start,end,kind=kind,bot_first_seen=labels)
         current = monthly.period.load_period(db,start,end,bot_first_seen=labels)

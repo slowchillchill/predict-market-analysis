@@ -20,14 +20,18 @@ START = date(2026, 11, 2)
 END = START + timedelta(days=7)
 
 
-def make_database(path, start=START, end=END):
+def make_database(path, start=START, end=END, *, legacy=False, api_summary=False):
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
-    db.executescript((ROOT / "sql/btc5m_schema.sql").read_text())
-    db.executescript((ROOT / "sql/market_volume_schema.sql").read_text())
+    schema = ROOT / ("tests/fixtures/btc5m_legacy_schema.sql" if legacy else "sql/btc5m_schema.sql")
+    db.executescript(schema.read_text())
+    if api_summary:
+        db.execute("CREATE TABLE market_volume(market_slug TEXT PRIMARY KEY,amount_micro_usdc INTEGER DEFAULT 0,"
+                   "committed_page INTEGER DEFAULT 0,next_cursor TEXT,completed_at TEXT,last_error TEXT)")
     db.execute("CREATE VIEW updown_target_series(series_slug,expected_markets,first_end_time) AS "
                "VALUES ('btc-up-or-down-daily',1,NULL),('eth-up-or-down-daily',1,NULL)")
-    db.executescript((ROOT / "sql/updown_daily.sql").read_text())
+    views = (ROOT / "sql/updown_daily.sql").read_text()
+    db.executescript(views.replace("group_id", "transaction_hash") if legacy else views)
     with db:
         for offset in range((end - start).days):
             day = start + timedelta(days=offset)
@@ -36,13 +40,16 @@ def make_database(path, start=START, end=END):
                 db.execute("INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) VALUES (?,?,?,?,?)",
                            (slug, str(day - timedelta(days=1)), slug, f"{coin}-up-or-down-daily", f"{day}T00:00:00Z"))
                 db.execute("INSERT INTO collection_progress(market_slug,completed_at) VALUES (?,'done')", (slug,))
-                db.execute("INSERT INTO market_volume(market_slug,completed_at) VALUES (?,'done')", (slug,))
+                if api_summary:
+                    db.execute("INSERT INTO market_volume(market_slug,completed_at) VALUES (?,'done')", (slug,))
             if offset < 3:
                 slug = f"btc-{day}"
                 for row, wallet, side in ((0, "bot", "BUY"), (1, f"human-{offset % 2}", "SELL")):
                     db.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (slug, 1, row, wallet, "same-hash", 1700000000 + offset, side, "Up", 0, "token", ".2", "10", 2000000))
-                db.execute("UPDATE market_volume SET amount_micro_usdc=2000000 WHERE market_slug=?", (slug,))
+                        (slug, 1, row, wallet, "same-hash" if legacy else 1,
+                         1700000000 + offset, side, "Up", 0, "token", ".2", "10", 2000000))
+                if api_summary:
+                    db.execute("UPDATE market_volume SET amount_micro_usdc=2000000 WHERE market_slug=?", (slug,))
     db.close()
 
 
@@ -80,20 +87,36 @@ class KaggleAnalysisTests(unittest.TestCase):
         validate_distribution(result["distribution"], str(START))
         json.dumps(result, allow_nan=False)
 
-    def test_both_progress_modes_required_before_export(self):
+    def test_wallet_progress_is_sufficient_and_no_amount_table_is_required(self):
         with closing(sqlite3.connect(self.raw)) as db:
-            db.execute("UPDATE market_volume SET completed_at=NULL WHERE market_slug=?", (f"btc-{START}",))
-            db.commit()
-        with self.assertRaises(cloud.IncompleteDay):
-            cloud.export_day(self.raw, START, {})
-        with self.assertRaises(cloud.IncompleteDay):
-            cloud.extract_day_features(self.raw, START)
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_volume'").fetchone())
+        self.assertEqual(cloud.export_day(self.raw, START, {})["payload"]["current"]["volume_micro_usdc"], 2000000)
         with closing(sqlite3.connect(self.raw)) as db:
-            db.execute("UPDATE market_volume SET completed_at='done'")
             db.execute("UPDATE collection_progress SET completed_at=NULL WHERE market_slug=?", (f"btc-{START}",))
             db.commit()
         with self.assertRaises(ValueError):
             cloud.export_day(self.raw, START, {})
+        with self.assertRaises(ValueError):
+            cloud.extract_day_features(self.raw, START)
+
+    def test_legacy_hash_and_new_group_id_daily_and_period_results_match(self):
+        old = self.root / "legacy.sqlite3"
+        make_database(old, legacy=True, api_summary=True)
+        labels = {"bot": str(START + timedelta(days=1))}
+        old_store = self.root / "legacy-features.sqlite3"
+        self.save_days(labels)
+        for offset in range((END-START).days):
+            day = START + timedelta(days=offset)
+            old_features = cloud.extract_day_features(old, day)
+            old_bundle = cloud.export_day(old, day, labels)
+            new_bundle = cloud.export_day(self.raw, day, labels)
+            self.assertEqual(old_bundle["payload"], new_bundle["payload"])
+            self.assertEqual(old_bundle["distribution"], new_bundle["distribution"])
+            cloud.save_day(old_store, old_features, old_bundle, first_seen=labels)
+        old_period = cloud.export_period(old_store, START, END, "weekly", labels)
+        new_period = cloud.export_period(self.store, START, END, "weekly", labels)
+        self.assertEqual(old_period["payload"], new_period["payload"])
+        self.assertEqual(old_period["distribution"], new_period["distribution"])
 
     def test_earlier_backfill_replaces_later_first_seen_without_future_labels(self):
         features = cloud.extract_day_features(self.raw, START)
@@ -132,6 +155,21 @@ class KaggleAnalysisTests(unittest.TestCase):
         self.save_days({"bot": str(START)})
         result = cloud.export_period(self.store, START, END, "weekly", {"bot": str(START)})
         self.assertEqual(result["distribution"]["populations"]["suspected_bots"]["trade_count"], 3)
+
+    def test_period_carries_per_day_source_format_without_reading_raw(self):
+        self.save_days({})
+        features = cloud.extract_day_features(self.raw, START)
+        daily = cloud.load_day(self.store, START)
+        daily.update(raw_schema_version=2, volume_method="wallet_group_first_row_v1")
+        cloud.save_day(self.store, features, daily, first_seen={})
+        self.raw.unlink()
+        result = cloud.export_period(self.store, START, END, "weekly", {})
+        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["raw_schema_versions"][str(START)], 2)
+        self.assertEqual(result["volume_methods"][str(START)], "wallet_group_first_row_v1")
+        self.assertEqual(result["raw_schema_versions"][str(START + timedelta(days=1))], 1)
+        self.assertEqual(result["volume_methods"][str(START + timedelta(days=1))], "legacy_taker_api")
+        self.assertEqual(len(result["source_versions"]), 7)
 
     def test_affected_dates_exclude_inactive_pre_hit_and_already_classified_days(self):
         self.save_days({"bot": str(START + timedelta(days=2))})

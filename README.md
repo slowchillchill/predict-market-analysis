@@ -8,6 +8,8 @@ The main workflow covers 38 market series and groups markets by their **UTC end 
 
 See the [Kaggle migration and operations guide](docs/kaggle_migration.md) for public daily datasets, continuous historical backfill, Secrets, scheduling, and local retries.
 
+Completed v2 daily databases have three entity tables: `markets`, `collection_progress`, and `trades`. Trades use short market-local `group_id` values; an unfinished market's durable `pending_group_map` is removed when collection completes. Market volume is derived from trade groups, with no `market_volume` entity table or separate `taker_only=true` collection. Raw metadata is v2; the local report JSON interface remains v1. Production is paused during this upgrade; actual release and restart evidence belongs in the operations guide.
+
 ## Features
 
 - Discover markets across eight crypto assets and five timeframes.
@@ -178,7 +180,7 @@ The monthly entry includes the approved BUY distribution page by default, with m
 
 Weekly and monthly reports share a query that aggregates one day at a time, with both comparison periods read in one read-only transaction. Monthly reporting does not collect data. Initialize the views through the collector and prepare both months before running it. An incomplete target month exits with code `2` without generating new files; an incomplete prior month or a zero comparison baseline displays `N/A` for the affected comparison.
 
-**Scheduled runs:** the existing deployment has `polymarket-updown-monthly.timer` enabled for **12:30 Asia/Tokyo on day 1 of each month** (11:30 Beijing time, 03:30 UTC), after daily collection and weekly reporting. It invokes the default command above. With `Persistent=true`, reactivating the user timer triggers one catch-up run after a missed activation; it does not backfill every missed month or wake the computer. A delayed run still selects the previous complete UTC month at startup; use `--month` to backfill an older month.
+**Scheduled runs:** the production `polymarket-updown-monthly.timer` checks cloud results at **12:30 Asia/Tokyo on day 1 of each month** (11:30 Beijing time, 03:30 UTC). Its service runs `polymarket_kaggle_reports.py --kind monthly`, rather than the manual SQLite command above. Due periods are retained in the local state file; a separate timer retries pending reports every 30 minutes. Existing assets are preserved. See the [operations guide](docs/kaggle_migration.md) for the daily and weekly schedules, deployment cutoff, and restart order.
 
 The service and timer are local configuration and are not installed by cloning this repository. On a configured host, inspect status and logs with:
 
@@ -196,16 +198,16 @@ See the [monthly poster guide](docs/updown_monthly_poster.md).
 | Metric or behavior | Definition |
 | --- | --- |
 | Date | UTC date of the market's `endDate`, not its settlement confirmation or individual trade date. All returned trades for selected markets are included, including early and cross-day trades. |
-| Market volume | Sum `price × size` from `taker_only=true`: each fill is counted once on its taker side. Used for poster totals, trends, and asset shares. |
+| Market volume | Derived from each complete market's trade groups: sum the integer micro-USDC amount on the earliest saved page/row in each `group_id`. Used for poster totals, trends, and asset shares. |
 | Wallet volume | Buy expenditure plus sell proceeds. Each record's `price × size` is rounded using `ROUND_HALF_UP` to integer micro-USDC before summing. This is not a single-sided market-volume metric. |
 | Unique wallets | Lowercase wallet addresses deduplicated across all selected markets in the day, week, or month. Weekly and monthly counts are not sums of daily wallet counts. |
 | Top 200 | Wallets ranked by aggregated volume descending, then address ascending to break ties. |
 | Suspected bots in posters | First observed daily hit across all crypto Up/Down series: average trade interval ≤60 seconds and span ≥90 minutes. Labels persist from that date onward, with no future backfill. Daily, weekly and monthly statistics share the registry. This is a behavioral heuristic, not identity verification. |
 | Completeness | Expected per-series market counts plus completed trade pagination. This is API collection coverage, not a full on-chain reconciliation. |
 
-The collector uses `/v2/trades` with `taker_only=false`, `filter_type=TOKENS`, `filter_amount=1e-18`, and `limit=1000`, following cursors until `next_cursor=null`. It preserves source records; the shared reconstruction deduplicates report events. A separate `taker_only=true` feed accumulates market volume. Poster wallet amounts now sum BUY only. With a distribution, the overview bot panel uses the same reconstructed BUY-event totals and Up-equivalent denominator as the distribution; the ratio measures participation coverage, not labelled wallets' own cash contribution. Classification features retain the original BUY+SELL activity rule.
+The collector uses `/v2/trades` with `taker_only=false`, `filter_type=TOKENS`, `filter_amount=1e-18`, and `limit=1000`, following cursors until `next_cursor=null`. It preserves every wallet record and assigns a short `group_id` within each market, retaining the original page/row order. Market volume and BUY-event reconstruction share these groups; choosing the first saved row as an anchor is this project's method, not a claim that the API guarantees that ordering permanently. Poster wallet amounts sum BUY only. With a distribution, the overview bot panel uses the same reconstructed BUY-event totals and Up-equivalent denominator as the distribution; the ratio measures participation coverage, not labelled wallets' own cash contribution. Classification features retain the BUY+SELL activity rule.
 
-This change does not backfill history. The existing scheduled job begins collecting single-sided volume on October 6, 2026, for markets ending on October 5 UTC. Missing historical market volume is `N/A`; totals and comparisons never substitute wallet volume or sum only the available part of a period. Existing historical reports are not rewritten.
+Production backfills history on Kaggle after fresh dates. Older cloud databases are converted and published as new versions on Kaggle; previous Dataset versions are not automatically deleted. The local historical database remains untouched. Missing or incomplete target dates cannot form a complete period, and missing comparison periods display `N/A`. Earlier valid bot hits found during backfill can update cloud statistics; local historical assets are not automatically overwritten.
 
 The legacy [`README_BTC5M.md`](README_BTC5M.md) describes a different workflow: BTC 5-minute summaries use the **UTC market start date** and top 10 wallets. Its manual bot-analysis query also uses different date and threshold rules. Use the definitions above for the all-series workflow.
 

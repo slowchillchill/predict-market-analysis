@@ -26,37 +26,39 @@ SELECT s.date_utc, s.series_slug, s.expected_markets,
        COUNT(m.condition_id) AS discovered_markets,
        COUNT(p.completed_at) AS completed_markets,
        COALESCE(SUM(p.committed_page), 0) AS committed_pages,
-       COUNT(v.completed_at) AS market_volume_completed_markets,
-       COALESCE(SUM(v.committed_page), 0) AS market_volume_committed_pages,
-       COUNT(m.condition_id)=s.expected_markets AND
-           COUNT(v.completed_at)=COUNT(m.condition_id) AS market_volume_is_complete,
        COUNT(m.condition_id)=s.expected_markets AND
            COUNT(p.completed_at)=COUNT(m.condition_id) AS is_complete
 FROM expected s
 LEFT JOIN markets m ON m.series_slug=s.series_slug AND date(m.end_time)=s.date_utc
 LEFT JOIN collection_progress p ON p.market_slug=m.slug
-LEFT JOIN market_volume v ON v.market_slug=m.slug
 GROUP BY s.date_utc, s.series_slug, s.expected_markets;
 
 CREATE VIEW IF NOT EXISTS updown_coverage AS
 SELECT date_utc, SUM(expected_markets) AS expected_markets,
        SUM(discovered_markets) AS discovered_markets,
        SUM(completed_markets) AS completed_markets,
-       SUM(committed_pages) AS committed_pages, MIN(is_complete) AS is_complete,
-       SUM(market_volume_completed_markets) AS market_volume_completed_markets,
-       SUM(market_volume_committed_pages) AS market_volume_committed_pages,
-       MIN(market_volume_is_complete) AS market_volume_is_complete
+       SUM(committed_pages) AS committed_pages, MIN(is_complete) AS is_complete
 FROM updown_series_coverage GROUP BY date_utc;
 
 CREATE VIEW IF NOT EXISTS updown_market_volume_daily AS
+WITH ranked AS (
+    SELECT date(m.end_time) AS date_utc, t.amount_micro_usdc,
+           ROW_NUMBER() OVER (
+               PARTITION BY t.market_slug,t.group_id ORDER BY t.page_number,t.row_number
+           ) AS position_in_group
+    FROM markets m
+    JOIN updown_target_series s ON s.series_slug=m.series_slug
+    JOIN collection_progress p ON p.market_slug=m.slug AND p.completed_at IS NOT NULL
+    JOIN trades t ON t.market_slug=m.slug
+), amounts AS (
+    SELECT date_utc,SUM(amount_micro_usdc) AS amount_micro_usdc
+    FROM ranked WHERE position_in_group=1 GROUP BY date_utc
+)
 SELECT c.date_utc,
-       CASE WHEN c.market_volume_is_complete THEN COALESCE(SUM(v.amount_micro_usdc), 0)
+       CASE WHEN c.is_complete THEN COALESCE(a.amount_micro_usdc, 0)
             ELSE NULL END AS market_volume_micro_usdc
 FROM updown_coverage c
-LEFT JOIN markets m ON date(m.end_time)=c.date_utc
-    AND m.series_slug IN (SELECT series_slug FROM updown_target_series)
-LEFT JOIN market_volume v ON v.market_slug=m.slug
-GROUP BY c.date_utc;
+LEFT JOIN amounts a ON a.date_utc=c.date_utc;
 
 CREATE VIEW IF NOT EXISTS updown_wallet_daily AS
 SELECT date(m.end_time) AS date_utc, t.wallet,

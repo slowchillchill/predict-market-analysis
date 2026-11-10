@@ -66,18 +66,7 @@ def _paths(store_paths: Path | Iterable[Path]) -> list[Path]:
 
 def _require_complete(db: sqlite3.Connection, day: date) -> tuple:
     snapshot = distribution.source._snapshot(db, day)
-    markets = distribution.source._complete_markets(snapshot, day)
-    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if "market_volume" not in tables:
-        raise IncompleteDay(f"{day} 尚无单边成交额采集进度。")
-    missing = db.execute("""
-        SELECT m.slug FROM markets m
-        JOIN updown_target_series s ON s.series_slug=m.series_slug
-        LEFT JOIN market_volume v ON v.market_slug=m.slug
-        WHERE date(m.end_time)=? AND v.completed_at IS NULL LIMIT 1
-    """, (str(day),)).fetchone()
-    if missing is not None:
-        raise IncompleteDay(f"{day} 的单边成交额尚未完成：{missing[0]}。")
+    distribution.source._complete_markets(snapshot, day)
     status = collector.coverage(db, str(day))
     if not status.get("is_complete"):
         raise IncompleteDay(f"{day} 的市场覆盖尚未完整。")
@@ -366,9 +355,11 @@ def export_period(store_paths: Path | Iterable[Path], start: date, end: date, ki
             if row["wallet"] in active_bots:
                 bot_amount += amount
         market = features["market_volume"]
-        volume += market["volume_micro_usdc"]
+        if volume is not None:
+            volume = (volume + market["volume_micro_usdc"]
+                      if market["volume_micro_usdc"] is not None else None)
         daily_volumes.update(market["daily_volume_micro_usdc"])
-        for asset, amount in market["asset_volume_micro_usdc"].items():
+        for asset, amount in (market["asset_volume_micro_usdc"] or {}).items():
             assets[asset] = assets.get(asset, 0) + amount
         sources.update(bundle["source_versions"])
         series_catalog.update({row["series_slug"]: row for row in features["series"]})
@@ -380,7 +371,8 @@ def export_period(store_paths: Path | Iterable[Path], start: date, end: date, ki
         "wallet_volume_basis": "wallet_buys_only", "bot_volume_basis": "wallet_buys_only",
         "volume_basis": "taker_only", "volume_micro_usdc": volume,
         "daily_volume_micro_usdc": daily_volumes,
-        "asset_volume_micro_usdc": dict(sorted(assets.items(), key=lambda item: (-item[1], item[0])))}
+        "asset_volume_micro_usdc": (dict(sorted(assets.items(), key=lambda item: (-item[1], item[0])))
+                                    if volume is not None else None)}
     prices = _period_prices(rows, start, end, kind, labels, wallets, bots)
     rule = copy.deepcopy(registry.RULE)
     rule.update({kind + "_wallets": "union_of_active_retained_wallets",
@@ -398,4 +390,7 @@ def export_period(store_paths: Path | Iterable[Path], start: date, end: date, ki
     else:
         import polymarket_updown_weekly_poster as renderer
     payload["display"] = renderer.display_values(current, previous, prices)
-    return _bundle(kind, start, end, payload, prices, sources)
+    bundle = _bundle(kind, start, end, payload, prices, sources)
+    bundle["raw_schema_versions"] = {row[0]["date_utc"]: row[1].get("raw_schema_version", 1) for row in rows}
+    bundle["volume_methods"] = {row[0]["date_utc"]: row[1].get("volume_method", "legacy_taker_api") for row in rows}
+    return bundle

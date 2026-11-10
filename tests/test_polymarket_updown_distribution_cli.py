@@ -23,7 +23,8 @@ class DistributionCommandTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.path = self.root / "source.sqlite3"
         db = sqlite3.connect(self.path)
-        db.executescript((ROOT / "sql/btc5m_schema.sql").read_text())
+        # Preserve the hash-based fixture to cover read-only legacy statistics.
+        db.executescript((ROOT / "tests/fixtures/btc5m_legacy_schema.sql").read_text())
         db.execute("CREATE VIEW updown_target_series(series_slug,expected_markets,first_end_time) "
                    "AS VALUES ('btc-up-or-down-5m',1,NULL),('eth-up-or-down-5m',1,NULL)")
         for coin in ("btc", "eth"):
