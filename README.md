@@ -1,14 +1,27 @@
-# Polymarket Crypto Up/Down Analysis
+# Polymarket Crypto Updown Markets Analysis
 
 **English** | [简体中文](README.zh-CN.md)
 
 Collect trade records from Polymarket crypto Up/Down markets, analyze wallet activity in SQLite, and generate daily reports, daily, weekly and monthly posters, and English post text for X.
 
-The main workflow covers 38 market series and groups markets by their **UTC end date**. Production collection and SQL analysis run on Kaggle; the local scheduled workflow downloads completed statistics and renders posters without downloading raw trade databases. The original local collection and read-only reporting commands remain available for manual use.
+The main workflow covers 38 market series and groups markets by their **UTC end date**. Production collection and SQL analysis run on Kaggle; the local scheduled workflow downloads completed statistics and renders posters without downloading raw trade databases. Manual tools can collect into a separate database or read existing SQLite snapshots.
 
 See the [Kaggle migration and operations guide](docs/kaggle_migration.md) for public daily datasets, continuous historical backfill, Secrets, scheduling, and local retries.
 
-Completed v2 daily databases have three entity tables: `markets`, `collection_progress`, and `trades`. Trades use short market-local `group_id` values; an unfinished market's durable `pending_group_map` is removed when collection completes. Market volume is derived from trade groups, with no `market_volume` entity table or separate `taker_only=true` collection. Raw metadata is v2; the local report JSON interface remains v1. Production is paused during this upgrade; actual release and restart evidence belongs in the operations guide.
+Completed v2 daily databases have three entity tables: `markets`, `collection_progress`, and `trades`. Trades use short market-local `group_id` values; only unfinished markets retain a durable `pending_group_map` for cursor recovery. Market volume is derived from trade groups, with no `market_volume` entity table or separate `taker_only=true` collection. Raw metadata is v2; the local report JSON interface remains v1.
+
+## Verified deployment — November 10, 2026
+
+| Resource | Published version or status |
+| --- | --- |
+| [Public Kaggle project](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis) | Production Notebook v8; native Daily enabled from November 11, 2026 |
+| [2026-11-09 daily database](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2) | Raw version 2; 1,916,447 wallet records and 686,988 market/transaction groups |
+| [November analysis dataset](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3) | Version 3; report JSON references raw version 2 |
+| Local report timers | Daily 09:30, Monday 11:30, and month day 1 at 12:30, all Asia/Tokyo; pending reports retry every 30 minutes |
+
+The converted SQLite file decreased from **547,946,496 to 378,290,176 bytes (30.96%)**, with all wallet records and business statistics preserved. Every market amount matched the prior API summary across 3,295 markets. All **340 tests** passed, and a real two-session collection resumed four pages totaling 3,209 records and 1,200 groups without changing previously committed records or group IDs.
+
+Historical backfill continues in subsequent Daily sessions; the entire history is not yet complete. Previous cloud versions and the local historical database remain preserved, so the smaller new file does not mean the same amount of account storage has been reclaimed. See the [deployment evidence](docs/kaggle_migration.md).
 
 ## Features
 
@@ -34,37 +47,35 @@ Once all series are operating, the configured schedule expects **3,295 markets p
 
 ## Quick start
 
-Use Python 3.10 or newer. The commands below use Bash on Linux or macOS and run from the repository root. The `sqlite3` CLI is optional for direct SQL queries.
+Use Python 3.11 or newer for the production workflow and Kaggle CLI. The commands below use Bash on Linux or macOS. The `sqlite3` CLI is optional for direct SQL queries.
+
+```bash
+git clone https://github.com/slowchillchill/predict-market-analysis.git poly-market-analysis
+cd poly-market-analysis
+python3 -m venv .venv-btc5m
+.venv-btc5m/bin/python -m pip install -r requirements-kaggle.txt
+```
 
 ### Production: Kaggle statistics and local posters
 
-Use Python 3.11 or newer for the Kaggle CLI. After the Kaggle producer and local API token are configured, install the complete dependencies and check due reports:
+After configuring the Kaggle producer and local API token using the [operations guide](docs/kaggle_migration.md), check due reports:
 
 ```bash
-.venv-btc5m/bin/python -m pip install -r requirements-kaggle.txt
 .venv-btc5m/bin/python scripts/polymarket_kaggle_reports.py --kind all
 ```
 
-The first run records the deployment date. Pending report periods stay fixed and are retried every 30 minutes by the supplied systemd units. Existing assets are preserved. See the [operations guide](docs/kaggle_migration.md) before enabling the timers. The commands below describe the retained manual local workflow.
+The first run records the deployment date. Pending report periods stay fixed and are retried every 30 minutes by the supplied systemd units. The scheduled times are the first checks; unavailable results remain pending. Existing assets are preserved. See the [operations guide](docs/kaggle_migration.md) for Secret authorization and timer installation.
 
-### 1. Install
+### Manual SQLite tools
 
-```bash
-git clone https://github.com/slowchillchill/predict-market-analysis.git
-cd predict-market-analysis
-python3 -m venv .venv-btc5m
-.venv-btc5m/bin/python -m pip install -r requirements-btc5m.txt
-.venv-btc5m/bin/python -m pip install -r requirements-poster.txt
-```
-
-The poster dependency is Pillow; omit that installation if you only need collection and CSV/Markdown reports. Offline daily reporting uses only the Python standard library.
+The remaining examples use the environment installed above. Collection examples write to `data/raw/manual_updown.sqlite3`; the preserved `data/raw/btc5m.sqlite3` is available for read-only reports and is protected from collection writes. Production scheduling uses the Kaggle JSON consumer above. Offline CSV/Markdown reporting uses only the Python standard library; poster rendering uses Pillow.
 
 ### Run yesterday's complete workflow
 
-After installing both dependencies, run directly. The script defaults to the local Hong Kong proxy at `socks5h://127.0.0.1:20810`:
+Using the environment above, run the manual workflow with an explicit database. The script defaults to the local Hong Kong proxy at `socks5h://127.0.0.1:20810`:
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_yesterday.py
+.venv-btc5m/bin/python scripts/polymarket_updown_yesterday.py --db data/raw/manual_updown.sqlite3
 ```
 
 This fixes yesterday's UTC date at startup using the system clock, collects that day's markets using existing download progress, then generates the overview, an all-series BUY distribution poster, their JSON data, and post text only after collection succeeds. It uses the built-in proxy address without switching VPN nodes or checking the exit location; use `--proxy` to override the address in another environment. Previously completed markets are reused. Day-over-day comparisons use existing prior-day data; missing prior-day data displays `N/A`. A rerun after UTC midnight targets the new yesterday; use the explicit-date commands below to finish an older date.
@@ -79,12 +90,12 @@ read -r -p 'Local Hong Kong proxy URL: ' UPDOWN_PROXY
 .venv-btc5m/bin/python scripts/polymarket_updown_daily.py collect \
   --start-date 2026-09-17 --end-date 2026-09-19 \
   --proxy "$UPDOWN_PROXY" \
-  --db data/raw/btc5m.sqlite3
+  --db data/raw/manual_updown.sqlite3
 ```
 
 This example collects markets ending on September 17 and 18, 2026 (UTC). Replace the dates as needed: the start is inclusive and the end is exclusive. Collect the preceding day too if you want day-over-day comparisons on a poster.
 
-Press `Ctrl+C` to stop and rerun the same command to resume. Completed markets are skipped. Run only one collector per database at a time. The default database keeps its historical name, `btc5m.sqlite3`, and is shared by both workflows; no separate copy of trade data is needed.
+Press `Ctrl+C` to stop and rerun the same command to resume. Completed markets are skipped. Run only one collector per database at a time. Use the same explicit `--db` path for subsequent manual reports.
 
 Market discovery uses Gamma `/events/keyset`, passing the returned `next_cursor` as `after_cursor` for the next page until no cursor remains. Missing scheduled slots are also queried through `/events/slug/{slug}` because an inactive market may remain available by slug while being omitted from the list endpoint. Market end dates and series membership determine inclusion regardless of active or closed flags. Slots unavailable through the detail endpoint remain coverage gaps.
 
@@ -95,7 +106,7 @@ After collection has created the database and installed the Up/Down views:
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_updown_daily.py report \
   --date 2026-09-18 \
-  --db data/raw/btc5m.sqlite3 \
+  --db data/raw/manual_updown.sqlite3 \
   --output-dir outputs/updown
 ```
 
@@ -111,7 +122,7 @@ Export all-series BUY distribution statistics separately, using only the Python 
 
 ```bash
 python3 scripts/polymarket_updown_daily.py distribution \
-  --date 2026-11-07 --db data/raw/btc5m.sqlite3 --output-dir outputs/updown
+  --date 2026-11-07 --db data/raw/manual_updown.sqlite3 --output-dir outputs/updown
 ```
 
 This writes `updown_buy_trade_distribution_all_series_2026-11-07.json` with reconstructed trade counts,
@@ -123,7 +134,7 @@ Shares, Up-equivalent notional, and explicit percentage denominators. It reads l
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_updown_poster.py \
   --date 2026-09-18 \
-  --db data/raw/btc5m.sqlite3 \
+  --db data/raw/manual_updown.sqlite3 \
   --output-dir outputs/posters --with-distribution
 ```
 
@@ -142,13 +153,14 @@ For these workflows, exit code `0` means success, `2` indicates incomplete cover
 ### 5. Generate last week's poster and post text
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py
+.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py --db data/raw/manual_updown.sqlite3
 ```
 
 The default selects the previous complete Monday-to-Sunday week using the UTC date at startup. To select a specific week:
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py --week-start 2026-09-14
+.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py \
+  --week-start 2026-09-14 --db data/raw/manual_updown.sqlite3
 ```
 
 This writes `updown_weekly_2026-09-14_2026-09-20.png`, matching `.json`, and `_tweet.md` files under `outputs/posters/`. It reads the local database without collecting data. All seven target days must be complete; comparisons use the preceding complete week and display `N/A` for missing or zero baselines.
@@ -156,12 +168,12 @@ This writes `updown_weekly_2026-09-14_2026-09-20.png`, matching `.json`, and `_t
 Weekly wallets are deduplicated across the entire week. Suspected-bot labels persist from the first qualifying UTC market-end date onward. The weekly count is the union of active labelled wallets; volume includes their activity on and after that first date. Future labels never apply to earlier dates. Post text uses a 280-character budget.
 The default weekly entry also generates the approved all-wallet/suspected-bot BUY distribution PNG/JSON, updates English and Chinese captions, and writes two English images and six Douyin cards to the publish manifest. Use `--without-distribution` for the original package.
 
-For scheduling, run the command without a date argument so each invocation selects the previous week automatically. Timers are local configuration and are not installed by cloning this repository. See the [weekly poster guide](docs/updown_weekly_poster.md).
+The production weekly timer runs `polymarket_kaggle_reports.py --kind weekly` to read cloud results. Timers are local configuration and are not installed by cloning this repository. See the [operations guide](docs/kaggle_migration.md) for production scheduling and the [weekly poster guide](docs/updown_weekly_poster.md) for manual rendering.
 
 ### 6. Generate the previous month's poster and post text
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_monthly_poster.py
+.venv-btc5m/bin/python scripts/polymarket_updown_monthly_poster.py --db data/raw/manual_updown.sqlite3
 ```
 
 The UTC date at startup selects the previous complete calendar month and compares it with the month before that. For example, a run on October 1, 2026 reports September against August. Year boundaries and leap years are supported. To specify a historical month, database, and output directory:
@@ -169,7 +181,7 @@ The UTC date at startup selects the previous complete calendar month and compare
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_updown_monthly_poster.py \
   --month 2026-09 \
-  --db data/raw/btc5m.sqlite3 \
+  --db data/raw/manual_updown.sqlite3 \
   --output-dir outputs/posters
 ```
 
@@ -213,7 +225,7 @@ The legacy [`README_BTC5M.md`](README_BTC5M.md) describes a different workflow: 
 
 ## SQL access
 
-With the optional `sqlite3` CLI:
+In Kaggle, attach a daily dataset to a separate viewing Notebook and open its `data.sqlite3` with Python's `sqlite3` module. To inspect a preserved local database manually, use the optional `sqlite3` CLI:
 
 ```bash
 sqlite3 -readonly -header -column data/raw/btc5m.sqlite3 <<'SQL'
@@ -224,7 +236,7 @@ SELECT * FROM updown_daily_summary WHERE date_utc = '2026-09-18';
 SQL
 ```
 
-The summary and ranking views return only complete days. These queries require a database initialized by the all-series collector.
+The summary and ranking views return only complete days. Existing snapshots use their saved views; new manual databases receive these views during collection.
 
 ## Project layout and documentation
 
@@ -234,7 +246,8 @@ The summary and ranking views return only complete days. These queries require a
 | [`sql/`](sql/) | SQLite schema, coverage views, wallet statistics, and poster queries |
 | [`tests/`](tests/) | Collection, calculation, and rendering tests |
 | [`assets/`](assets/) | Poster background and bundled font; font license in [`Inter-OFL.txt`](assets/fonts/Inter-OFL.txt) |
-| `data/raw/` | Local databases; ignored by Git |
+| [`kaggle/`](kaggle/) | Public producer entrypoint and Kaggle metadata |
+| `data/raw/` | Preserved local snapshots and optional manual databases; ignored by Git |
 | `outputs/` | Generated reports and posters; ignored by Git |
 
 Detailed guides are currently in Chinese:
@@ -249,7 +262,7 @@ Detailed guides are currently in Chinese:
 
 ## Development
 
-Install both requirements files, then run the offline test suite:
+Install `requirements-kaggle.txt`, then run the offline test suite:
 
 ```bash
 .venv-btc5m/bin/python -m unittest discover -s tests -v
