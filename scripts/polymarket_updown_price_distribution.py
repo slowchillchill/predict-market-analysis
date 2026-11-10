@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 
 import polymarket_updown_bot_price as source
+from polymarket_trade_groups import group_column
 
 
 class InvalidReconstruction(ValueError):
@@ -72,7 +73,7 @@ def save_statistics(data: dict, output_dir: Path) -> Path:
 @dataclass(frozen=True)
 class _Row:
     wallet: str
-    transaction_hash: str
+    group_identity: int | str
     timestamp: int
     side: str
     outcome: str
@@ -199,15 +200,16 @@ def _load_day(db: sqlite3.Connection, day: date, *, series_slug: str | None = No
         lowest_exponent = 0
         highest_adjusted = 0
         max_value_difference = Decimal(0)
+        group_key = group_column(db)
         for market in markets:
             slug = market[0]
             # 完整消费并关闭每市场游标，避免跨市场持有读事务。
-            raw_rows = source._rows(db, """
-                SELECT page_number, row_number, wallet, transaction_hash, timestamp,
+            raw_rows = source._rows(db, f"""
+                SELECT page_number, row_number, wallet, {group_key}, timestamp,
                        side, outcome, raw_price, raw_size
                 FROM trades WHERE market_slug=? ORDER BY page_number, row_number
             """, (slug,))
-            groups: dict[str, list[_Row]] = defaultdict(list)
+            groups: dict[int | str, list[_Row]] = defaultdict(list)
             for _, _, wallet, tx, timestamp, side, outcome, raw_price, raw_size in raw_rows:
                 validation["source_row_count"] += 1
                 if side not in ("BUY", "SELL") or outcome not in ("Up", "Down"):

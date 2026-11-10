@@ -1,0 +1,12 @@
+[Unit]
+Description=Read completed Kaggle weekly statistics and generate local Polymarket assets
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h/poly-market-analysis
+ExecStart=%h/poly-market-analysis/.venv-btc5m/bin/python -u %h/poly-market-analysis/scripts/polymarket_kaggle_reports.py --kind weekly
+TimeoutStartSec=infinity
+StandardOutput=journal
+StandardError=journal

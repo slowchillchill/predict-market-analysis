@@ -1,0 +1,15 @@
+{
+  "id": "qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis",
+  "title": "Polymarket Crypto Updown Markets Analysis",
+  "code_file": "notebook.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

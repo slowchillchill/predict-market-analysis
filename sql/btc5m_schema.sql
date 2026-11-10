@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS trades (
     page_number INTEGER NOT NULL,
     row_number INTEGER NOT NULL,
     wallet TEXT NOT NULL,
-    transaction_hash TEXT NOT NULL,
+    group_id INTEGER NOT NULL CHECK(typeof(group_id)='integer' AND group_id>0),
     timestamp INTEGER NOT NULL,
     side TEXT NOT NULL,
     outcome TEXT NOT NULL,
@@ -39,3 +39,15 @@ CREATE TABLE IF NOT EXISTS trades (
     amount_micro_usdc INTEGER NOT NULL,
     PRIMARY KEY (market_slug, page_number, row_number)
 ) WITHOUT ROWID;
+
+-- 仅供未完成市场跨页续采；最后一页和完成进度在同一事务中清除此市场映射。
+-- 普通持久表，随 incomplete 日库发布；不能使用 TEMP TABLE。
+CREATE TABLE IF NOT EXISTS pending_group_map (
+    market_slug TEXT NOT NULL REFERENCES markets(slug),
+    transaction_hash TEXT NOT NULL,
+    group_id INTEGER NOT NULL CHECK(typeof(group_id)='integer' AND group_id>0),
+    PRIMARY KEY (market_slug, transaction_hash),
+    UNIQUE (market_slug, group_id)
+) WITHOUT ROWID;
+
+PRAGMA user_version = 2;

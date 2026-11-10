@@ -4,7 +4,24 @@
 
 采集 Polymarket 加密货币 Up/Down 市场逐笔成交，在 SQLite 中分析钱包活动，并生成日报、日海报、周海报和月海报，以及适用于 X 的英文推文。
 
-主要流程覆盖 38 个市场系列，按**市场结束日（UTC）**统计。采集支持断点续传，报告和海报通过只读数据库连接离线生成。仓库包含工具、测试和海报素材；生成报告前需要自行下载市场数据。
+主要流程覆盖 38 个市场系列，按**市场结束日（UTC）**统计。生产采集和 SQL 统计在 Kaggle 执行；本地定时下载完成的统计结果并生成海报，不下载原始交易数据库。原有本地采集、只读报告命令保留供手动使用。
+
+**2026-11-10 已完成验收并上线。**
+
+| 已验证部署 | 结果 |
+| --- | --- |
+| 公开 Notebook | [Polymarket Crypto Updown Markets Analysis](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis)，保存版本 v8 |
+| 完整原始日库 | [2026-11-09，v2](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2) |
+| 月度分析数据集 | [2026-11，v3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3) |
+| 调度 | 云端 Daily 从 2026-11-11 起运行；本地四个 timer 已恢复 |
+
+340 项回归测试已通过。真实云端两次独立会话完成了续采验证，保留 3,209 条钱包记录和 1,200 个成交组。历史补采尚未完成，将在后续 Daily 会话继续；结果保留实际观察范围。
+
+完成的 v2 日库包含 `markets`、`collection_progress`、`trades` 三个实体表。交易记录使用市场内短 `group_id`；采集中通过 `pending_group_map` 持久保存映射，完成后删除。市场金额从交易组派生，钱包只采 `taker_only=false`，没有 `market_volume` 实体表，也不另行采集 `taker_only=true`。日库元数据为 v2，本地报告 JSON 接口仍为 v1。
+
+本地首次检查时间为每天 **09:30**、周一 **11:30**、每月 1 日 **12:30**，均为 Asia/Tokyo；尚未就绪的结果每 **30 分钟**重试。这些时间是首次检查时间，不保证云端届时已完成采集。
+
+同一份 2026-11-09 日库从 **547,946,496 字节**缩小为 **378,290,176 字节**，减少 **30.96%**。Kaggle 的历史旧版本继续保留；本地约 63 GB 旧库原样保留，不上传、不删除。部署记录、Secret 配置、定时任务和恢复步骤见 [Kaggle 迁移与操作说明](docs/kaggle_migration.md)。
 
 ## 功能
 
@@ -31,48 +48,46 @@
 
 ## 快速开始
 
-需要 Python 3.10 或更新版本。以下命令适用于 Linux 或 macOS 的 Bash，均在仓库根目录执行。直接运行 SQL 查询时，可选安装 `sqlite3` 命令行工具。
+生产工具需要 Python 3.11 或更新版本。以下命令适用于 Linux 或 macOS 的 Bash。先克隆仓库并建立环境，后续命令均在仓库根目录执行。直接运行 SQL 查询时，可选安装 `sqlite3` 命令行工具。
 
 ### 1. 安装
 
 ```bash
-git clone https://github.com/slowchillchill/predict-market-analysis.git
-cd predict-market-analysis
+git clone https://github.com/slowchillchill/predict-market-analysis.git poly-market-analysis
+cd poly-market-analysis
 python3 -m venv .venv-btc5m
-.venv-btc5m/bin/python -m pip install -r requirements-btc5m.txt
-.venv-btc5m/bin/python -m pip install -r requirements-poster.txt
+.venv-btc5m/bin/python -m pip install -r requirements-kaggle.txt
 ```
 
-海报依赖为 Pillow；只需采集和 CSV、Markdown 日报时，可以省略海报依赖安装。离线日报仅使用 Python 标准库。
+完整依赖包括 Kaggle CLI、采集依赖和用于海报的 Pillow。离线 CSV、Markdown 日报仅使用 Python 标准库。
 
-### 一次运行昨日完整流程
+### 生产流程：Kaggle 统计，本地出图
 
-安装上述两项依赖后直接执行，脚本内置香港代理地址 `socks5h://127.0.0.1:20810`：
+配置 Kaggle 采集任务和本地 API Token 后，使用已经建立的环境检查到期图文：
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_yesterday.py
+.venv-btc5m/bin/python scripts/polymarket_kaggle_reports.py --kind all
 ```
 
-脚本启动时按系统时钟固定 UTC 昨日，复用已有下载进度采集当天市场，采集成功后生成英文总览、全系列买入分布海报、配套 JSON 和推文。
-它默认使用内置代理，其他环境可用 `--proxy` 覆盖地址，不切换 VPN 节点或检测出口所在地。已完成市场不重新下载成交；环比使用数据库已有前日数据，缺失时显示 `N/A`。
-跨 UTC 午夜重跑会改为新的昨日，补旧日期请使用下方指定日期命令。
+首次运行会记录部署日期。待处理图文保留原目标周期，由配套 systemd 任务每 30 分钟重试；已有图文不会自动覆盖。启用定时任务前请阅读 [操作说明](docs/kaggle_migration.md)。
+
+### 手动本地工具
+
+下方命令仅用于手动采集和分析，沿用上述环境。采集示例统一写入独立的 `data/raw/manual_updown.sqlite3`，不写保留的 `data/raw/btc5m.sqlite3`。只读报告、分布和海报工具也可显式指定旧库进行离线分析；不要用旧库路径运行采集或初始化。
 
 ### 2. 采集数据
 
-采集器要求显式传入 `--proxy`，现有命令行说明和使用流程采用本机香港代理，不会自动读取环境变量中的代理配置。请输入已配置的代理 URL，例如将 `socks5h://127.0.0.1:PORT` 中的端口替换为实际端口：
+手动指定市场 UTC 结束日期范围采集：
 
 ```bash
-read -r -p '请输入本机香港代理 URL：' UPDOWN_PROXY
-
 .venv-btc5m/bin/python scripts/polymarket_updown_daily.py collect \
   --start-date 2026-09-17 --end-date 2026-09-19 \
-  --proxy "$UPDOWN_PROXY" \
-  --db data/raw/btc5m.sqlite3
+  --db data/raw/manual_updown.sqlite3
 ```
 
 该示例采集 UTC 2026 年 9 月 17 日和 18 日结束的市场。请按需替换日期：包含开始日期，不包含结束日期。需要海报展示环比时，也应采集前一天的数据。
 
-按 `Ctrl+C` 中断后，重跑同一命令即可续传，已完成市场自动跳过。同一数据库一次只运行一个采集进程。默认数据库沿用历史名称 `btc5m.sqlite3`，由两种采集流程共用，无须复制逐笔数据。
+按 `Ctrl+C` 中断后，重跑同一命令即可续传，已完成市场自动跳过。同一数据库一次只运行一个采集进程。手动采集始终显式传入 `--db data/raw/manual_updown.sqlite3`，随后报告与海报读取同一个手工库。
 
 市场发现使用 Gamma `/events/keyset`，将服务端返回的 `next_cursor` 作为下一页的 `after_cursor`，直到没有后续游标。
 列表扫描后，通过 `/events/slug/{slug}` 补查计划内缺失的时段，覆盖列表遗漏但详情仍可查询的市场；
@@ -85,7 +100,7 @@ read -r -p '请输入本机香港代理 URL：' UPDOWN_PROXY
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_updown_daily.py report \
   --date 2026-09-18 \
-  --db data/raw/btc5m.sqlite3 \
+  --db data/raw/manual_updown.sqlite3 \
   --output-dir outputs/updown
 ```
 
@@ -101,7 +116,7 @@ read -r -p '请输入本机香港代理 URL：' UPDOWN_PROXY
 
 ```bash
 python3 scripts/polymarket_updown_daily.py distribution \
-  --date 2026-11-07 --db data/raw/btc5m.sqlite3 --output-dir outputs/updown
+  --date 2026-11-07 --db data/raw/manual_updown.sqlite3 --output-dir outputs/updown
 ```
 
 输出 `updown_buy_trade_distribution_all_series_2026-11-07.json`。统计仅读取现库，包含成交笔数、Shares、
@@ -112,7 +127,7 @@ Up 等价名义金额和明确分母的比例；重建校验失败返回 `2`，�
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_updown_poster.py \
   --date 2026-09-18 \
-  --db data/raw/btc5m.sqlite3 \
+  --db data/raw/manual_updown.sqlite3 \
   --output-dir outputs/posters --with-distribution
 ```
 
@@ -130,13 +145,14 @@ Up 等价名义金额和明确分母的比例；重建校验失败返回 `2`，�
 ### 5. 生成上周海报与推文
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py
+.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py --db data/raw/manual_updown.sqlite3
 ```
 
 默认按启动时的 UTC 日期选择上一个完整周（周一至周日）。也可指定日期：
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py --week-start 2026-09-14
+.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py \
+  --week-start 2026-09-14 --db data/raw/manual_updown.sqlite3
 ```
 
 生成 `updown_weekly_2026-09-14_2026-09-20.png`、同名 `.json` 和 `_tweet.md`，默认保存至 `outputs/posters/`。脚本只读本地数据库；目标周七天均须完整采集，周环比使用前一个完整周，前周缺失或零基数显示 `N/A`。
@@ -144,12 +160,12 @@ Up 等价名义金额和明确分母的比例；重建校验失败返回 `2`，�
 周钱包数整周去重。疑似机器人从首次命中的 UTC 市场结束日当日起持续归类，周数量取实际活跃且标签已生效的钱包并集，金额包括首次命中当日及以后的活动，不使用未来标签回算。正文按 280 字符预算排版。
 周报默认同时生成已确认的全钱包/疑似机器人 BUY 分布 PNG/JSON，并同步英文推文、中文正文、英文两图与抖音六卡清单。`--without-distribution` 可生成原图文包。
 
-定时执行可直接调用不带日期参数的命令，每次自动计算上周范围。定时器属于本机配置，不随仓库克隆自动安装。详见[周海报使用说明](docs/updown_weekly_poster.md)。
+手动省略日期参数时，脚本自动选择上一个完整 UTC 周。生产周定时服务调用 `polymarket_kaggle_reports.py --kind weekly` 读取云端统计，不运行此手工库脚本。定时器属于本机配置，不随仓库克隆自动安装。详见[周海报使用说明](docs/updown_weekly_poster.md)。
 
 ### 6. 生成上月海报与推文
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_monthly_poster.py
+.venv-btc5m/bin/python scripts/polymarket_updown_monthly_poster.py --db data/raw/manual_updown.sqlite3
 ```
 
 默认按启动时的 UTC 日期统计上一个完整自然月，并与再前一个自然月比较。例如在 2026 年 10 月 1 日运行，统计九月并与八月比较。支持跨年和闰年，可指定历史月份、数据库和输出目录：
@@ -157,7 +173,7 @@ Up 等价名义金额和明确分母的比例；重建校验失败返回 `2`，�
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_updown_monthly_poster.py \
   --month 2026-09 \
-  --db data/raw/btc5m.sqlite3 \
+  --db data/raw/manual_updown.sqlite3 \
   --output-dir outputs/posters
 ```
 
@@ -168,7 +184,7 @@ Up 等价名义金额和明确分母的比例；重建校验失败返回 `2`，�
 
 周、月报共用按日汇总的查询，两个比较区间取自同一个只读事务。月报不联网采集数据；使用前应通过采集入口初始化视图并准备目标月和前月数据。目标月不完整时退出码为 `2`，不生成新的图文；前月不完整或比较基数为零时，相应环比显示 `N/A`。
 
-**定时运行：**现有部署已启用 `polymarket-updown-monthly.timer`，每月 1 日 **12:30，Asia/Tokyo**（北京时间 11:30、UTC 03:30）调用上述默认入口，安排在日报采集和周报之后。`Persistent=true` 使用户定时器恢复时补触发一次错过的运行；不会逐月补齐多个月份，也不会主动唤醒电脑。延迟运行仍选择启动时的上一个完整 UTC 月，补旧月使用 `--month`。
+**定时运行：**生产的 `polymarket-updown-monthly.timer` 在每月 1 日 **12:30，Asia/Tokyo**（北京时间 11:30、UTC 03:30）检查云端结果，服务入口为 `polymarket_kaggle_reports.py --kind monthly`，不调用上方手动 SQLite 命令。到期周期保存在本地状态中，独立的重试任务每 30 分钟检查待处理结果，已有图文会被保留。日、周检查时间、部署起点和恢复顺序见 [操作说明](docs/kaggle_migration.md)。
 
 服务与定时器属于本机配置，不随仓库克隆自动安装。已部署的主机可检查状态和日志：
 
@@ -186,22 +202,22 @@ journalctl --user -u polymarket-updown-monthly.service
 | 指标或行为 | 定义 |
 | --- | --- |
 | 日期 | 市场 `endDate` 所属 UTC 日，不是确认结算日或逐笔成交日。包含目标市场返回的全部成交，包括提前和跨日成交。 |
-| 市场成交额 | 只累计 `taker_only=true` 的吃单方 `price × size`，每笔成交计一次；这是海报总额、趋势和币种占比的口径。 |
+| 市场成交额 | 从完整市场的交易组派生：每个 `group_id` 取原始页、行顺序最早记录的整数微 USDC 金额，再求和。用于海报总额、趋势和币种占比。 |
 | 钱包成交额 | 买入支出加卖出收入。每条记录的 `price × size` 以 `ROUND_HALF_UP` 舍入为整数微 USDC 后求和，不等同于单边市场成交量。 |
 | 去重钱包数 | 钱包地址统一为小写，在对应日、周或月的全部目标市场中去重；周、月钱包数不累加每日人数。 |
 | 前 200 钱包 | 按汇总成交额降序排列，金额相同时按地址升序排列。 |
 | 海报疑似机器人 | 在全部加密 Up/Down 市场中，某结束日平均成交间隔≤60秒、跨度≥90分钟即首次命中；从当日及以后持续归类，不使用未来标签回算。日、周、月共用历史标签。这是行为筛选，不能确认身份。 |
 | 完整性 | 各系列达到预期市场数，且成交分页全部完成。该指标表示接口采集覆盖情况，不代表完成全量链上对账。 |
 
-采集器调用 `/v2/trades`，钱包明细使用 `taker_only=false`、`filter_type=TOKENS`、`filter_amount=1e-18`、`limit=1000`，跟随游标直到 `next_cursor=null`。保留原始记录，由共用重建内核对报表事件去重；另用 `taker_only=true` 保存单边市场成交额。海报钱包金额现仅累计 BUY，SELL 不进入金额分子或分母。含分布时，总览机器人模块与分布页共用重建 BUY 事件及 Up 等价金额分母，比例为买方参与覆盖率，不是钱包自身资金贡献率；判定特征保留原 BUY＋SELL 活动规则。
+采集器调用 `/v2/trades`，钱包明细使用 `taker_only=false`、`filter_type=TOKENS`、`filter_amount=1e-18`、`limit=1000`，跟随游标直到 `next_cursor=null`。保留每条钱包记录及原始页、行顺序，在每个市场内分配短 `group_id`。市场金额和 BUY 重建使用相同交易组；组内首行作为锚点是项目方法，不宣称官方接口永久保证这种排序。海报钱包金额仅累计 BUY，SELL 不进入金额分子或分母。含分布时，总览机器人模块与分布页共用重建 BUY 事件及 Up 等价金额分母，比例为买方参与覆盖率，不是钱包自身资金贡献率；判定特征保留 BUY＋SELL 活动规则。
 
-本次修复不补采历史。现有定时任务从 2026-10-06 开始采集 2026-10-05 UTC 结束市场的单边金额。历史单边缺失显示 `N/A`；日、周、月总额及环比不混用双方金额，不将部分日期之和当作完整周期总额。已有历史报表不重写。
+生产在 Kaggle 优先采集新日期，再补采历史。旧云端日库在 Kaggle 转换并发布新版本，不自动删除历史旧版本；本地历史数据库保持原样。缺失或不完整的目标日期不能组成完整周期，缺失的比较周期显示 `N/A`。补采发现更早有效机器人命中时可以更新云端统计，已有本地图文不会自动覆盖。
 
 原 [`README_BTC5M.md`](README_BTC5M.md) 描述另一套流程：BTC 5 分钟日报按**市场开始日（UTC）**统计前 10 钱包，其中手动机器人分析 SQL 的日期和阈值规则也不同。使用全系列流程时，应以上述定义为准。
 
 ## SQL 查询
 
-安装可选的 `sqlite3` 命令行工具后，可以执行：
+安装可选的 `sqlite3` 命令行工具后，可以手动只读查询保留的旧库：
 
 ```bash
 sqlite3 -readonly -header -column data/raw/btc5m.sqlite3 <<'SQL'
@@ -212,7 +228,7 @@ SELECT * FROM updown_daily_summary WHERE date_utc = '2026-09-18';
 SQL
 ```
 
-日汇总与排名视图只返回完整日期。查询前需要通过全系列采集入口初始化数据库。
+日汇总与排名视图只返回完整日期。旧库查询使用其已有视图，不为演示运行采集、初始化或格式升级；新的手工库视图由首次手动采集建立。
 
 ## 项目结构与文档
 
@@ -237,7 +253,7 @@ SQL
 
 ## 开发与验证
 
-安装两个依赖文件后，运行离线测试：
+安装 `requirements-kaggle.txt` 后，运行离线测试：
 
 ```bash
 .venv-btc5m/bin/python -m unittest discover -s tests -v

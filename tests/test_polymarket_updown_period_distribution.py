@@ -40,9 +40,9 @@ class PeriodDistributionTests(unittest.TestCase):
                                     "VALUES (?,?,?,?,?)", (slug, str(day-timedelta(days=1)), slug, coin, f"{day}T00:00:00Z"))
                     self.db.execute("INSERT OR IGNORE INTO collection_progress(market_slug,completed_at) VALUES (?,'done')", (slug,))
 
-    def group(self, day, anchor, details, *, coin="btc", tx="same-hash"):
+    def group(self, day, anchor, details, *, coin="btc", tx=1):
         self.sequence += 1
-        # 同一哈希可出现在不同市场；同组有多条外观相同的明细也必须保留。
+        # 同一短组号可出现在不同市场；同组外观相同的明细也必须保留。
         with self.db:
             for row_number, (wallet, side, outcome, price, size) in enumerate([anchor, *details]):
                 self.db.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",

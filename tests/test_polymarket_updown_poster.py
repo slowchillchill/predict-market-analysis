@@ -19,7 +19,14 @@ class PosterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "data.sqlite3"
-        self.db = poster.daily.connect_database(self.path)
+        # These tests exercise rendering old wallet/API snapshots unchanged.
+        self.db = sqlite3.connect(self.path)
+        self.db.row_factory = sqlite3.Row
+        fixtures = Path(__file__).resolve().parent / "fixtures"
+        self.db.executescript((fixtures / "btc5m_legacy_schema.sql").read_text())
+        self.db.executescript((fixtures / "market_volume_legacy_schema.sql").read_text())
+        poster.daily.set_series_first_end(self.db)
+        self.db.executescript((fixtures / "updown_legacy_views.sql").read_text())
         self.seed_day(DAY)
 
     def tearDown(self):

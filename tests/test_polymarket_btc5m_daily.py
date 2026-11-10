@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/polymarket_btc5m_daily.py"
+sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("btc5m", SCRIPT)
 btc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(btc)
@@ -125,6 +127,26 @@ class DatabaseTests(unittest.TestCase):
         btc.collect_market(self.db, client, self.slugs[0])
         self.assertEqual(client.get.call_args.args[1]["cursor"], "c1")
         self.assertEqual(self.count(), 2)
+
+    def test_cooperative_pause_is_after_atomic_page_and_resumes_cursor(self):
+        client = Mock()
+        client.get.return_value = page([trade()], "next-page")
+
+        def should_yield():
+            self.assertFalse(self.db.in_transaction)
+            return self.db.execute("SELECT committed_page FROM collection_progress WHERE market_slug=?",
+                                   (self.slugs[0],)).fetchone()[0] == 1
+
+        with self.assertRaises(btc.CollectionPaused):
+            btc.collect_market(self.db, client, self.slugs[0], should_yield=should_yield)
+        client.get.assert_called_once()
+        self.assertEqual(self.count(), 1)
+        self.assertIsNone(self.db.execute("SELECT last_error FROM collection_progress WHERE market_slug=?",
+                                        (self.slugs[0],)).fetchone()[0])
+        client.get.return_value = page([trade()])
+        btc.collect_market(self.db, client, self.slugs[0])
+        self.assertEqual(client.get.call_args.args[1]["cursor"], "next-page")
+        self.assertEqual(self.count(), 2)
         btc.collect_market(self.db, client, self.slugs[0])
         self.assertEqual(self.count(), 2)
 
@@ -148,6 +170,19 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(self.count(), 1)
         self.assertEqual(self.db.execute("SELECT next_cursor FROM collection_progress WHERE market_slug=?",
                                         (self.slugs[0],)).fetchone()[0], "c1")
+
+    def test_repeated_invalid_cursor_stops_instead_of_rebuilding_forever(self):
+        btc.commit_page(self.db, self.slugs[0], 1, page([trade()], "expired"))
+        client = Mock()
+        client.get.side_effect = [btc.FetchError("invalid cursor", invalid_cursor=True),
+                                  page([trade()] * 2, "expired-again"),
+                                  btc.FetchError("invalid cursor", invalid_cursor=True)]
+        with self.assertRaises(btc.FetchError):
+            btc.collect_market(self.db, client, self.slugs[0])
+        self.assertEqual(client.get.call_count, 3)
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(self.db.execute("SELECT next_cursor FROM collection_progress WHERE market_slug=?",
+                                         (self.slugs[0],)).fetchone()[0], "expired-again")
 
     def test_top10_ties_are_stable_and_aggregate_across_markets(self):
         rows = [trade(f"wallet-{i:02}", "1", "2") for i in range(12)]
@@ -232,7 +267,8 @@ class NetworkTests(unittest.TestCase):
                      self.response(200, '{"price":0.10000000000000000001}')]
         with patch.object(client.session, "get", side_effect=responses) as get, patch.object(btc.time, "sleep") as sleep:
             self.assertEqual(client.get(btc.TRADES_URL, {})["price"], "0.10000000000000000001")
-            sleep.assert_called_once_with(7.0)
+            sleep.assert_called_once()
+            self.assertAlmostEqual(sleep.call_args.args[0], 7.0, places=3)
             self.assertEqual(get.call_args.kwargs["timeout"], 30)
 
     def test_cursor_400_is_classified_but_other_400_is_not(self):
@@ -243,6 +279,62 @@ class NetworkTests(unittest.TestCase):
             with patch.object(client.session, "get", return_value=response), self.assertRaises(btc.FetchError) as ctx:
                 client.get(btc.TRADES_URL, {})
             self.assertEqual(ctx.exception.invalid_cursor, is_cursor)
+
+    def test_direct_client_ignores_environment_proxy(self):
+        with patch.dict("os.environ", {"HTTP_PROXY": "http://proxy.invalid", "HTTPS_PROXY": "http://proxy.invalid"}):
+            client = btc.Client()
+        self.addCleanup(client.close)
+        self.assertFalse(client.session.trust_env)
+        self.assertEqual(client.session.proxies, {})
+
+    def test_limiter_covers_successes_retries_and_distinct_endpoints(self):
+        client = btc.Client()
+        self.addCleanup(client.close)
+        now, started = [100.0], []
+
+        def sleep(delay):
+            now[0] += delay
+
+        responses = iter([self.response(200, '[]'), self.response(503, '{}'),
+                          self.response(200, '[]'), self.response(200, '[]')])
+
+        def request(*args, **kwargs):
+            started.append(now[0])
+            now[0] += 0.2
+            return next(responses)
+
+        with patch.object(client.session, "get", side_effect=request), \
+             patch.object(btc.time, "monotonic", side_effect=lambda: now[0]), \
+             patch.object(btc.time, "sleep", side_effect=sleep), \
+             patch.object(btc.random, "uniform", return_value=0):
+            client.get(btc.GAMMA_EVENTS, {})
+            client.get(btc.TRADES_URL, {})
+            client.get(btc.GAMMA_EVENTS, {})
+        self.assertEqual(len(started), 4)
+        self.assertAlmostEqual(started[1] - started[0], 0.7)
+        self.assertAlmostEqual(started[2] - started[1], 2.2)
+        self.assertAlmostEqual(started[3] - started[2], 0.7)
+
+    def test_persistent_429_is_structured_after_three_attempts(self):
+        client = btc.Client()
+        self.addCleanup(client.close)
+        response = self.response(429, '{}', {"Retry-After": "7"})
+        with patch.object(client.session, "get", return_value=response) as get, \
+             patch.object(btc.time, "sleep"), self.assertRaises(btc.RateLimitError) as ctx:
+            client.get(btc.TRADES_URL, {})
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertEqual(ctx.exception.retry_after, 7.0)
+
+    def test_malformed_retry_after_does_not_replace_http_error(self):
+        client = btc.Client()
+        self.addCleanup(client.close)
+        response = self.response(503, '{}', {"Retry-After": "invalid"})
+        with patch.object(client.session, "get", return_value=response), \
+             patch.object(btc.time, "sleep"), self.assertRaises(btc.FetchError) as ctx:
+            client.get(btc.TRADES_URL, {})
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIsNone(ctx.exception.retry_after)
 
 
 if __name__ == "__main__":
