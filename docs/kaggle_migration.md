@@ -197,17 +197,18 @@ systemctl --user list-timers --all
 .venv-btc5m/bin/python -m unittest discover -s tests -p 'test_polymarket_kaggle_*.py' -v
 ```
 
-本地回归覆盖 JSON 出图、固定版本读取、跨日重试、已有文件保留、历史标签更新和周月合并。实际部署另验收一个完整新日期、至少一个历史日期及跨会话续采。运行日志、数据集版本和实际图文产物作为部署证据。
+本地回归覆盖 JSON 出图、固定版本读取、跨日重试、已有文件保留、历史标签更新和周月合并。本次存储升级另用完整日库做转换对照，并用真实单市场做跨会话采集与续采。运行日志、数据集版本和实际图文产物作为部署证据；小范围验收不表示历史范围已经补齐。
 
-## 本次升级部署记录
+## 本次升级部署记录（2026-11-10）
 
-文档更新时，云端运行与 Daily、本地四个 timer 均处于暂停状态。下列实际结果在完成部署后填写；旧版本启用记录不能作为本次升级的验收证据。
-
-- 代码分支：`feat/kaggle-data-pipeline`；审查入口：[draft PR #1](https://github.com/slowchillchill/predict-market-analysis/pull/1)。
-- [公开 Kaggle 项目](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis)已创建。
-- 固定源码提交、Notebook 保存版本、Secret 授权验证：待填实测。
-- 完整新日期、旧日库迁移及跨会话续采的数据集版本：待填实测。
-- 本地云端 JSON 预览结果、原产物保留检查：待填实测。
-- 完整回归测试数量与结果：待填实测。
-- Daily 与本地四个 timer 恢复时间：待填实测。
-- 原始本地数据库继续保留：`data/raw/btc5m.sqlite3`，升级前为 63,242,969,088 字节；本次不上传或删除。
+- 代码分支：`feat/kaggle-data-pipeline`；审查入口：[PR #1](https://github.com/slowchillchill/predict-market-analysis/pull/1)。
+- [公开 Kaggle 项目](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis)固定源码提交 `c16edb8353aa78fe6229bc3e164f13788d1e1296`。v7 通过网页 Secret 授权执行 `--migrate-only`，185.1 秒成功完成；v8 保存正常生产参数 `[]`，源码下载后确认仍固定该提交。
+- [2026-11-09 原始日库版本 2](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2)为完成的 v2 三表结构，保留 1,916,447 条钱包记录和 686,988 个交易组。3295 个市场与旧 API 金额逐市场差异为零，钱包特征、机器人命中和完整 BUY 统计不变。
+- 日库实际从 547,946,496 字节缩小至 378,290,176 字节，减少 169,656,320 字节（30.96%）。这是短编号、移除旧汇总与整理文件的合计结果；旧 Dataset 版本仍保留，不能解释为平台累计占用减少同等大小。公开日库内的 `migration_summary.json` 保存比较结果。
+- [月度分析数据集版本 3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3)已引用原始日库版本 2；原首次命中和历史补采状态保留。两个 Dataset 的页面说明也已通过 CLI 更新为新方法。
+- 真实续采验收：[私有 Phase 1](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-group-id-resume-phase1-20261110) v1 提交一页 1000 行后暂停；[私有 Phase 2](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-group-id-resume-phase2-20261110) v1 从前者输出恢复，续采三页。总计 3209 行、1200 组，旧行和组号不变，真实跨页复用旧组记录 2 条，完成后映射清空并形成三表日库。四页都只请求 `false`；该验收不写生产 Dataset。
+- 完整回归测试：340 项全部通过。原始库升级与采集事务另经独立交叉审查。
+- 本地从月度版本 3 下载统计 JSON，在 `outputs/kaggle_group_id_acceptance/posters/` 生成预览，记录的原始引用为版本 2。本地未下载原始 SQLite；正常输出目录中的旧图文仍保留，旧 `last_error` 已清除。
+- Kaggle Daily 已恢复，开始日期为 2026-11-11；生产没有每日补采日期数量上限。历史范围尚未全部补齐，后续 Daily 启动时继续恢复边界发现、日更和历史补采。
+- 本地四个 timer 已于 2026-11-10 21:37 JST 恢复并确认 `enabled`、`active`，原部署日期仍为 2026-11-10。日报首次检查为 09:30，周报周一 11:30，月报每月 1 日 12:30；未就绪目标每 30 分钟重试。
+- 原始本地数据库继续保留：`data/raw/btc5m.sqlite3`，63,242,969,088 字节，修改时间仍为 2026-11-10 11:48:35 JST。本次没有上传、改写或删除该数据库。
