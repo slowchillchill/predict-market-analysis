@@ -2,263 +2,271 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Collect trade records from Polymarket crypto Up/Down markets, analyze wallet activity in SQLite, and generate daily reports, daily, weekly and monthly posters, and English post text for X.
+Public, versioned datasets of Polymarket crypto Up/Down markets, with wallet-level trade records in SQLite and daily, weekly, and monthly analysis in JSON. Collection and analysis run on Kaggle. You can query the data in a Kaggle Notebook without downloading the database to your computer.
 
-The main workflow covers 38 market series and groups markets by their **UTC end date**. Production collection and SQL analysis run on Kaggle; the local scheduled workflow downloads completed statistics and renders posters without downloading raw trade databases. Manual tools can collect into a separate database or read existing SQLite snapshots.
+**Start here:** [open a completed daily dataset](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2), attach it to a Kaggle Notebook, and run the SQL examples below. For prepared statistics, use the [analysis dataset](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3).
 
-See the [Kaggle migration and operations guide](docs/kaggle_migration.md) for public daily datasets, continuous historical backfill, Secrets, scheduling, and local retries.
+## Where to find the data
 
-Completed v2 daily databases have three entity tables: `markets`, `collection_progress`, and `trades`. Trades use short market-local `group_id` values; only unfinished markets retain a durable `pending_group_map` for cursor recovery. Market volume is derived from trade groups, with no `market_volume` entity table or separate `taker_only=true` collection. Raw metadata is v2; the local report JSON interface remains v1.
+All datasets are published by **`qiuqiuslowchillchill`** on Kaggle.
 
-## Verified deployment — November 10, 2026
+| Resource | Purpose | Published example |
+| --- | --- | --- |
+| `pm-updown-raw-YYYY-MM-DD` | One SQLite snapshot for markets ending on that UTC date | [2026-11-09, version 2](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2) |
+| `pm-updown-analysis-YYYY-MM` | Completed result JSON and mergeable daily features | [2026-11, version 3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3) |
+| [Public collection Notebook](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis) | Collection code, runs, and execution logs | Polymarket Crypto Updown Markets Analysis |
+| [Source repository](https://github.com/slowchillchill/predict-market-analysis) | Schema, metric definitions, collector, and tests | This repository |
 
-| Resource | Published version or status |
-| --- | --- |
-| [Public Kaggle project](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis) | Production Notebook v8; native Daily enabled from November 11, 2026 |
-| [2026-11-09 daily database](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2) | Raw version 2; 1,916,447 wallet records and 686,988 market/transaction groups |
-| [November analysis dataset](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3) | Version 3; report JSON references raw version 2 |
-| Local report timers | Daily 09:30, Monday 11:30, and month day 1 at 12:30, all Asia/Tokyo; pending reports retry every 30 minutes |
+The examples above are fixed versions, verified on **November 10, 2026**. Later versions may contain corrections or more completed dates. A monthly dataset is a container; its existence does **not** mean the whole month is complete. Historical backfill is still in progress. Check the files described below for actual coverage.
 
-The converted SQLite file decreased from **547,946,496 to 378,290,176 bytes (30.96%)**, with all wallet records and business statistics preserved. Every market amount matched the prior API summary across 3,295 markets. All **340 tests** passed, and a real two-session collection resumed four pages totaling 3,209 records and 1,200 groups without changing previously committed records or group IDs.
+## Query on Kaggle without a local database
 
-Historical backfill continues in subsequent Daily sessions; the entire history is not yet complete. Previous cloud versions and the local historical database remain preserved, so the smaller new file does not mean the same amount of account storage has been reclaimed. See the [deployment evidence](docs/kaggle_migration.md).
+Kaggle hosts SQLite files; this project does not expose a remote SQL endpoint. SQL runs inside your Kaggle Notebook against an attached dataset. The database stays in the Kaggle environment.
 
-## Features
+1. Open the daily dataset linked above and create a Notebook, or add the dataset through **Add Input** in an existing Notebook.
+2. Attach **one** daily raw dataset for this example. Select version 2 to reproduce the example snapshot.
+3. Run this Python cell. `sqlite3` is part of Python; Pandas is available in the Kaggle environment.
 
-- Discover markets across eight crypto assets and five timeframes.
-- Store trade records and pagination progress in SQLite, with each page committed atomically.
-- Export daily wallet volume, unique wallet counts, and the top 200 wallets to CSV, alongside a Chinese Markdown report.
-- Generate a 1600 × 2000 English PNG poster, supporting JSON, and English post text for X.
-- Generate burgundy-and-gold weekly posters with week-over-week comparisons, a seven-day chart, asset shares, and suspected bot activity; weekly post text fits ordinary X posts.
-- Generate monthly posters in ivory, forest green, and graphite with calendar-month comparisons, daily averages, full-month charts, asset shares, suspected bot activity, and English post text.
-- Query coverage and wallet rankings through SQL views.
-- Retain the original BTC 5-minute workflow for historical comparisons.
+```python
+from pathlib import Path
+import sqlite3
+import pandas as pd
 
-## Market coverage
+# This example assumes exactly one daily raw dataset is attached.
+db_path = next(Path('/kaggle/input').rglob('data.sqlite3'))
+conn = sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)
 
-The series catalog is defined in [`scripts/polymarket_updown_daily.py`](scripts/polymarket_updown_daily.py).
+# List tables and SQL views.
+display(pd.read_sql_query("""
+    SELECT name, type FROM sqlite_schema
+    WHERE type IN ('table', 'view') ORDER BY type, name
+""", conn))
 
-| Assets | Timeframes | Series |
+# Inspect column names, types, and primary-key positions.
+display(pd.read_sql_query('PRAGMA table_info(trades)', conn))
+
+# Check coverage before interpreting totals.
+display(pd.read_sql_query('SELECT * FROM updown_coverage', conn))
+```
+
+Then query market volume and wallet rankings:
+
+```python
+display(pd.read_sql_query("""
+    SELECT date_utc, market_volume_micro_usdc
+    FROM updown_market_volume_daily ORDER BY date_utc
+""", conn))
+
+display(pd.read_sql_query("""
+    SELECT wallet_rank, wallet, amount_micro_usdc
+    FROM updown_wallet_ranked
+    WHERE date_utc = '2026-11-09' AND wallet_rank <= 10
+    ORDER BY wallet_rank
+""", conn))
+```
+
+Amounts above are integer **micro-USDC**: divide by 1,000,000 for USDC. The wallet ranking sums BUY expenditure and SELL proceeds; it is not market volume or the BUY-only wallet contribution used in posters. Use Python `Decimal` when converting amounts for exact arithmetic.
+
+For another date, attach its dataset and change the SQL date. If you attach several daily datasets, select the intended database path explicitly. Run `conn.close()` when finished. The published SQLite file may have no browser preview; the Notebook queries expose its tables and fields directly.
+
+## Download files instead
+
+Use the dataset page's **Download** button or the [official Kaggle CLI](https://github.com/Kaggle/kaggle-cli). The CLI requires Python 3.11+; install it in a virtual environment and follow its [authentication instructions](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
+
+```bash
+python -m pip install kaggle
+
+# List the files in the fixed raw version.
+kaggle datasets files qiuqiuslowchillchill/pm-updown-raw-2026-11-09/2
+
+# Download and extract the daily snapshot and its metadata.
+kaggle datasets download \
+  qiuqiuslowchillchill/pm-updown-raw-2026-11-09/2 \
+  -p ./polymarket-2026-11-09 --unzip
+
+# Download only a prepared daily result, without raw trade records.
+kaggle datasets download \
+  qiuqiuslowchillchill/pm-updown-analysis-2026-11/3 \
+  -f daily_2026-11-09.json -p ./polymarket-results --unzip
+```
+
+The final `/2` and `/3` pin Kaggle dataset versions. Omit that suffix to request the latest version. To query a downloaded database, use the same Python examples with `db_path = Path('./polymarket-2026-11-09/data.sqlite3').resolve()`, or use a SQLite client.
+
+To use the downloaded report without loading raw trades:
+
+```python
+import json
+from decimal import Decimal
+from pathlib import Path
+
+report = json.loads(Path('./polymarket-results/daily_2026-11-09.json').read_text())
+current = report['payload']['current']
+print(report['status'], report['source_versions'])
+print(Decimal(current['volume_micro_usdc']) / Decimal(1_000_000))
+```
+
+For this fixed version, the market volume is `9786444.035628` USDC. For other available reports, read `index.json` from the same analysis dataset version and use the filename under its `results` entry, such as `daily:2026-11-09`.
+
+## Coverage, dates, and updates
+
+| Assets | Market timeframes | Series |
 | --- | --- | ---: |
 | BTC, ETH, SOL, XRP, DOGE, BNB, HYPE | 5 minutes, 15 minutes, 1 hour, 4 hours, daily | 35 |
 | ZEC | 5 minutes, 15 minutes, 4 hours | 3 |
 
-Once all series are operating, the configured schedule expects **3,295 markets per UTC day**. Coverage is checked per series using verified historical launch boundaries, shared by daily, weekly and monthly reports. Unverified gaps remain incomplete rather than being treated as zero volume.
+The [series catalog](scripts/polymarket_updown_daily.py) defines 38 series. Once all series are operating, the configured schedule expects **3,295 markets per UTC day**. Historical expected counts use the configured first-market-end boundaries.
 
-## Quick start
+A daily dataset contains markets whose **`end_time` falls on that UTC date**. It includes all returned trade records for those markets, including trades before that date. It is not a calendar-day feed filtered by each trade's timestamp. **`markets.date_utc` retains the market start date** for compatibility; use `date(markets.end_time)` or the `updown_*` views for the dataset's day.
 
-Use Python 3.11 or newer for the production workflow and Kaggle CLI. The commands below use Bash on Linux or macOS. The `sqlite3` CLI is optional for direct SQL queries.
+Collection is scheduled daily on Kaggle. Recent closed dates take priority, followed by historical backfill. Reports become available after collection and analysis finish; the schedule is not a guarantee of publication at a fixed time. Backfill or corrections can publish new versions, including revisions to behavior-based wallet labels.
 
-```bash
-git clone https://github.com/slowchillchill/predict-market-analysis.git poly-market-analysis
-cd poly-market-analysis
-python3 -m venv .venv-btc5m
-.venv-btc5m/bin/python -m pip install -r requirements-kaggle.txt
-```
-
-### Production: Kaggle statistics and local posters
-
-After configuring the Kaggle producer and local API token using the [operations guide](docs/kaggle_migration.md), check due reports:
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_kaggle_reports.py --kind all
-```
-
-The first run records the deployment date. Pending report periods stay fixed and are retried every 30 minutes by the supplied systemd units. The scheduled times are the first checks; unavailable results remain pending. Existing assets are preserved. See the [operations guide](docs/kaggle_migration.md) for Secret authorization and timer installation.
-
-### Manual SQLite tools
-
-The remaining examples use the environment installed above. Collection examples write to `data/raw/manual_updown.sqlite3`; the preserved `data/raw/btc5m.sqlite3` is available for read-only reports and is protected from collection writes. Production scheduling uses the Kaggle JSON consumer above. Offline CSV/Markdown reporting uses only the Python standard library; poster rendering uses Pillow.
-
-### 2. Collect data
-
-To collect an explicit UTC market-end range manually:
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_daily.py collect \
-  --start-date 2026-09-17 --end-date 2026-09-19 \
-  --db data/raw/manual_updown.sqlite3
-```
-
-This example collects markets ending on September 17 and 18, 2026 (UTC). Replace the dates as needed: the start is inclusive and the end is exclusive. Collect the preceding day too if you want day-over-day comparisons on a poster.
-
-Press `Ctrl+C` to stop and rerun the same command to resume. Completed markets are skipped. Run only one collector per database at a time. Use the same explicit `--db` path for subsequent manual reports.
-
-Market discovery uses Gamma `/events/keyset`, passing the returned `next_cursor` as `after_cursor` for the next page until no cursor remains. Missing scheduled slots are also queried through `/events/slug/{slug}` because an inactive market may remain available by slug while being omitted from the list endpoint. Market end dates and series membership determine inclusion regardless of active or closed flags. Slots unavailable through the detail endpoint remain coverage gaps.
-
-### 3. Export a daily report
-
-After collection has created the database and installed the Up/Down views:
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_daily.py report \
-  --date 2026-09-18 \
-  --db data/raw/manual_updown.sqlite3 \
-  --output-dir outputs/updown
-```
-
-For a complete day, this writes:
-
-- `updown_daily_2026-09-18.csv` — daily totals and top-200 volume share.
-- `updown_top200_2026-09-18.csv` — wallet addresses, ranks, and volumes.
-- `updown_daily_2026-09-18.md` — Chinese report and coverage details.
-
-An incomplete day produces only the coverage report. Rerun collection to address gaps.
-
-Export all-series BUY distribution statistics separately, using only the Python standard library:
-
-```bash
-python3 scripts/polymarket_updown_daily.py distribution \
-  --date 2026-11-07 --db data/raw/manual_updown.sqlite3 --output-dir outputs/updown
-```
-
-This writes `updown_buy_trade_distribution_all_series_2026-11-07.json` with reconstructed trade counts,
-Shares, Up-equivalent notional, and explicit percentage denominators. It reads local data only and returns
-`2` without exporting new statistics if coverage or reconstruction validation fails.
-
-### 4. Generate an English poster and post text
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_poster.py \
-  --date 2026-09-18 \
-  --db data/raw/manual_updown.sqlite3 \
-  --output-dir outputs/posters --with-distribution
-```
-
-This writes `updown_2026-09-18.png`, `updown_2026-09-18.json`, and `updown_2026-09-18_tweet.md`. The Markdown file contains the English post body. The script generates files locally; publishing to X is a separate step. Generating the same date again replaces its output files.
-
-`--with-distribution` also writes `updown_buy_trade_distribution_all_series_2026-09-18.png` and matching JSON.
-It also updates the English caption and Chinese Douyin caption with both BUY populations. The four Douyin cards become overview, all-wallet BUY distribution, suspected-bot BUY distribution, and methods. English platform manifests include the overview and distribution images in order; see [publishing rules](docs/updown_publishing.md).
-The overview JSON links both assets with SHA256 hashes. Yesterday's automated workflow enables this flag;
-omitting it manually retains overview-only generation. Distribution notional uses Up-equivalent price × shares
-and does not replace the overview's taker-side market volume. See [distribution definitions](docs/updown_bot_price_poster.md).
-
-The current day must be complete. If the previous day is incomplete or its comparison value is zero, the affected day-over-day comparison displays `N/A`. The background and Inter font are bundled, so rendering needs no image-generation service or system font installation.
-
-For these workflows, exit code `0` means success, `2` indicates incomplete coverage (argument errors also use `2`), and `130` indicates an interrupted collection. CLI help, progress messages, and daily Markdown reports are currently in Chinese; posters and post text are in English.
-
-### 5. Generate last week's poster and post text
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py --db data/raw/manual_updown.sqlite3
-```
-
-The default selects the previous complete Monday-to-Sunday week using the UTC date at startup. To select a specific week:
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_weekly_poster.py \
-  --week-start 2026-09-14 --db data/raw/manual_updown.sqlite3
-```
-
-This writes `updown_weekly_2026-09-14_2026-09-20.png`, matching `.json`, and `_tweet.md` files under `outputs/posters/`. It reads the local database without collecting data. All seven target days must be complete; comparisons use the preceding complete week and display `N/A` for missing or zero baselines.
-
-Weekly wallets are deduplicated across the entire week. Suspected-bot labels persist from the first qualifying UTC market-end date onward. The weekly count is the union of active labelled wallets; volume includes their activity on and after that first date. Future labels never apply to earlier dates. Post text uses a 280-character budget.
-The default weekly entry also generates the approved all-wallet/suspected-bot BUY distribution PNG/JSON, updates English and Chinese captions, and writes two English images and six Douyin cards to the publish manifest. Use `--without-distribution` for the original package.
-
-The production weekly timer runs `polymarket_kaggle_reports.py --kind weekly` to read cloud results. Timers are local configuration and are not installed by cloning this repository. See the [operations guide](docs/kaggle_migration.md) for production scheduling and the [weekly poster guide](docs/updown_weekly_poster.md) for manual rendering.
-
-### 6. Generate the previous month's poster and post text
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_monthly_poster.py --db data/raw/manual_updown.sqlite3
-```
-
-The UTC date at startup selects the previous complete calendar month and compares it with the month before that. For example, a run on October 1, 2026 reports September against August. Year boundaries and leap years are supported. To specify a historical month, database, and output directory:
-
-```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_monthly_poster.py \
-  --month 2026-09 \
-  --db data/raw/manual_updown.sqlite3 \
-  --output-dir outputs/posters
-```
-
-This writes `updown_monthly_2026-09.png`, matching `.json`, and `_tweet.md` files. Rerunning the same month replaces its outputs. The monthly palette uses ivory, forest green, and graphite to distinguish it from the dark blue daily and burgundy-and-gold weekly posters. Post text uses the ordinary X post budget of 280 characters.
-
-Wallets are deduplicated across the month, and daily averages use each month's actual day count. Bot labels persist from the first qualifying date onward; monthly counts use active-wallet unions and exclude activity before the first hit. Monthly share changes use percentage points. The poster includes daily trends and asset shares; series launches are disclosed in the poster and post text.
-The monthly entry includes the approved BUY distribution page by default, with matching English text, Chinese text, six Douyin cards and a two-image English manifest. Both BUY populations use the same reconstruction and persistent-label rules as daily reports. `--without-distribution` keeps the original package. See [publishing rules](docs/updown_publishing.md).
-
-Weekly and monthly reports share a query that aggregates one day at a time, with both comparison periods read in one read-only transaction. Monthly reporting does not collect data. Initialize the views through the collector and prepare both months before running it. An incomplete target month exits with code `2` without generating new files; an incomplete prior month or a zero comparison baseline displays `N/A` for the affected comparison.
-
-**Scheduled runs:** the production `polymarket-updown-monthly.timer` checks cloud results at **12:30 Asia/Tokyo on day 1 of each month** (11:30 Beijing time, 03:30 UTC). Its service runs `polymarket_kaggle_reports.py --kind monthly`, rather than the manual SQLite command above. Due periods are retained in the local state file; a separate timer retries pending reports every 30 minutes. Existing assets are preserved. See the [operations guide](docs/kaggle_migration.md) for the daily and weekly schedules, deployment cutoff, and restart order.
-
-The service and timer are local configuration and are not installed by cloning this repository. On a configured host, inspect status and logs with:
-
-```bash
-systemctl --user status polymarket-updown-monthly.timer
-journalctl --user -u polymarket-updown-monthly.service
-```
-
-**One-time adjustment to the first report:** the adjusted September-versus-August 2026 report explicitly excludes 214 unavailable ZEC slots from August under specific user authorization. The poster and post text disclose the exclusion, and the JSON records the exact list. That report and its one-time rebuild script remain in local `outputs/`; they do not change the standard reporting rules. Daily, weekly, and future monthly reports retain completeness checks, and the standard `--month 2026-09` command also follows the strict behavior above.
-
-See the [monthly poster guide](docs/updown_monthly_poster.md).
-
-## How to interpret the data
-
-| Metric or behavior | Definition |
+| What you see | How to interpret it |
 | --- | --- |
-| Date | UTC date of the market's `endDate`, not its settlement confirmation or individual trade date. All returned trades for selected markets are included, including early and cross-day trades. |
-| Market volume | Derived from each complete market's trade groups: sum the integer micro-USDC amount on the earliest saved page/row in each `group_id`. Used for poster totals, trends, and asset shares. |
-| Wallet volume | Buy expenditure plus sell proceeds. Each record's `price × size` is rounded using `ROUND_HALF_UP` to integer micro-USDC before summing. This is not a single-sided market-volume metric. |
-| Unique wallets | Lowercase wallet addresses deduplicated across all selected markets in the day, week, or month. Weekly and monthly counts are not sums of daily wallet counts. |
-| Top 200 | Wallets ranked by aggregated volume descending, then address ascending to break ties. |
-| Suspected bots in posters | First observed daily hit across all crypto Up/Down series: average trade interval ≤60 seconds and span ≥90 minutes. Labels persist from that date onward, with no future backfill. Daily, weekly and monthly statistics share the registry. This is a behavioral heuristic, not identity verification. |
-| Completeness | Expected per-series market counts plus completed trade pagination. This is API collection coverage, not a full on-chain reconciliation. |
+| `collection_status.json`: `status: complete`, with complete coverage | Finished daily snapshot under the project's collection and analysis checks |
+| `status: incomplete` | Recovery checkpoint; some markets or pages still need collection, or analysis has an error |
+| Completed market with no returned records | Zero recorded activity for that market |
+| Missing/incomplete market, date, or comparison period | Unknown or unavailable, not zero |
+| Analysis `index.json`: result entry with `status: complete` | Prepared report available in the named file |
 
-The collector uses `/v2/trades` with `taker_only=false`, `filter_type=TOKENS`, `filter_amount=1e-18`, and `limit=1000`, following cursors until `next_cursor=null`. It preserves every wallet record and assigns a short `group_id` within each market, retaining the original page/row order. Market volume and BUY-event reconstruction share these groups; choosing the first saved row as an anchor is this project's method, not a claim that the API guarantees that ordering permanently. Poster wallet amounts sum BUY only. With a distribution, the overview bot panel uses the same reconstructed BUY-event totals and Up-equivalent denominator as the distribution; the ratio measures participation coverage, not labelled wallets' own cash contribution. Classification features retain the BUY+SELL activity rule.
+Coverage measures expected markets, discovered markets, and completed trade pagination. It does not establish full on-chain completeness or verify every record against the blockchain. Weekly and monthly results require all target dates to be complete. Missing or zero comparison baselines appear as `N/A`.
 
-Production backfills history on Kaggle after fresh dates. Older cloud databases are converted and published as new versions on Kaggle; previous Dataset versions are not automatically deleted. The local historical database remains untouched. Missing or incomplete target dates cannot form a complete period, and missing comparison periods display `N/A`. Earlier valid bot hits found during backfill can update cloud statistics; local historical assets are not automatically overwritten.
+## Files and database schema
 
-The legacy [`README_BTC5M.md`](README_BTC5M.md) describes a different workflow: BTC 5-minute summaries use the **UTC market start date** and top 10 wallets. Its manual bot-analysis query also uses different date and threshold rules. Use the definitions above for the all-series workflow.
+### Daily raw dataset
 
-## SQL access
-
-In Kaggle, attach a daily dataset to a separate viewing Notebook and open its `data.sqlite3` with Python's `sqlite3` module. To inspect a preserved local database manually, use the optional `sqlite3` CLI:
-
-```bash
-sqlite3 -readonly -header -column data/raw/btc5m.sqlite3 <<'SQL'
-SELECT * FROM updown_coverage WHERE date_utc = '2026-09-18';
-SELECT * FROM updown_series_coverage
-WHERE date_utc = '2026-09-18' AND NOT is_complete;
-SELECT * FROM updown_daily_summary WHERE date_utc = '2026-09-18';
-SQL
-```
-
-The summary and ranking views return only complete days. Existing snapshots use their saved views; new manual databases receive these views during collection.
-
-## Project layout and documentation
-
-| Path | Purpose |
+| File | Contents |
 | --- | --- |
-| [`scripts/`](scripts/) | Collection, offline reports, and poster generation |
-| [`sql/`](sql/) | SQLite schema, coverage views, wallet statistics, and poster queries |
-| [`tests/`](tests/) | Collection, calculation, and rendering tests |
-| [`assets/`](assets/) | Poster background and bundled font; font license in [`Inter-OFL.txt`](assets/fonts/Inter-OFL.txt) |
-| [`kaggle/`](kaggle/) | Public producer entrypoint and Kaggle metadata |
-| `data/raw/` | Preserved local snapshots and optional manual databases; ignored by Git |
-| `outputs/` | Generated reports and posters; ignored by Git |
+| `data.sqlite3` | Market metadata, wallet trade records, collection progress, and SQL views |
+| `collection_status.json` | Date, completeness, coverage counts, errors, raw schema version, group key, and volume method |
+| `README.md` | Dataset description and collection definitions |
+| `migration_summary.json` | Present in the converted example version; counts and comparison results for the v1-to-v2 migration |
 
-Detailed guides are currently in Chinese:
+A **completed raw schema v2** database has the three entity tables below and SQL views, including the series catalog view. Fields without `NOT NULL` may contain `NULL`. See the [schema source](sql/btc5m_schema.sql) for exact constraints.
 
-- [All-series collection and reporting](docs/updown_daily.md)
-- [Poster generation and metric definitions](docs/updown_poster.md)
-- [Weekly posters, post text, and scheduled runs](docs/updown_weekly_poster.md)
-- [Monthly posters, post text, and scheduled runs](docs/updown_monthly_poster.md)
-- [Legacy BTC 5-minute guide](README_BTC5M.md)
-- [BTC collector implementation notes](docs/btc5m_daily.md)
-- [Market-series inventory](reports/crypto_updown_market_types_2026-09-17.md)
+**`markets` — one row per market or expected market slot**
 
-## Development
+| Column | SQLite type / constraint | Meaning |
+| --- | --- | --- |
+| `slug` | TEXT, primary key | Market slug; join key for the other tables |
+| `date_utc` | TEXT, NOT NULL | Legacy UTC market **start** date (`YYYY-MM-DD`) |
+| `market_id` | TEXT | Upstream market identifier |
+| `condition_id` | TEXT, UNIQUE | Upstream condition identifier; absent for an undiscovered slot |
+| `event_id` | TEXT | Upstream event identifier |
+| `title` | TEXT | Market question/title |
+| `series_slug` | TEXT | Series identifier in the catalog |
+| `event_start_time` | TEXT | Upstream market start time |
+| `end_time` | TEXT | Market end time; its UTC date selects the daily dataset |
 
-Install `requirements-kaggle.txt`, then run the offline test suite:
+**`collection_progress` — one progress row per collected market**
 
-```bash
-.venv-btc5m/bin/python -m unittest discover -s tests -v
-```
+| Column | SQLite type / constraint | Meaning |
+| --- | --- | --- |
+| `market_slug` | TEXT, primary key, foreign key → `markets.slug` | Market being collected |
+| `query_params` | TEXT | Serialized collection request parameters |
+| `next_cursor` | TEXT | Cursor for the next page; `NULL` can mean not started or exhausted, so check `completed_at` |
+| `committed_page` | INTEGER, NOT NULL, default 0 | Number of the last committed page |
+| `completed_at` | TEXT | Collection completion time; `NULL` while unfinished |
+| `last_error` | TEXT | Last recorded collection error, if any |
 
-Tests cover pagination and resumption, detail lookups, historical launch boundaries, atomic page commits, UTC date boundaries, shared-database compatibility, decimal rounding, coverage gaps, bot thresholds, calendar months across year boundaries and leap years, monthly wallet deduplication, daily-average comparisons, post length, and poster layout. When reporting a problem or proposing a change, include the command, expected behavior, and a reproducible example without local credentials or raw database files.
+**`trades` — one wallet-perspective record per saved API row**
 
-## License
+| Column | SQLite type / constraint | Meaning |
+| --- | --- | --- |
+| `market_slug` | TEXT, NOT NULL, foreign key → `markets.slug` | Market join key; part of primary key |
+| `page_number` | INTEGER, NOT NULL | Saved API page number; part of primary key |
+| `row_number` | INTEGER, NOT NULL | Position within that page; part of primary key |
+| `wallet` | TEXT, NOT NULL | Lowercase wallet address reported by the API |
+| `group_id` | INTEGER, NOT NULL, >0 | Market-local group of rows sharing an upstream transaction hash |
+| `timestamp` | INTEGER, NOT NULL | Trade timestamp, Unix seconds |
+| `side` | TEXT, NOT NULL | `BUY` or `SELL` from this wallet's perspective |
+| `outcome` | TEXT, NOT NULL | Outcome label, normally `Up` or `Down` |
+| `outcome_index` | INTEGER, NOT NULL | Upstream outcome index |
+| `token_id` | TEXT, NOT NULL | Upstream outcome-token identifier |
+| `raw_price` | TEXT, NOT NULL | Original decimal price, stored as text to preserve precision |
+| `raw_size` | TEXT, NOT NULL | Original decimal share quantity |
+| `amount_micro_usdc` | INTEGER, NOT NULL | `price × size`, rounded per row to micro-USDC using `ROUND_HALF_UP` |
 
-This project is licensed under the [MIT License](LICENSE), except for third-party materials with their own licenses. MIT permits commercial use, modification, and redistribution, including in closed-source projects, provided the copyright and license notices are retained. The software is provided without warranty.
+The composite trade primary key is **`(market_slug, page_number, row_number)`**. A group can contain multiple wallet rows and multiple counterparty matches; `group_id` is not an independent fill identifier. Use **`(market_slug, group_id)`** together. Group numbers are internal to a snapshot, not stable identifiers across re-collection or dataset versions. Completed v2 files do not retain transaction hashes, so those files cannot directly link a row to a chain transaction.
 
-The bundled Inter font remains under the [SIL Open Font License 1.1](assets/fonts/Inter-OFL.txt). Dependencies retain their respective licenses. The MIT License does not grant rights to third-party market data or services accessed by these tools.
+An incomplete snapshot may also contain `pending_group_map(market_slug, transaction_hash, group_id)` to resume grouping across pages. The collector removes each completed market's mapping and drops the empty table when finishing the day. The former `market_volume` entity table is removed in v2; `updown_market_volume_daily` below is a calculated view.
+
+**All-series SQL views**
+
+| View | Columns / purpose |
+| --- | --- |
+| `updown_target_series` | `series_slug`, `expected_markets`, `first_end_time` — catalog and configured first-market-end boundary |
+| `updown_series_coverage` | `date_utc`, `series_slug`, `expected_markets`, `discovered_markets`, `completed_markets`, `committed_pages`, `is_complete` |
+| `updown_coverage` | Same coverage counts aggregated by `date_utc`, without `series_slug` |
+| `updown_market_volume_daily` | `date_utc`, `market_volume_micro_usdc`; `NULL` if coverage is incomplete |
+| `updown_wallet_daily` | `date_utc`, `wallet`, `amount_micro_usdc` — BUY expenditure + SELL proceeds, complete days only |
+| `updown_wallet_ranked` | Wallet daily fields plus `wallet_rank`, ordered by amount descending, then address ascending |
+| `updown_daily_summary` | `date_utc`, `unique_wallets`, `wallet_total_micro_usdc`, `top200_micro_usdc`, `top200_share` (0–1 ratio), `market_volume_micro_usdc` |
+
+See [view definitions](sql/updown_daily.sql). Some databases also include legacy `btc5m_*` views with different date and ranking rules; use the `updown_*` views for this dataset.
+
+### Monthly analysis dataset
+
+| File | Contents / usage |
+| --- | --- |
+| `index.json` | Available result keys, filenames, date ranges, and completion status |
+| `daily_YYYY-MM-DD.json` | Finished daily report and BUY distribution |
+| `weekly_YYYY-MM-DD.json` | Finished Monday-to-Sunday report; filename uses the Monday date |
+| `monthly_YYYY-MM.json` | Finished calendar-month report |
+| `features.sqlite3` | Daily features for aggregation and label recalculation; no individual raw trade rows |
+| `progress.json` | Producer recovery state, when present; use `index.json` to discover ready reports |
+
+A weekly result is stored in the monthly dataset containing its **last included UTC date**. Only completed results are added to the index; future weeks or months are not implied by the filename of the container.
+
+Report JSON uses schema version 1, separate from raw schema version 2. Each report includes `kind`, `target_utc`, `start_date_utc`, `end_date_utc_exclusive`, `status`, `source_versions`, `payload`, and `distribution`. `source_versions` identifies the raw dataset and version for each date. Daily reports use `raw_schema_version` and `volume_method`; weekly/monthly reports use the per-date maps `raw_schema_versions` and `volume_methods`. Read `payload` for overview statistics and `distribution` for reconstructed BUY statistics.
+
+The [feature database](scripts/polymarket_kaggle_analysis.py) has three tables:
+
+| Table | Columns |
+| --- | --- |
+| `days` | `date_utc` TEXT primary key; `features_json`, `result_json` TEXT |
+| `wallet_days` | `(date_utc, wallet)` TEXT composite primary key; `trade_count`, `first_timestamp`, `last_timestamp` INTEGER; `amount_micro_usdc` TEXT containing an integer BUY-only amount |
+| `daily_hits` | `(date_utc, wallet)` TEXT composite primary key for wallets meeting the daily behavior rule |
+
+`wallet_days.trade_count` counts BUY and SELL wallet records for the behavior rule. Its amount field and the report's `payload.current.wallet_volume_micro_usdc` sum **BUY only**, unlike `updown_wallet_daily`. `daily_hits` records wallets qualifying on that date, not all wallets carrying a label from an earlier date. These tables support reports; they do not replace the raw database for trade-level research.
+
+## Metric definitions and limits
+
+- **Records are wallet perspectives.** Collection uses public `/v2/trades` with `taker_only=false` and preserves the returned rows. Buyer, seller, aggregate, and counterparty rows can represent related economic activity. `COUNT(*)` is a wallet-record count, not an independent matched-trade count. Summing every row's amount is not single-sided market volume, and dividing by two is not a general reconstruction rule.
+- **Market volume uses a declared project method.** `wallet_group_first_row_v1` takes the earliest saved page/row in each `(market_slug, group_id)` and sums its micro-USDC amount. This preserved the earlier taker-side cash metric in the verified snapshot below. It depends on observed API row structure; it is not a documented guarantee of future API ordering or a reconciliation to Polymarket's displayed volume. See the [volume query](scripts/polymarket_market_volume_query.py).
+- **The report keeps a compatibility label.** JSON `volume_basis: taker_only` names that retained cash metric. Current schema v2 collection uses `taker_only=false` once; the label does not mean a separate `taker_only=true` request was made.
+- **BUY distribution is a separate metric.** The [reconstruction code](scripts/polymarket_updown_price_distribution.py) derives counterparty matches and normalizes prices to the Up outcome. Its notional is Up-equivalent price × shares, not wallet cash expenditure or holdings. The bot participation share measures events covered by at least one labelled BUY participant, rather than those wallets' own cash contribution.
+- **Bot labels are behavior estimates.** A wallet qualifies when its observed daily records span at least 90 minutes and average at most 60 seconds apart across the covered series. Labels apply from the first qualifying observed UTC market-end date onward, never retroactively from a future date. Incomplete history makes labels provisional; discovering an earlier hit can revise reports. This does not verify who controls a wallet.
+- **Wallet counts are deduplicated within the requested period.** Weekly/monthly unique wallets are not sums of daily unique-wallet counts. A wallet address is not necessarily a person.
+
+## Evidence you can inspect
+
+The [2026-11-09 raw version 2](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2) includes `migration_summary.json`. It records the comparison with raw version 1:
+
+| Check | Recorded result |
+| --- | ---: |
+| Wallet rows preserved | 1,916,447 |
+| Market/transaction groups | 686,988 |
+| Markets compared | 3,295 |
+| Markets whose derived amount differs from the prior API summary | **0** |
+| Derived market volume | 9,786,444.035628 USDC |
+| SQLite file size, before → after | 547,946,496 → 378,290,176 bytes (**30.96% smaller**) |
+| Existing wallet features, daily behavior hits, and BUY statistics | Unchanged |
+
+The implementation at [`c16edb8`](https://github.com/slowchillchill/predict-market-analysis/tree/c16edb8353aa78fe6229bc3e164f13788d1e1296) passed **340 tests**. A real two-session collection also resumed 3,209 wallet records across four pages and retained existing rows and group IDs. See the [recorded validation](docs/kaggle_migration.md), [grouping tests](tests/test_polymarket_trade_groups.py), and [migration tests](tests/test_polymarket_kaggle_migration.py). These are project checks, not an independent audit or proof of complete upstream history.
+
+For reproducible analysis, record the **raw and analysis dataset versions**, the raw schema version, and the volume method. Read the completion metadata and report source references with your results. Recheck those references when changing versions; internal group numbers are not cross-version join keys.
+
+Market discovery comes from the [Polymarket Gamma API](https://gamma-api.polymarket.com); trade records come from the [public trade API](https://docs.polymarket.com/api-reference/feeds/list-trades). Coverage can be affected by upstream availability and API changes. If you find an issue, [open an issue](https://github.com/slowchillchill/predict-market-analysis/issues) with the dataset/version, date, affected market or query, and expected versus observed result.
+
+## License and further documentation
+
+Repository code is [MIT licensed](LICENSE). Published dataset metadata declares **CC0-1.0** for the contributed compilation. This does not remove upstream rights, notices, or applicable [Polymarket terms](https://polymarket.com/tos); see [CC0](https://creativecommons.org/publicdomain/zero/1.0/).
+
+| Documentation | Use it for |
+| --- | --- |
+| [Daily analysis](docs/updown_daily.md) | Detailed discovery, coverage, and reporting rules |
+| [BUY distribution definitions](docs/updown_bot_price_poster.md) | Reconstruction and distribution denominators |
+| [Daily](docs/updown_poster.md), [weekly](docs/updown_weekly_poster.md), [monthly](docs/updown_monthly_poster.md) poster guides | Rendering reports and post text from project tools |
+| [Kaggle operations](docs/kaggle_migration.md) | Running your own collector, scheduling, and report consumer |
+| [Publishing guide](docs/updown_publishing.md) | Generated image and caption packages |
+| [Legacy BTC 5-minute workflow](README_BTC5M.md) | Earlier start-date-based summaries; different from the all-series dataset |
