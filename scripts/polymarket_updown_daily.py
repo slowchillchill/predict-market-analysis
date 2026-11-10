@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 import polymarket_btc5m_daily as core
@@ -41,19 +42,29 @@ ENGLISH_MONTHS = ("january", "february", "march", "april", "may", "june",
                   "july", "august", "september", "october", "november", "december")
 
 
-def connect_database(path: Path) -> sqlite3.Connection:
+def connect_database(path: Path, *, series_first_end: dict[str, str] | None = None) -> sqlite3.Connection:
     db = core.connect_database(path)
     db.executescript((core.ROOT / "sql/market_volume_schema.sql").read_text())
+    set_series_first_end(db, series_first_end)
+    db.executescript((core.ROOT / "sql/updown_daily.sql").read_text())
+    return db
+
+
+def set_series_first_end(db: sqlite3.Connection, first_ends: dict[str, str] | None = None) -> None:
+    """将云端冻结的系列首期结束时间写进目录视图，不更改模块全局默认值。"""
+    bounds = {**SERIES_FIRST_END_UTC, **(first_ends or {})}
     # 目录只在此定义；持久化视图让 sqlite3 与离线报告使用同一目录。
     values = ", ".join(
-        f"('{slug}', {count}, " + (f"'{SERIES_FIRST_END_UTC[slug]}'" if slug in SERIES_FIRST_END_UTC else "NULL") + ")"
+        f"('{slug}', {count}, " + (f"'{utc_time(bounds[slug]).isoformat()}'" if bounds.get(slug) else "NULL") + ")"
         for slug, count in TARGET_SERIES.items())
     db.executescript(
         "DROP VIEW IF EXISTS updown_target_series; "
         "CREATE VIEW updown_target_series(series_slug, expected_markets, first_end_time) AS VALUES " + values + ";"
     )
-    db.executescript((core.ROOT / "sql/updown_daily.sql").read_text())
-    return db
+
+
+def series_first_end(db: sqlite3.Connection) -> dict[str, str | None]:
+    return {row[0]: row[1] for row in db.execute("SELECT series_slug,first_end_time FROM updown_target_series")}
 
 
 def utc_time(value: str) -> datetime:
@@ -64,7 +75,7 @@ def midnight(day: date) -> datetime:
     return datetime.combine(day, datetime.min.time(), timezone.utc)
 
 
-def expected_slots(series: str, day: date):
+def expected_slots(series: str, day: date, *, first_ends: dict[str, str | None] | None = None):
     """给出已知系列计划中的结束时点；详情返回的市场元数据决定最终归属。"""
     count = TARGET_SERIES[series]
     step = timedelta(seconds=86400 // count)
@@ -72,7 +83,7 @@ def expected_slots(series: str, day: date):
     if count == 1:
         ended = datetime.combine(day, datetime.min.time(), ZoneInfo("America/New_York")).replace(
             hour=12).astimezone(timezone.utc)
-    first = SERIES_FIRST_END_UTC.get(series)
+    first = (first_ends if first_ends is not None else SERIES_FIRST_END_UTC).get(series)
     while ended < midnight(day + timedelta(days=1)):
         if first is None or ended >= utc_time(first):
             yield ended
@@ -124,11 +135,13 @@ def save_event(db: sqlite3.Connection, event: dict, series: str, start: date, en
 
 
 def discover_series(db: sqlite3.Connection, client: core.Client, series: str,
-                    start: date, end: date) -> None:
+                    start: date, end: date, *, should_yield: Callable[[], bool] | None = None) -> None:
+    core.check_pause(should_yield)
     series_rows = client.get(GAMMA_SERIES, {"slug": series})
     series_id = next(row["id"] for row in series_rows if row["slug"] == series)
     cursor = None
     while True:
+        core.check_pause(should_yield)
         params = {
             "series_id": series_id, "end_date_min": midnight(start).isoformat(),
             "end_date_max": midnight(end).isoformat(), "limit": EVENT_PAGE_SIZE,
@@ -140,12 +153,14 @@ def discover_series(db: sqlite3.Connection, client: core.Client, series: str,
         with db:
             for event in page["events"]:
                 save_event(db, event, series, start, end)
+        core.check_pause(should_yield)
         cursor = page.get("next_cursor")
         if not cursor:
             return
 
 
-def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start: date, end: date) -> None:
+def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start: date, end: date, *,
+                             should_yield: Callable[[], bool] | None = None) -> None:
     """补查列表接口未返回的预期时段；404 等失败保留为覆盖缺口。"""
     existing = {}
     for row in db.execute(
@@ -154,26 +169,32 @@ def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start:
         ended = utc_time(row["end_time"])
         existing.setdefault((row["series_slug"], ended.date()), set()).add(ended)
     day = start
+    first_ends = series_first_end(db)
     while day < end:
         for series in TARGET_SERIES:
-            for ended in expected_slots(series, day):
+            for ended in expected_slots(series, day, first_ends=first_ends):
                 if ended in existing.get((series, day), set()):
                     continue
                 slug = market_slug(series, ended)
+                core.check_pause(should_yield)
                 try:
                     event = client.get(GAMMA_EVENT_SLUG + slug, {})
                     with db:
                         save_event(db, event, series, start, end)
                     print(f"详情补查 {slug} 完成", flush=True)
+                except core.RateLimitError:
+                    raise
                 except (core.FetchError, KeyError, TypeError, ValueError) as exc:
                     print(f"详情补查 {slug} 未完成：{exc}", file=sys.stderr, flush=True)
+                core.check_pause(should_yield)
         day += timedelta(days=1)
 
 
 def coverage(db: sqlite3.Connection, day: str) -> dict:
     row = db.execute("SELECT * FROM updown_coverage WHERE date_utc=?", (day,)).fetchone()
     status = dict(row) if row else dict(date_utc=day, expected_markets=sum(
-                                     sum(1 for _ in expected_slots(s, date.fromisoformat(day))) for s in TARGET_SERIES),
+                                     sum(1 for _ in expected_slots(s, date.fromisoformat(day),
+                                                                  first_ends=series_first_end(db))) for s in TARGET_SERIES),
                                      discovered_markets=0, completed_markets=0,
                                      committed_pages=0, is_complete=0)
     # 旧库仍可只读生成历史钱包报告；缺失单边数据不视为零。
@@ -182,14 +203,30 @@ def coverage(db: sqlite3.Connection, day: str) -> dict:
     return status
 
 
-def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date) -> None:
+def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date, *,
+            should_yield: Callable[[], bool] | None = None, retry_failed: bool = True) -> None:
+    first_ends = series_first_end(db)
     for index, series in enumerate(TARGET_SERIES, 1):
+        core.check_pause(should_yield)
+        if first_ends.get(series) and utc_time(first_ends[series]) >= midnight(end):
+            continue
         try:
-            discover_series(db, client, series, start, end)
+            discover_series(db, client, series, start, end, should_yield=should_yield)
             print(f"发现 [{index}/{len(TARGET_SERIES)}] {series} 完成", flush=True)
+        except core.RateLimitError:
+            raise
         except (core.FetchError, KeyError, TypeError, ValueError, StopIteration) as exc:
             print(f"发现 {series} 未完成：{exc}", file=sys.stderr, flush=True)
-    discover_missing_markets(db, client, start, end)
+    # 首轮遍历后仅重试尚未完成的市场；永久参数/数据错误不在同次任务中盲目重复。
+    blocked: set[tuple[str, str]] = set()
+    for _ in range(2 if retry_failed else 1):
+        discover_missing_markets(db, client, start, end, should_yield=should_yield)
+        _collect_pending(db, client, start, end, blocked, should_yield=should_yield)
+
+
+def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, end: date,
+                     blocked: set[tuple[str, str]], *,
+                     should_yield: Callable[[], bool] | None = None) -> None:
     pending = db.execute(
         "SELECT m.slug FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug "
         "JOIN collection_progress p ON p.market_slug=m.slug "
@@ -199,13 +236,22 @@ def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date)
     ).fetchall()
     for index, row in enumerate(pending, 1):
         slug = row["slug"]
+        if ("wallet", slug) in blocked:
+            continue
+        core.check_pause(should_yield)
         try:
-            core.collect_market(db, client, slug)
+            core.collect_market(db, client, slug, should_yield=should_yield)
             print(f"成交 [{index}/{len(pending)}] {slug} 完成", flush=True)
+        except core.RateLimitError as exc:
+            with db:
+                db.execute("UPDATE collection_progress SET last_error=? WHERE market_slug=?", (str(exc), slug))
+            raise
         except (core.FetchError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
             with db:
                 db.execute("UPDATE collection_progress SET last_error=? WHERE market_slug=?", (str(exc), slug))
             print(f"成交 [{index}/{len(pending)}] {slug} 未完成：{exc}", file=sys.stderr, flush=True)
+            if not isinstance(exc, core.FetchError) or (exc.status_code is not None and exc.status_code < 500):
+                blocked.add(("wallet", slug))
     pending_volume = db.execute(
         "SELECT m.slug FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug "
         "LEFT JOIN market_volume v ON v.market_slug=m.slug "
@@ -215,13 +261,22 @@ def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date)
     ).fetchall()
     for index, row in enumerate(pending_volume, 1):
         slug = row["slug"]
+        if ("volume", slug) in blocked:
+            continue
+        core.check_pause(should_yield)
         try:
-            market_volume.collect_market(db, client, slug)
+            market_volume.collect_market(db, client, slug, should_yield=should_yield)
             print(f"单边成交 [{index}/{len(pending_volume)}] {slug} 完成", flush=True)
+        except core.RateLimitError as exc:
+            with db:
+                db.execute("UPDATE market_volume SET last_error=? WHERE market_slug=?", (str(exc), slug))
+            raise
         except (core.FetchError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
             with db:
                 db.execute("UPDATE market_volume SET last_error=? WHERE market_slug=?", (str(exc), slug))
             print(f"单边成交 [{index}/{len(pending_volume)}] {slug} 未完成：{exc}", file=sys.stderr, flush=True)
+            if not isinstance(exc, core.FetchError) or (exc.status_code is not None and exc.status_code < 500):
+                blocked.add(("volume", slug))
 
 
 def report_day(db: sqlite3.Connection, day: str, output: Path) -> bool:
@@ -287,10 +342,10 @@ def report_day(db: sqlite3.Connection, day: str, output: Path) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    cp = commands.add_parser("collect", help="经香港代理下载指定 UTC 日期结束的市场全部成交")
+    cp = commands.add_parser("collect", help="下载指定 UTC 日期结束的市场全部成交")
     cp.add_argument("--start-date", type=date.fromisoformat, required=True, help="包含该 UTC 结束日")
     cp.add_argument("--end-date", type=date.fromisoformat, required=True, help="不包含该 UTC 结束日")
-    cp.add_argument("--proxy", required=True, help="本机香港代理 URL")
+    cp.add_argument("--proxy", help="可选代理 URL；省略时直接联网")
     rp = commands.add_parser("report", help="完全离线生成按市场结束日统计的报告")
     rp.add_argument("--date", type=date.fromisoformat, required=True)
     rp.add_argument("--output-dir", type=Path, default=core.ROOT / "outputs/updown")
@@ -331,8 +386,6 @@ def main(argv: list[str] | None = None) -> int:
             db.close()
     if args.start_date >= args.end_date:
         parser.error("--end-date 必须晚于 --start-date")
-    if not args.proxy.strip():
-        parser.error("--proxy 必须指定本机香港代理 URL")
     started = time.monotonic()
     db = connect_database(args.db)
     client = core.Client(args.proxy)

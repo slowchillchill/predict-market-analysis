@@ -1,0 +1,10 @@
+[Unit]
+Description=First daily Kaggle result check at 09:30 Asia/Tokyo
+
+[Timer]
+OnCalendar=*-*-* 09:30:00 Asia/Tokyo
+Persistent=true
+Unit=polymarket-updown-yesterday.service
+
+[Install]
+WantedBy=timers.target

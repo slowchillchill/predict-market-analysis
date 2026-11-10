@@ -4,7 +4,9 @@
 
 采集 Polymarket 加密货币 Up/Down 市场逐笔成交，在 SQLite 中分析钱包活动，并生成日报、日海报、周海报和月海报，以及适用于 X 的英文推文。
 
-主要流程覆盖 38 个市场系列，按**市场结束日（UTC）**统计。采集支持断点续传，报告和海报通过只读数据库连接离线生成。仓库包含工具、测试和海报素材；生成报告前需要自行下载市场数据。
+主要流程覆盖 38 个市场系列，按**市场结束日（UTC）**统计。生产采集和 SQL 统计在 Kaggle 执行；本地定时下载完成的统计结果并生成海报，不下载原始交易数据库。原有本地采集、只读报告命令保留供手动使用。
+
+公开日库、持续历史补采、Secret 配置、定时任务和本地重试见 [Kaggle 迁移与操作说明](docs/kaggle_migration.md)。
 
 ## 功能
 
@@ -33,6 +35,17 @@
 
 需要 Python 3.10 或更新版本。以下命令适用于 Linux 或 macOS 的 Bash，均在仓库根目录执行。直接运行 SQL 查询时，可选安装 `sqlite3` 命令行工具。
 
+### 生产流程：Kaggle 统计，本地出图
+
+Kaggle CLI 需要 Python 3.11 或更新版本。配置 Kaggle 采集任务和本地 API Token 后，安装完整依赖并检查到期图文：
+
+```bash
+.venv-btc5m/bin/python -m pip install -r requirements-kaggle.txt
+.venv-btc5m/bin/python scripts/polymarket_kaggle_reports.py --kind all
+```
+
+首次运行会记录部署日期。待处理图文保留原目标周期，由配套 systemd 任务每 30 分钟重试；已有图文不会自动覆盖。启用定时任务前请阅读 [操作说明](docs/kaggle_migration.md)。下方命令用于保留的手动本地流程。
+
 ### 1. 安装
 
 ```bash
@@ -59,7 +72,7 @@ python3 -m venv .venv-btc5m
 
 ### 2. 采集数据
 
-采集器要求显式传入 `--proxy`，现有命令行说明和使用流程采用本机香港代理，不会自动读取环境变量中的代理配置。请输入已配置的代理 URL，例如将 `socks5h://127.0.0.1:PORT` 中的端口替换为实际端口：
+采集器省略 `--proxy` 时直接联网，不会自动读取环境变量中的代理配置。下方手动示例沿用本机代理配置；请输入已配置的代理 URL，例如将 `socks5h://127.0.0.1:PORT` 中的端口替换为实际端口：
 
 ```bash
 read -r -p '请输入本机香港代理 URL：' UPDOWN_PROXY

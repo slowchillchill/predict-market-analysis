@@ -4,7 +4,9 @@
 
 Collect trade records from Polymarket crypto Up/Down markets, analyze wallet activity in SQLite, and generate daily reports, daily, weekly and monthly posters, and English post text for X.
 
-The main workflow covers 38 market series and groups markets by their **UTC end date**. Collection is resumable; reporting and poster generation run offline against a read-only database connection. This repository contains the tools, tests, and poster assets; download market data locally before generating reports.
+The main workflow covers 38 market series and groups markets by their **UTC end date**. Production collection and SQL analysis run on Kaggle; the local scheduled workflow downloads completed statistics and renders posters without downloading raw trade databases. The original local collection and read-only reporting commands remain available for manual use.
+
+See the [Kaggle migration and operations guide](docs/kaggle_migration.md) for public daily datasets, continuous historical backfill, Secrets, scheduling, and local retries.
 
 ## Features
 
@@ -32,6 +34,17 @@ Once all series are operating, the configured schedule expects **3,295 markets p
 
 Use Python 3.10 or newer. The commands below use Bash on Linux or macOS and run from the repository root. The `sqlite3` CLI is optional for direct SQL queries.
 
+### Production: Kaggle statistics and local posters
+
+Use Python 3.11 or newer for the Kaggle CLI. After the Kaggle producer and local API token are configured, install the complete dependencies and check due reports:
+
+```bash
+.venv-btc5m/bin/python -m pip install -r requirements-kaggle.txt
+.venv-btc5m/bin/python scripts/polymarket_kaggle_reports.py --kind all
+```
+
+The first run records the deployment date. Pending report periods stay fixed and are retried every 30 minutes by the supplied systemd units. Existing assets are preserved. See the [operations guide](docs/kaggle_migration.md) before enabling the timers. The commands below describe the retained manual local workflow.
+
 ### 1. Install
 
 ```bash
@@ -56,7 +69,7 @@ This fixes yesterday's UTC date at startup using the system clock, collects that
 
 ### 2. Collect data
 
-The collector requires an explicit `--proxy` URL; its CLI and existing setup use a local Hong Kong proxy. It does not read proxy settings from environment variables automatically. Enter your configured URL, for example `socks5h://127.0.0.1:PORT` with your actual port:
+The collector connects directly when `--proxy` is omitted. It does not read proxy settings from environment variables automatically. The manual example below uses the existing local proxy setup; enter your configured URL, for example `socks5h://127.0.0.1:PORT` with your actual port:
 
 ```bash
 read -r -p 'Local Hong Kong proxy URL: ' UPDOWN_PROXY

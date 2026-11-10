@@ -1,0 +1,10 @@
+[Unit]
+Description=Check pending Kaggle report results every 30 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00 Asia/Tokyo
+Persistent=true
+Unit=polymarket-kaggle-reports-retry.service
+
+[Install]
+WantedBy=timers.target

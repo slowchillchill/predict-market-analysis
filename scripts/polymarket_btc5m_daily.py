@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import random
 import sqlite3
 import sys
 import time
@@ -13,15 +15,17 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 SERIES = "btc-up-or-down-5m"
 GAMMA_EVENTS = "https://gamma-api.polymarket.com/events"
 TRADES_URL = "https://data-api.polymarket.com/v2/trades"
 DEFAULT_DB = ROOT / "data/raw/btc5m.sqlite3"
-# 沿用旧入口的 30 秒超时、最多 3 次请求和 0.5 * attempt 秒退避。
+# 每个请求最多三次尝试；所有调用与重试共用同一个限速入口。
 REQUEST_TIMEOUT_SECONDS = 30
 REQUEST_RETRIES = 3
+REQUEST_INTERVAL_SECONDS = 0.5
 DISCOVERY_BATCH_SIZE = 48
 
 
@@ -30,28 +34,61 @@ def utc_now() -> str:
 
 
 class FetchError(Exception):
-    def __init__(self, message: str, *, invalid_cursor: bool = False):
+    def __init__(self, message: str, *, invalid_cursor: bool = False,
+                 status_code: int | None = None, retry_after: float | None = None):
         super().__init__(message)
         self.invalid_cursor = invalid_cursor
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+class RateLimitError(FetchError):
+    """限流重试用尽；上层应暂停全部采集请求并保存进度。"""
+
+
+class CollectionPaused(Exception):
+    """在已提交的分页边界主动让位；不是市场采集错误。"""
+
+
+def check_pause(should_yield: Callable[[], bool] | None) -> None:
+    if should_yield is not None and should_yield():
+        raise CollectionPaused("采集在已提交的分页边界暂停")
+
+
+def retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        delay = float(value)
+    except ValueError:
+        try:
+            delay = parsedate_to_datetime(value).timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return max(0.0, delay) if math.isfinite(delay) else None
 
 
 class Client:
-    def __init__(self, proxy: str):
+    def __init__(self, proxy: str | None = None, *, request_interval: float = REQUEST_INTERVAL_SECONDS):
         # 离线 report 不需要加载 requests，也不创建网络会话。
         import requests
 
         self.requests = requests
         self.session = requests.Session()
         self.session.trust_env = False
-        self.session.proxies = {"http": proxy, "https": proxy}
+        self.session.proxies = {"http": proxy, "https": proxy} if proxy else {}
         self.session.headers["User-Agent"] = "poly-market-analysis/btc5m"
+        self.request_interval = max(0.0, request_interval)
+        self._next_request_at = 0.0
 
     def close(self) -> None:
         self.session.close()
 
     def get(self, url: str, params: dict) -> object:
         for attempt in range(1, REQUEST_RETRIES + 1):
-            delay = 0.5 * attempt
+            wait = self._next_request_at - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
             try:
                 response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
                 if response.status_code == 200:
@@ -61,31 +98,34 @@ class Client:
                     body = response.json()
                 except ValueError:
                     body = {}
-                message = body.get("error", "") if isinstance(body, dict) else ""
+                message = str(body.get("error", "")) if isinstance(body, dict) else ""
                 invalid_cursor = (
                     response.status_code == 400
                     and isinstance(body, dict)
                     and body.get("code") == "invalid_request"
                     and (body.get("parameter") == "cursor" or "cursor" in message.lower())
                 )
-                error = FetchError(
+                error_type = RateLimitError if response.status_code == 429 else FetchError
+                error = error_type(
                     f"HTTP {response.status_code}: {message or url}",
                     invalid_cursor=invalid_cursor,
+                    status_code=response.status_code,
+                    retry_after=retry_after_seconds(response.headers.get("Retry-After")),
                 )
                 if response.status_code != 429 and response.status_code < 500:
                     raise error
-                retry_after = response.headers.get("Retry-After")
-                if retry_after:
-                    try:
-                        delay = max(0.0, float(retry_after))
-                    except ValueError:
-                        delay = max(0.0, parsedate_to_datetime(retry_after).timestamp() - time.time())
             except (self.requests.RequestException, json.JSONDecodeError) as exc:
                 # 不将可能带有本机代理凭据的异常文本写入数据库或报告。
                 error = FetchError(f"{url}: {type(exc).__name__}")
+            finally:
+                # 完成到下一次请求至少间隔 0.5 秒，涵盖正常调用与内部重试。
+                self._next_request_at = time.monotonic() + self.request_interval
             if attempt == REQUEST_RETRIES:
                 raise error
-            time.sleep(delay)
+            delay = 2 ** attempt + random.uniform(0.0, 0.25)
+            if error.retry_after is not None:
+                delay = max(delay, error.retry_after)
+            self._next_request_at = max(self._next_request_at, time.monotonic() + delay)
         raise AssertionError("不可达分支")
 
 
@@ -129,6 +169,8 @@ def discover(db: sqlite3.Connection, client: Client, start: date, end: date) -> 
         try:
             events = client.get(GAMMA_EVENTS, {"slug": slugs, "limit": len(slugs)})
             by_slug = {event["slug"]: event for event in events}
+        except RateLimitError:
+            raise
         except (FetchError, KeyError, TypeError, ValueError) as exc:
             with db:
                 db.executemany("UPDATE collection_progress SET last_error = ? WHERE market_slug = ?",
@@ -191,18 +233,21 @@ def commit_page(db: sqlite3.Connection, slug: str, page: int, payload: dict) -> 
         )
 
 
-def collect_market(db: sqlite3.Connection, client: Client, slug: str) -> None:
+def collect_market(db: sqlite3.Connection, client: Client, slug: str, *,
+                   should_yield: Callable[[], bool] | None = None) -> None:
+    restarted_cursor = False
     while True:
         progress = db.execute("SELECT * FROM collection_progress WHERE market_slug=?", (slug,)).fetchone()
         if progress["completed_at"] is not None:
             return
+        check_pause(should_yield)
         params = json.loads(progress["query_params"])
         if progress["next_cursor"] is not None:
             params["cursor"] = progress["next_cursor"]
         try:
             payload = client.get(TRADES_URL, params)
         except FetchError as exc:
-            if exc.invalid_cursor and "cursor" in params:
+            if exc.invalid_cursor and "cursor" in params and not restarted_cursor:
                 # 只重建当前未完成市场；旧页与旧游标同时移除。
                 with db:
                     db.execute("DELETE FROM trades WHERE market_slug=?", (slug,))
@@ -210,9 +255,11 @@ def collect_market(db: sqlite3.Connection, client: Client, slug: str) -> None:
                         "UPDATE collection_progress SET committed_page=0, next_cursor=NULL, "
                         "last_error=NULL WHERE market_slug=?", (slug,),
                     )
+                restarted_cursor = True
                 continue
             raise
         commit_page(db, slug, progress["committed_page"] + 1, payload)
+        check_pause(should_yield)
 
 
 def coverage(db: sqlite3.Connection, day: str) -> dict:
@@ -235,6 +282,10 @@ def collect(db: sqlite3.Connection, client: Client, start: date, end: date) -> N
         try:
             collect_market(db, client, slug)
             print(f"[{index}/{len(pending)}] {slug} 完成", flush=True)
+        except RateLimitError as exc:
+            with db:
+                db.execute("UPDATE collection_progress SET last_error=? WHERE market_slug=?", (str(exc), slug))
+            raise
         except (FetchError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
             with db:
                 db.execute("UPDATE collection_progress SET last_error=? WHERE market_slug=?", (str(exc), slug))
@@ -305,10 +356,10 @@ def report_day(db: sqlite3.Connection, day: str, output: Path) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    collect_parser = commands.add_parser("collect", help="经香港代理采集逐笔成交")
+    collect_parser = commands.add_parser("collect", help="采集逐笔成交，可选代理")
     collect_parser.add_argument("--start-date", type=date.fromisoformat, required=True)
     collect_parser.add_argument("--end-date", type=date.fromisoformat, required=True, help="不包含结束日期")
-    collect_parser.add_argument("--proxy", required=True, help="本机香港代理 URL，如 socks5h://127.0.0.1:端口")
+    collect_parser.add_argument("--proxy", help="可选代理 URL；省略时直接联网")
     report_parser = commands.add_parser("report", help="完全离线生成 CSV 和中文报告")
     report_parser.add_argument("--date", type=date.fromisoformat, required=True)
     report_parser.add_argument("--output-dir", type=Path, default=ROOT / "outputs/btc5m")
@@ -325,8 +376,6 @@ def main(argv: list[str] | None = None) -> int:
             db.close()
     if args.start_date >= args.end_date:
         parser.error("--end-date 必须晚于 --start-date")
-    if not args.proxy.strip():
-        parser.error("--proxy 必须指定本机香港代理 URL")
     started = time.monotonic()
     db = connect_database(args.db)
     client = Client(args.proxy)

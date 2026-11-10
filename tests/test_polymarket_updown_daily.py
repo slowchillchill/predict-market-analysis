@@ -185,6 +185,86 @@ class UpdownTests(unittest.TestCase):
             up.collect(self.db, client, START, END)
         self.assertEqual([row[0] for row in self.db.execute("SELECT market_slug FROM market_volume")], ["yesterday"])
 
+    def test_targeted_retry_skips_completed_markets_and_completed_collection_mode(self):
+        self.discover([event("keep", "2026-09-17T00:00:00Z"),
+                       event("failed", "2026-09-17T00:05:00Z"),
+                       event("other", "2026-09-17T00:10:00Z")])
+        up.core.commit_page(self.db, "keep", 1, {"data": [], "pagination": {"next_cursor": None}})
+        calls = {}
+
+        def request(url, params):
+            key = params["condition"], params["taker_only"]
+            calls[key] = calls.get(key, 0) + 1
+            if key == ("condition-failed", "false") and calls[key] == 1:
+                raise up.core.FetchError("HTTP 503", status_code=503)
+            return {"data": [], "pagination": {"next_cursor": None}}
+
+        client = Mock()
+        client.get.side_effect = request
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            up.collect(self.db, client, START, END)
+        self.assertNotIn(("condition-keep", "false"), calls)
+        self.assertEqual(calls[("condition-failed", "false")], 2)
+        self.assertEqual(calls[("condition-other", "false")], 1)
+        self.assertEqual([calls[(f"condition-{slug}", "true")] for slug in ("keep", "failed", "other")], [1, 1, 1])
+
+    def test_nonretryable_market_error_is_not_repeated_in_retry_sweep(self):
+        self.discover([event("bad", "2026-09-17T00:00:00Z")])
+        client = Mock()
+
+        def request(url, params):
+            if params["taker_only"] == "false":
+                raise up.core.FetchError("HTTP 400: bad condition", status_code=400)
+            return {"data": [], "pagination": {"next_cursor": None}}
+
+        client.get.side_effect = request
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            up.collect(self.db, client, START, END)
+        self.assertEqual(client.get.call_count, 2)  # 一次钱包错误，一次成功单边采集。
+        state = self.db.execute("SELECT * FROM collection_progress WHERE market_slug='bad'").fetchone()
+        self.assertIsNone(state["completed_at"])
+        self.assertIn("400", state["last_error"])
+
+    def test_persistent_rate_limit_stops_all_modes_and_preserves_error(self):
+        self.discover([event("first", "2026-09-17T00:00:00Z"),
+                       event("second", "2026-09-17T00:05:00Z")])
+        client = Mock()
+        client.get.side_effect = up.core.RateLimitError("HTTP 429", status_code=429, retry_after=5)
+        with patch.object(up, "discover_series"), patch.object(up, "discover_missing_markets"), \
+             contextlib.redirect_stdout(io.StringIO()), self.assertRaises(up.core.RateLimitError):
+            up.collect(self.db, client, START, END)
+        client.get.assert_called_once()
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM market_volume").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT last_error FROM collection_progress WHERE market_slug='first'").fetchone()[0],
+                         "HTTP 429")
+
+    def test_frozen_launch_boundaries_drive_coverage_and_missing_discovery(self):
+        bounds = {series: "2026-09-18T00:00:00Z" for series in up.TARGET_SERIES}
+        bounds["btc-up-or-down-5m"] = "2026-09-17T23:55:00Z"
+        up.set_series_first_end(self.db, bounds)
+        slots = list(up.expected_slots("btc-up-or-down-5m", START, first_ends=up.series_first_end(self.db)))
+        self.assertEqual(len(slots), 1)
+        self.assertEqual(up.coverage(self.db, str(START))["expected_markets"], 1)
+        client = Mock()
+        slug = up.market_slug("btc-up-or-down-5m", slots[0])
+        client.get.return_value = event(slug, "2026-09-17T23:55:00Z", "2026-09-17T23:50:00Z")
+        with contextlib.redirect_stdout(io.StringIO()):
+            up.discover_missing_markets(self.db, client, START, END)
+        client.get.assert_called_once_with(up.GAMMA_EVENT_SLUG + slug, {})
+        up.core.commit_page(self.db, slug, 1, {"data": [], "pagination": {"next_cursor": None}})
+        self.assertTrue(up.coverage(self.db, str(START))["is_complete"])
+        self.assertEqual(up.SERIES_FIRST_END_UTC.get("btc-up-or-down-5m"), None)
+
+    def test_collect_cli_can_use_direct_network_without_proxy(self):
+        with patch.object(up, "collect"), patch.object(up.core, "Client") as client, \
+             patch.object(up, "coverage", return_value={"is_complete": 1, "market_volume_is_complete": 1}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = up.main(["collect", "--start-date", str(START), "--end-date", str(END), "--db", str(self.path)])
+        self.assertEqual(result, 0)
+        client.assert_called_once_with(None)
+
     def test_collect_exit_failure_when_single_side_is_incomplete(self):
         with patch.object(up, "collect"), patch.object(up.core, "Client"), patch.object(up, "coverage", return_value={
                 "is_complete": 1, "market_volume_is_complete": 0}), contextlib.redirect_stdout(io.StringIO()):

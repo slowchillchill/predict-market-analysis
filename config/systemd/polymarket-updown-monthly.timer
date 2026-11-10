@@ -1,0 +1,10 @@
+[Unit]
+Description=First monthly Kaggle result check on day 1 at 12:30 Asia/Tokyo
+
+[Timer]
+OnCalendar=*-*-01 12:30:00 Asia/Tokyo
+Persistent=true
+Unit=polymarket-updown-monthly.service
+
+[Install]
+WantedBy=timers.target

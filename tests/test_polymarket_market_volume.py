@@ -102,6 +102,25 @@ class MarketVolumeTests(unittest.TestCase):
         self.assertEqual(self.state()["amount_micro_usdc"], 0)
         self.assertIsNotNone(self.state()["completed_at"])
 
+    def test_cooperative_pause_preserves_single_side_and_wallet_progress(self):
+        with self.db:
+            self.db.execute("INSERT INTO collection_progress(market_slug,committed_page,completed_at) "
+                            "VALUES ('market',7,'wallet-done')")
+        wallet = tuple(self.db.execute("SELECT * FROM collection_progress").fetchone())
+        client = Mock()
+        client.get.return_value = payload([trade("0.2")], "page-2")
+        with self.assertRaises(up.core.CollectionPaused):
+            volume.collect_market(self.db, client, "market", should_yield=lambda: self.state()["committed_page"] == 1)
+        client.get.assert_called_once()
+        self.assertEqual(self.state()["amount_micro_usdc"], 200000)
+        self.assertEqual(self.state()["next_cursor"], "page-2")
+        self.assertIsNone(self.state()["last_error"])
+        self.assertEqual(tuple(self.db.execute("SELECT * FROM collection_progress").fetchone()), wallet)
+        client.get.return_value = payload([trade("0.3")])
+        volume.collect_market(self.db, client, "market")
+        self.assertEqual(client.get.call_args.args[1]["cursor"], "page-2")
+        self.assertEqual(self.state()["amount_micro_usdc"], 500000)
+
 
 if __name__ == "__main__":
     unittest.main()
