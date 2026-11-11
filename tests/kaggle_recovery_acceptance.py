@@ -202,6 +202,7 @@ def main():
             phase1 = json.loads(evidence.read_text())
             require(phase1["raw_version"] == 1, "Phase 1 checkpoint is not QA raw v1")
             pipeline._raw_path(DAY, pipeline.state["raw_days"].get(str(DAY)), latest=True)
+            require(pipeline._restored_versions.get(str(DAY)) == 1, "Phase 2 must begin from the untouched phase-1 raw v1")
             with closing(sqlite3.connect(raw_path)) as db:
                 original_rows, original_map = read_page(db), read_map(db)
                 original_cursor = db.execute("SELECT next_cursor FROM collection_progress").fetchone()[0]
@@ -259,6 +260,7 @@ def main():
                             "committed_pages": pages, "rows": rows, "pending_group_count": mapping_rows,
                             "has_cursor": True, "unknown_start_is_null": True, "source_end_time": EXPECTED_END}
             else:
+                require(raw_version == 3, "Phase 2 did not publish checkpoint v2 followed by completed v3")
                 require(status["status"] == "complete" and completed is not None and cursor is None,
                         "Resumed market did not finish completely")
                 require(tables == {"markets", "collection_progress", "trades"}, "Final raw snapshot retained temporary tables")
