@@ -4,7 +4,7 @@
 
 项目名称为 **Polymarket Crypto Updown Markets Analysis**。公开入口使用 `qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis`。部署版本和实际运行结果以部署记录为准。
 
-本文描述本分支的 v3 历史恢复修复及操作顺序，尚不代表该修复已经验收或部署。已发布的 2026-11-09 v2 日库与原报告仍可读取；旧版验收证据和本次修复记录分开保存。
+v3 历史恢复修复已完成代码、云端验收和有限生产恢复。原生 Daily 与本地四个报表定时器已恢复。本文末尾记录实际版本、验收范围和剩余缺口。已发布的 2026-11-09 v2 日库与原报告仍可读取；历史范围尚未补齐。
 
 ## 数据与代码
 
@@ -128,7 +128,7 @@ python scripts/polymarket_kaggle_pipeline.py --max-days 2
 5. 本地从固定版本下载统计 JSON，在新预览目录生成图文，确认未读取原始数据库，已有图文也未被覆盖。
 6. 手动实例结束后恢复云端 Daily，最后恢复本地日、周、月和每 30 分钟重试四个 timer。
 
-运行失败时先停止新实例并暂停 Daily 和本地四个 timer，保留已发布版本与图文。回退代码前确认它能够读取并续写相应日库格式，特别是未知开始日的可空字段；不能假设旧代码可以续写所有 v3 工作库。需要回退时使用兼容的日库版本和对应分析进度；若没有兼容恢复点，采集保持暂停，本地仍可读取已经完成的旧结果 JSON。不要通过伪造开始日期或删除数据集历史版本来强行回退。
+运行失败时先停止新实例并暂停 Daily 和本地四个 timer，保留已发布版本与图文。回退代码前确认它能够读取并续写相应日库格式，特别是未知开始日的可空字段、结算规则列和新的覆盖策略；不能假设旧代码可以续写所有 v3 工作库。需要回退时使用兼容的日库版本和对应分析进度；若没有兼容恢复点，采集保持暂停，本地仍可读取已经完成的旧结果 JSON。不要通过伪造开始日期或删除数据集历史版本来强行回退。
 
 ## 本地安装与定时出图
 
@@ -226,11 +226,11 @@ systemctl --user list-timers --all
 .venv-btc5m/bin/python -m unittest discover -s tests -v
 ```
 
-回归需要覆盖 JSON 出图、固定版本读取、跨日重试、已有文件保留、历史标签更新和周月合并；本次还需验证未知开始日、按原始结束日纳入、变化检查点、不确定发布与旧 v2 兼容。新测试结果和真实恢复运行证据尚待记录；下方 v2 转换与跨会话样本仅是历史证据，不表示本次修复已通过或历史范围已补齐。
+本次完整回归 **420 项通过**，覆盖 JSON 出图、固定版本读取、跨日重试、已有文件保留、历史标签更新、周月合并、未知开始日、原始结束日归属、变化检查点、不确定发布和旧 v2 兼容。云端恢复验收与已知统计缺口见下方记录。下方旧 v2 转换数据仍只说明当时的样本，不证明全历史已补齐。
 
 ## 历史 v2 验收证据（2026-11-10）
 
-以下记录用于复现已经发布的 v2 数据，不代表本次 v3 恢复修复已经验收或部署。
+以下记录用于复现已经发布的 v2 数据。本次 v3 恢复修复的验收另见下一节，两者不能混作同一测试结果。
 
 - v2 实现提交为 [`c16edb8`](https://github.com/slowchillchill/predict-market-analysis/tree/c16edb8353aa78fe6229bc3e164f13788d1e1296)，当时完整回归 340 项通过。
 - [2026-11-09 原始日库 Kaggle 版本 2](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2)是完成的原始格式 v2，保留 1,916,447 条钱包记录、686,988 个交易组与 3,295 个市场。各市场与旧 API 金额对照差异为零，钱包特征、机器人命中和 BUY 业务统计不变；公开 `migration_summary.json` 记录比较结果。
@@ -238,18 +238,54 @@ systemctl --user list-timers --all
 - [2026-11 分析数据集 Kaggle 版本 3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3)引用上述原始日库版本 2。这里的 Kaggle 发布版本 3 不等于本次原始库格式 v3。
 - 当时另以真实两会话续采验证 3,209 条记录、1,200 个组、四页数据，原行与组号不变；完成后清空映射并形成三表日库。这个样本证明当时的续采机制，不证明历史范围已经补齐。
 
-## 本次 v3 修复与待验收部署记录（2026-11-11）
+## 本次 v3 修复验收与生产恢复记录（2026-11-11）
 
-本次修复包括：未知真实开始时间保留为空；按 API 原始结束日采集；有变化才发布检查点；默认 11 小时 30 分钟停采并保存；用 `publication.json` 核对不确定发布；减少无变化月库版本；优先处理新日期，再修复既有 19 个未完成日期并继续历史。
+本次修复允许未知真实开始时间保持为空，保留 API 原始结束日；有变化才发布检查点，用 `publication.json` 核对不确定发布，减少无变化月库版本。市场结束日归属、钱包和 BUY 统计口径没有改变。代码经过独立审查，完整回归 **420 项通过**。
 
-以下项目须由实际验收与部署结果填写，当前不宣称通过：
-
-| 项目 | 本次实际记录 |
+| 项目 | 实际记录 |
 | --- | --- |
-| 最终源码提交、修复 PR、Notebook 保存版本 | 待验收后填写 |
-| 新测试数量与结果 | 待验收后填写，不沿用旧 C16 的 340 项结果 |
-| 未知开始时间保留 `NULL`、结束日归属与旧 v2 兼容 | 待验收后填写 |
-| 变化检查点、跨会话续采和不确定发布核对 | 待验收后填写 |
-| 2025-03-15 至 2025-04-02 修复结果与剩余真实缺口 | 待实跑后填写 |
-| 完成日库和分析结果的准确 Dataset 版本引用 | 待实跑后填写 |
-| Daily 恢复和本地结果读取兼容验证 | 待部署后填写 |
+| 生产采集源码 | [`9c7578b09a788ed0542ffe5ea9c3b78c17f2c04a`](https://github.com/slowchillchill/predict-market-analysis/tree/9c7578b09a788ed0542ffe5ea9c3b78c17f2c04a)，含目录兼容及新日期错误隔离 |
+| 修复 PR | [PR #3](https://github.com/slowchillchill/predict-market-analysis/pull/3) |
+| Notebook 上传与退出 | CLI 上传前打包标准 `.ipynb`；bootstrap 的 [`19f8567`](https://github.com/slowchillchill/predict-market-analysis/commit/19f856788579ffae62d9c2d0a8e2d99d14b44562) 修正使成功返回不会触发 `SystemExit(0)` 单元错误 |
+| 生产恢复实例 | [Notebook 版本 13](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=368303307)，2026-11-11 05:20:29 UTC／14:20:29 JST 启动，从上一实例的 raw 第 2 版继续；本轮状态 `COMPLETE`，正常结束 |
+| 新日期实际验收 | [2026-11-10 raw 版本 3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-10/versions/3)：`complete`，3,298/3,298 市场、4,741 页，`official_series_all_conditions_v1`，无发现或结构错误；[分析版本 81](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/81)首次发布正式日报，后续最终快照为[分析版本 100](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/100) |
+| 本次有限恢复 | 临时 `--max-days 20`，处理最新日期和原有 19 个历史日期；19 日中 18 日交易分页完整，6 日正式完成、12 日保留统计缺口，另 1 日目录不可用；最终 `repair_queue = []`，`next_date_utc = 2025-04-03`，并非全历史完成 |
+| 旧完整日库 | 2026-11-09 仍引用原始库格式 v2、Dataset 版本 2，没有为改格式而重发 |
+| 本地读取与出图 | 从分析版本 100 下载 `daily_2026-11-10.json`，2026-11-11 05:42:43 UTC 成功生成 `outputs/posters/updown_2026-11-10.png`、推文与发布清单；原 11 月 9 日产物保留。只下载统计 JSON，未读取或下载原始日库 |
+| 历史标签保留 | 原有 299 个标签全部保留，首次命中没有被推迟；新增后共有 380 个，本轮原标签也没有提前 |
+| 云端调度恢复 | [Notebook 版本 15](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=368308743)使用相同 `9c7578b` 源码，Quick Save 保存 `RUN_ARGUMENTS = []` 与 Secret 授权；原生 Daily 页面确认日期为 2026-11-12、频率 Daily，并显示 `Notebook scheduled.`，不保证精确 UTC 启动时刻 |
+| 本地调度恢复 | 日报、周报、月报和每 30 分钟重试四个 timer 均已启用且 active；2026-11-11 05:45 UTC 后复核。下一次日报 11 月 12 日 09:30 JST，周报 11 月 16 日 11:30 JST，月报 12 月 1 日 12:30 JST；重试任务执行结果为成功 |
+
+`--max-days 20` 只限制本次处理的日期任务数量，不表示 20 个日期全部统计成功。正式生产版本已移除这个数量上限。后续实际完成日库、分析 Dataset 版本和剩余缺口，以 `progress.json`、`collection_status.json` 和 `index.json` 为准。下一次运行先处理新日期，再从 2025-04-03 继续历史补采；本轮已记录的缺口仍保留，清空修复队列不等于消除了这些缺口。
+
+### 云端验收结果
+
+私有验收 Notebook 为 `qiuqiuslowchillchill/polymarket-v3-recovery-acceptance-20261111`。验收使用独立私有 Dataset，不写生产数据集；方法见 [验收脚本](../tests/kaggle_recovery_acceptance.py)。
+
+1. **版本 4，第一会话：**从真实旧 v2 工作副本升级为 v3，未知开始日和开始时刻为 `NULL`，市场结束时刻保留 API 原始 `12:00 UTC`。采集首 10 条记录后发布第 1 版检查点。真实上传成功后模拟客户端 499，程序按固定版本标记确认结果，没有再次上传。
+2. **版本 6，第二会话：**只靠云端检查点恢复，保留原游标、页序和组号。第二页检查点发布时再次模拟 499，更新结果得到确认。最终取得 500 页、4,996 条记录，分页覆盖完整；但既有 BUY 重建条件拒绝其中一个交易组。因此原始库保留 `incomplete`，版本 6 的“必须统计完成”验收断言未通过，不能把这次运行整体记为通过。
+3. **版本 10，只读复核：**固定读取 QA raw Dataset 版本 1、2、3 和月度证据版本 4；前两个已持久化分页的原始十进制值、页序、组号及映射保持一致，三个发布标记各不相同。全部 4,996 行只将分组列一一替换为旧键后，正式重建仍出现相同错误。这个复核不重新采集，也不发布 Dataset。
+4. **现代样本正例：**固定读取旧续采 Notebook `polymarket-group-id-resume-phase2-20261110/1` 的真实 3,209 行、1,200 组样本。实际升级 v2→v3 后，原单市场目录不变，正式特征提取、报告导出和最终三表检查全部通过。
+
+只读复核源码固定为 [`d015062`](https://github.com/slowchillchill/predict-market-analysis/tree/d0150624d19adda1fd87f405b0386a9872d04b0d)。结果为 `passed_with_existing_reconstruction_gap`，保留的原始日库状态仍是 `incomplete`。直接恢复前后比较只覆盖前两个已保存分页；不能将其描述为全部 4,996 行都有恢复前基线。
+
+### 已知历史统计缺口
+
+本轮 2025-03-15 至 2025-04-02 的 19 日中，**3 月 15、17、23、27、28、30 日**已正式完成。**3 月 16、18、19、20、21、22、24、25、26、29 日，以及 4 月 1、2 日**已取得全部交易分页，但现有 BUY 重建检查拒绝其中的交易组，因此这 12 日保留原始记录和统计错误，不发布正式报告。
+
+**3 月 31 日**未取得 BTC、ETH 两个目标市场的官方目录；带年份、不带年份和 `-noon` 三种 slug 均返回 404。当前发现数为 0、计划数为 2，保留该缺口，不填零，也不据此断言这些市场从未存在。
+
+2025-04-02 样本中，`bitcoin-up-or-down-on-april-2` 的组 59 出现 Up 等价价值差 `0.0000010795418280 USDC`。它超过原有的 1 微 USDC 容差，也没有通过后续均价反算检查。这段计算、原始价格和份数处理未因 v3 修复而改变；相同记录以旧分组列重放仍拒绝。
+
+当前证据只说明该输入不满足现有重建条件，不能断言上游数据错误。程序保留完整分页、原始记录和错误，不跳过交易组，不放宽容差，不生成该日正式报告。该缺口会记录在历史进度中，后续日期仍可继续处理。已完成的现代样本正例也不能推断每个历史日期都能成功出报。
+
+
+### 本次生产发现的官方目录变化
+
+2026-11-10 的官方 Gamma 完整目录有 3,298 个目标市场，原配置名义数量为 3,295。差异全部在 BTC：日线 2 个（原名义 1 个），小时线 26 个（原名义 24 个）。新增 Chainlink TWAP 合约与旧 Binance 合约有不同 condition，均属于相同官方系列；其中一个新增小时合约已有成交量，不能当作别名或零成交删除。
+
+首轮 v11 使用旧唯一性检查，保存该日 raw 第 2 版后明确退出：3,296 个市场已完成，4,737 页已提交，未伪报完整。补充的新日期错误隔离修复 `ffe7774` 允许保存失败新日期后继续历史任务，历史结构错误仍不推进历史游标；其后目录兼容代码通过全部 420 项回归与独立审查。v13 从 raw 第 2 版恢复，实际只补采两个 BTC 日线市场，原已完成分页保留；新增 4 页后发布 raw 第 3 版，全部 3,298 个市场和正式统计均完成。完整目录已确认这些合约都在原先授权的 38 个系列范围内，无需扩大系列范围或任意选择一个 condition。目录兼容修复 [`9c7578b`](https://github.com/slowchillchill/predict-market-analysis/commit/9c7578b09a788ed0542ffe5ea9c3b78c17f2c04a) 全部保存它们及真实 `resolution_source`、`description`，并用完整目录证明、计划时段和每个 condition 的分页共同判定完成。旧完整 v2 不自动改写或宣称满足新覆盖策略。
+
+官方元数据示例：[Binance BTC 日线](https://gamma-api.polymarket.com/events/slug/bitcoin-up-or-down-on-november-10-2026)、[Chainlink BTC 日线](https://gamma-api.polymarket.com/events/slug/btc-updown-1d-1794243600)。上述链接用于复核两种不同结算合约。
+
+现代覆盖依据保存在 `updown_coverage_policy`、`updown_expected_slots`、`updown_discovery_status` 三个 SQL 视图中，不增加实体表。只有目录完整读取且不存在未解决的元数据错误，才能确认该系列的目录状态；猜中常规 slug 不等于完整目录。恢复后重新读取目录并重建本轮证明，旧成功位不能替代本轮结果。检查点也会保存只有这些视图发生变化的进度。缺时段时的 `expected_markets` 为已发现合约数加尚缺时段数，避免额外合约掩盖缺口。

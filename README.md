@@ -13,13 +13,14 @@ All datasets are published by **`qiuqiuslowchillchill`** on Kaggle.
 | Resource | Purpose | Published example |
 | --- | --- | --- |
 | `pm-updown-raw-YYYY-MM-DD` | One SQLite snapshot for markets ending on that UTC date | [2026-11-09, version 2](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2) |
+| Completed v3 daily dataset | All real contracts in the official series, including distinct settlement rules | [2026-11-10, version 3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-10/versions/3) |
 | `pm-updown-analysis-YYYY-MM` | Completed result JSON and mergeable daily features | [2026-11, version 3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3) |
 | [Public collection Notebook](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis) | Collection code, runs, and execution logs | Polymarket Crypto Updown Markets Analysis |
 | [Source repository](https://github.com/slowchillchill/predict-market-analysis) | Schema, metric definitions, collector, and tests | This repository |
 
-The examples above are fixed versions, verified on **November 10, 2026**. Later versions may contain corrections or more completed dates. A monthly dataset is a container; its existence does **not** mean the whole month is complete. Historical backfill is still in progress. Check the files described below for actual coverage.
+The v2 examples above were verified on **November 10, 2026**, and the v3 example on **November 11**. These are fixed versions. Later versions may contain corrections or more completed dates. A monthly dataset is a container; its existence does **not** mean the whole month is complete. Historical backfill is still in progress. Check the files described below for actual coverage.
 
-**Recovery update in this branch:** raw schema v3 allows an unknown real market start to remain `NULL` and adds collection/publication recovery behavior. Deployment and validation of that update are pending. The published November 9 v2 example remains readable and is not automatically republished merely to change the schema number. Report JSON stays at version 1; grouping, wallet, and BUY metric definitions are unchanged.
+**Recovery update, November 11, 2026:** raw schema v3 allows an unknown real market start to remain `NULL` and adds collection/publication recovery behavior. The update passed 420 regression tests and the Kaggle recovery checks described below. The finite production recovery run has finished, and daily scheduling has resumed; historical coverage is still incomplete. The published November 9 v2 example remains readable and is not automatically republished merely to change the schema number. Report JSON stays at version 1; grouping, wallet, and BUY metric definitions are unchanged.
 
 ## Query on Kaggle without a local database
 
@@ -116,13 +117,15 @@ For this fixed version, the market volume is `9786444.035628` USDC. For other av
 | BTC, ETH, SOL, XRP, DOGE, BNB, HYPE | 5 minutes, 15 minutes, 1 hour, 4 hours, daily | 35 |
 | ZEC | 5 minutes, 15 minutes, 4 hours | 3 |
 
-The [series catalog](scripts/polymarket_updown_daily.py) defines 38 series. Once all series are operating, the configured schedule expects **3,295 markets per UTC day**. Historical expected counts use the configured first-market-end boundaries.
+The [series catalog](scripts/polymarket_updown_daily.py) defines 38 series. Once all series are operating, the configured schedule has **3,295 slots per UTC day**. A slot can contain multiple real contracts, so the actual market count can be higher. Historical expected slots use the configured first-market-end boundaries.
+
+The official November 10, 2026 directory contains **3,298 markets**: BTC has an additional daily contract and two additional hourly contracts using Chainlink TWAP alongside the Binance contracts. These are different conditions. These contracts remain within the original 38-series scope. The collector retains them all and verifies directory pagination, planned slots and every discovered condition; see the [production record](docs/kaggle_migration.md).
 
 A daily dataset contains markets whose **API-provided `end_time` falls on that UTC date**. It includes all returned trade records for those markets, including trades before that date. It is not a calendar-day feed filtered by each trade's timestamp. **`markets.date_utc` is the real market start date when known**; v3 permits `NULL` when it is unknown. `event_start_time` was already nullable. A creation-related `startDate` or `end_time - 24 hours` must not be used to invent a market start. Use `date(markets.end_time)` or the `updown_*` views for the dataset's day.
 
 Collection is scheduled daily on Kaggle. Recent closed dates take priority, followed by historical backfill. Reports become available after collection and analysis finish; the schedule is not a guarantee of publication at a fixed time. Backfill or corrections can publish new versions, including revisions to behavior-based wallet labels.
 
-The recovery update processes fresh dates first, then repairs the **19 existing incomplete dates from 2025-03-15 through 2025-04-02**, and then continues historical backfill. Genuinely unavailable markets remain explicit gaps rather than being marked complete or filled with zero.
+The recovery run revisited the **19 existing incomplete dates from 2025-03-15 through 2025-04-02** after processing the fresh date. Eighteen dates now have all trade pages: six produced formal reports, while twelve retain reconstruction errors. March 31 remains unavailable. The saved historical cursor is **2025-04-03**; future daily runs prioritize fresh dates and continue from there. Unresolved dates remain explicit gaps rather than being marked complete or filled with zero.
 
 Its engineering defaults check every **30 minutes** for changed, committed collection state and publish an `incomplete` checkpoint only when there is a change. Collection stops after **11 hours 30 minutes** to leave publishing time before the 12-hour session limit. These are adjustable operating parameters, not Kaggle usage rules or account-protection thresholds. Uploads do not happen after every page. An interrupted run resumes from the last **successfully confirmed** dataset version; failed uploads or a forced stop can lose more than 30 minutes of unpublished progress. Unchanged monthly snapshots are not repeatedly published. See the [recovery operations](docs/kaggle_migration.md) for details.
 
@@ -133,6 +136,8 @@ Its engineering defaults check every **30 minutes** for changed, committed colle
 | Completed market with no returned records | Zero recorded activity for that market |
 | Missing/incomplete market, date, or comparison period | Unknown or unavailable, not zero |
 | Analysis `index.json`: result entry with `status: complete` | Prepared report available in the named file |
+
+Newly collected snapshots record `coverage_policy: official_series_all_conditions_v1`. Their SQL views require complete directory pagination for every applicable series, every planned slot, and finished trade pagination for every discovered condition. Multiple conditions in one slot cannot replace a missing slot. The persistent `updown_expected_slots` and `updown_discovery_status` views expose these checks; older completed v2 inputs retain `legacy_nominal_v1`.
 
 Coverage measures expected markets, discovered markets, and completed trade pagination. It does not establish full on-chain completeness or verify every record against the blockchain. Weekly and monthly results require all target dates to be complete. Missing or zero comparison baselines appear as `N/A`.
 
@@ -150,7 +155,7 @@ Coverage measures expected markets, discovered markets, and completed trade pagi
 | `README.md` | Dataset description and collection definitions |
 | `migration_summary.json` | Present in the converted example version; counts and comparison results for the v1-to-v2 migration |
 
-A **completed raw schema v2 or v3** database has the three entity tables below and SQL views, including the series catalog view. The table descriptions cover v3; the fixed published example is v2, where `markets.date_utc` is `NOT NULL`. V3 makes that field nullable without changing the trade fields or grouping rules. See the [schema source](sql/btc5m_schema.sql) for exact constraints. `publication.json` belongs to the recovery update and is not implied to exist in the earlier example.
+A **completed raw schema v2 or v3** database has the three entity tables below and SQL views, including the series catalog view. The table descriptions cover v3; the fixed published example is v2, where `markets.date_utc` is `NOT NULL`. V3 makes that field nullable and adds nullable settlement metadata without changing trade fields or grouping rules. The fixed v2 example and early incomplete v3 snapshots may lack these optional metadata columns; inspect `PRAGMA table_info(markets)` for the selected version. See the [schema source](sql/btc5m_schema.sql) for exact constraints. `publication.json` belongs to the recovery update and is not implied to exist in the earlier example.
 
 **`markets` — one row per market or expected market slot**
 
@@ -165,6 +170,8 @@ A **completed raw schema v2 or v3** database has the three entity tables below a
 | `series_slug` | TEXT | Series identifier in the catalog |
 | `event_start_time` | TEXT, nullable | Real upstream market start time, or `NULL` if unknown; never synthesized from creation time or market end |
 | `end_time` | TEXT | Market end time; its UTC date selects the daily dataset |
+| `resolution_source` | TEXT, nullable | Upstream settlement price source, when supplied |
+| `description` | TEXT, nullable | Original upstream contract description, including available settlement rules |
 
 **`collection_progress` — one progress row per collected market**
 
@@ -262,7 +269,15 @@ The [2026-11-09 raw version 2](https://www.kaggle.com/datasets/qiuqiuslowchillch
 | SQLite file size, before → after | 547,946,496 → 378,290,176 bytes (**30.96% smaller**) |
 | Existing wallet features, daily behavior hits, and BUY statistics | Unchanged |
 
-The v2 implementation at [`c16edb8`](https://github.com/slowchillchill/predict-market-analysis/tree/c16edb8353aa78fe6229bc3e164f13788d1e1296) passed **340 tests**. A real two-session collection also resumed 3,209 wallet records across four pages and retained existing rows and group IDs. These are historical v2 results, not acceptance results for the v3 recovery update. Its final code commit, test count, and deployment evidence will be recorded after validation. See the [recorded validation](docs/kaggle_migration.md), [grouping tests](tests/test_polymarket_trade_groups.py), and [migration tests](tests/test_polymarket_kaggle_migration.py). These are project checks, not an independent audit or proof of complete upstream history.
+The v2 implementation at [`c16edb8`](https://github.com/slowchillchill/predict-market-analysis/tree/c16edb8353aa78fe6229bc3e164f13788d1e1296) passed **340 tests**. A real two-session collection also resumed 3,209 wallet records across four pages and retained existing rows and group IDs. These remain historical v2 results. The separate v3 recovery checks are recorded below. See the [recorded validation](docs/kaggle_migration.md), [grouping tests](tests/test_polymarket_trade_groups.py), and [migration tests](tests/test_polymarket_kaggle_migration.py). These are project checks, not an independent audit or proof of complete upstream history.
+
+## V3 recovery checks and current deployment
+
+The recovery update passed **420 regression tests**. Kaggle checks preserved the first two saved pages, their original decimal values, row order and group IDs, and the persistent mapping during a fresh-process resume. Real uploads followed by simulated client HTTP 499 responses exercised both create and version reconciliation. A known modern sample of **3,209 rows and 1,200 groups** then passed an actual v2-to-v3 upgrade, formal statistics export and final three-table check.
+
+The historical sample finished **500 pages with 4,996 rows**, but its prepared report was withheld because one group did not satisfy the existing BUY reconstruction conditions. A one-to-one legacy grouping-key replay reproduced the same error without changing the other trade fields. This does not establish an upstream data error. The raw snapshot remains `incomplete` with its error recorded; the recovery checks do not imply that every historical date can produce a report.
+
+The completed [production recovery run, version 13](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=368303307) uses [`9c7578b`](https://github.com/slowchillchill/predict-market-analysis/tree/9c7578b09a788ed0542ffe5ea9c3b78c17f2c04a). November 10 is complete: [raw version 3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-10/versions/3) contains 3,298 completed markets and 4,741 pages. [Analysis version 100](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/100) contains the formal daily report used to generate the local poster. The 19 historical dates resulted in six formal reports, twelve reconstruction gaps and one unavailable date. Notebook version 15 retains the same source with the temporary date limit removed; native Daily is scheduled from November 12, and local report timers are active. See the [deployment record](docs/kaggle_migration.md) for exact versions and remaining gaps.
 
 For reproducible analysis, record the **raw and analysis dataset versions**, the raw schema version, and the volume method. Read the completion metadata and report source references with your results. Recheck those references when changing versions; internal group numbers are not cross-version join keys.
 

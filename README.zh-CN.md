@@ -10,14 +10,15 @@
 | --- | --- |
 | [Polymarket Crypto Updown Markets Analysis](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis) | 公开采集与分析 Notebook |
 | [2026-11-09 原始日库，版本 2](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2) | 可下载、挂载和查询的完整 v2 日库示例 |
+| [2026-11-10 原始日库，版本 3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-10/versions/3) | 完整 v3 日库；保留官方系列中的不同真实合约及结算规则 |
 | [2026-11 月度分析库，版本 3](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3) | 日级特征、结果索引和已完成的统计 JSON |
 | [开源代码仓库](https://github.com/slowchillchill/predict-market-analysis) | 数据结构、采集代码、统计方法与测试 |
 
 原始日库命名为 `pm-updown-raw-YYYY-MM-DD`，分析库命名为 `pm-updown-analysis-YYYY-MM`，发布者为 `qiuqiuslowchillchill`。日期和月份均使用 UTC。
 
-**本分支的恢复修复：**原始库格式 v3 允许未知的真实市场开始时间保留为 `NULL`，并增加采集与发布恢复行为；本次修复尚待验收和部署。已发布的 11 月 9 日 v2 示例仍可读取，不会仅为更改格式版本号而强制重发。报告 JSON 保持 v1，分组、钱包和 BUY 指标口径不变。
+**2026 年 11 月 11 日恢复修复：**原始库格式 v3 允许未知的真实市场开始时间保留为 `NULL`，并增加采集与发布恢复行为。修复已通过 420 项回归和下述 Kaggle 恢复验收，有限生产恢复已结束，每日调度已恢复；历史范围仍未补齐。已发布的 11 月 9 日 v2 示例仍可读取，不会仅为更改格式版本号而强制重发。报告 JSON 保持 v1，分组、钱包和 BUY 指标口径不变。
 
-以上为 **2026-11-10 核实的固定版本示例**。后续版本可能修正数据或增加已完成日期。
+以上 v2 示例核实于 **2026-11-10**，v3 示例核实于 **2026-11-11**，链接均固定版本。后续版本可能修正数据或增加已完成日期。
 
 **钱包记录行不等于独立撮合成交，`group_id` 也不是 fill ID。**使用数据前，请先查看下方记录粒度、金额与日期定义。
 
@@ -122,11 +123,13 @@ print(Decimal(current['volume_micro_usdc']) / Decimal(1_000_000))
 | BTC、ETH、SOL、XRP、DOGE、BNB、HYPE | 5 分钟、15 分钟、1 小时、4 小时、日线 | 35 |
 | ZEC | 5 分钟、15 分钟、4 小时 | 3 |
 
-全部系列启用后的常规预期为 **3,295 个市场／UTC 日**。历史预期数量按目录配置的首个市场结束时间调整，不能把 3,295 直接用于所有历史日期。系列定义见 [采集代码](scripts/polymarket_updown_daily.py)。
+全部系列启用后的配置为 **3,295 个计划时段／UTC 日**。同一时段可能有多个真实合约，因此实际市场数可以更多。历史计划时段按目录配置的首个市场结束时间调整，不能把 3,295 直接用于所有历史日期。系列定义见 [采集代码](scripts/polymarket_updown_daily.py)。
+
+2026-11-10 官方完整目录实际有 **3,298 个市场**：BTC 在原 Binance 合约之外新增了 1 个日线及 2 个小时线 Chainlink TWAP 合约，condition 各不相同。这些合约仍属于原先的 38 个系列范围，采集程序会全部保留，并核对完整目录、计划时段及每个已发现条件的分页。详见[生产记录](docs/kaggle_migration.md)。
 
 采集按日运行，先处理新日期，再从较早日期补采历史。**历史范围尚未补齐。**某日或某月的数据集存在，不表示整段历史已经完整；月度分析库名称也不表示当月所有日期或完整月报已就绪。采集安排不保证每天在某个精确时刻发布。
 
-本次恢复修复先处理新日期，再修复 **2025-03-15 至 2025-04-02 已有的 19 个未完成日期**，然后继续历史补采。确实无法取得的市场保留为缺口，不标为完成，也不填零。
+本轮恢复先处理新日期，再重新处理 **2025-03-15 至 2025-04-02 已有的 19 个未完成日期**。其中 18 日已完成全部交易分页：6 日生成正式报告，12 日保留重建错误；3 月 31 日仍无法取得官方市场目录。历史游标已保存为 **2025-04-03**，后续每日运行优先采集新日期，再从这里继续补采。未解决的日期保留为缺口，不标为完成，也不填零。
 
 恢复机制默认每 **30 分钟**检查是否有新的已提交采集状态，仅在有变化时发布 `incomplete` 检查点；采集运行 **11 小时 30 分钟**后停止，给 12 小时会话上限预留发布时间。这些是可调整的工程参数，不是 Kaggle 使用规则或防封阈值。它不在每页后上传；中断后从最后**确认成功**的数据集版本恢复，上传失败或强制终止可能丢失超过 30 分钟的未发布进度。没有变化的月度快照也不反复发布。详情见 [恢复操作说明](docs/kaggle_migration.md)。
 
@@ -135,6 +138,8 @@ print(Decimal(current['volume_micro_usdc']) / Decimal(1_000_000))
 - `status: complete`：目标市场覆盖与分页完成，并通过项目的正式统计重建检查。
 - `status: incomplete`：可恢复的采集快照，可能缺市场或分页，不能当作完整日统计。
 - 完整市场没有交易记录时，金额可以为零。未完成、缺失或查询没有返回行时，不能据此填零。
+
+新采集快照记录 `coverage_policy: official_series_all_conditions_v1`。SQL 同时要求各适用系列目录分页读完、计划时段无缺口，以及全部已发现 condition 的交易分页完成。同一时段多出的合约不能抵消其他缺失时段；`updown_expected_slots`、`updown_discovery_status` 视图保留这些依据。旧的已完成 v2 输入仍按 `legacy_nominal_v1` 读取。
 
 `updown_coverage` 提供整日覆盖，`updown_series_coverage` 提供逐系列覆盖。这里的完整性指目标范围内接口采集和项目统计检查，不是全量链上对账，也不保证上游接口返回了所有历史交易。
 
@@ -157,7 +162,7 @@ pm-updown-raw-YYYY-MM-DD/
 └── publication.json          # 恢复修复的发布标记；旧示例不一定有
 ```
 
-完成的 v2、v3 日库均有 `markets`、`collection_progress`、`trades` 三个实体表。已发布示例的 `PRAGMA user_version` 与 `collection_status.json.schema_version` 为 `2`；本次修复格式为 `3`，继续记录 `group_key` 和 `volume_method`。下方字段说明以 v3 为准：相比 v2，只放宽 `markets.date_utc` 的非空约束，不改变交易字段和分组口径。
+完成的 v2、v3 日库均有 `markets`、`collection_progress`、`trades` 三个实体表。已发布示例的 `PRAGMA user_version` 与 `collection_status.json.schema_version` 为 `2`；本次修复格式为 `3`，继续记录 `group_key` 和 `volume_method`。下方字段说明以 v3 为准：相比 v2，放宽 `markets.date_utc` 的非空约束，并增加可空结算元数据，不改变交易字段和分组口径。固定 v2 示例及早期未完成 v3 快照可能没有这些可选元数据列，应以所选版本的 `PRAGMA table_info(markets)` 为准。
 
 恢复修复写出的快照另带 `publication.json` 小标记，用于上传返回 HTTP 499 等不确定结果时核对发布身份；不要求读者计算整库 SHA。旧的固定示例不因此被认为已经包含这个新文件。
 
@@ -178,6 +183,8 @@ pm-updown-raw-YYYY-MM-DD/
 | `series_slug` | `TEXT` | 市场系列，例如 `btc-up-or-down-5m` |
 | `event_start_time` | `TEXT`，可空 | 真实市场开始时间，UTC ISO 8601；未知为 `NULL`，不使用创建时间或结束时间推造 |
 | `end_time` | `TEXT` | 市场结束时间，UTC ISO 8601；决定日库归属 |
+| `resolution_source` | `TEXT`，可空 | API 提供的结算价格来源；未知为空 |
+| `description` | `TEXT`，可空 | API 原始合约说明，保留其中的结算规则 |
 
 #### `collection_progress`：分页状态
 
@@ -293,7 +300,15 @@ pm-updown-analysis-YYYY-MM/
 
 旧数据集版本继续保留。这个文件大小变化与该日迁移检查，不能推断所有日期均无缺失或未来接口都符合首行方法。
 
-v2 实现版本 [`c16edb8`](https://github.com/slowchillchill/predict-market-analysis/tree/c16edb8353aa78fe6229bc3e164f13788d1e1296)验收通过 **340 项测试**，覆盖分页事务、定向重试、旧格式兼容、金额精度、统计及图文生成。另做真实两会话续采试验：先保存一页，再从后续会话恢复三页，共保留 **3,209 行、1,200 组**，原记录和组号不变，完成后清空续采映射。这些是旧版 v2 的历史结果，不是本次 v3 恢复修复的验收结果；新提交、测试计数和部署证据将在验收后记录。该样本不表示全历史已采齐。详见 [项目记录](docs/kaggle_migration.md)、[分组测试](tests/test_polymarket_trade_groups.py)和[迁移测试](tests/test_polymarket_kaggle_migration.py)。这些是项目自身的检查，不是独立审计。
+v2 实现版本 [`c16edb8`](https://github.com/slowchillchill/predict-market-analysis/tree/c16edb8353aa78fe6229bc3e164f13788d1e1296)验收通过 **340 项测试**，覆盖分页事务、定向重试、旧格式兼容、金额精度、统计及图文生成。另做真实两会话续采试验：先保存一页，再从后续会话恢复三页，共保留 **3,209 行、1,200 组**，原记录和组号不变，完成后清空续采映射。这些保留为旧版 v2 的历史证据；本次 v3 的验收记录另列于下文。该样本不表示全历史已采齐。详见 [项目记录](docs/kaggle_migration.md)、[分组测试](tests/test_polymarket_trade_groups.py)和[迁移测试](tests/test_polymarket_kaggle_migration.py)。这些是项目自身的检查，不是独立审计。
+
+## v3 恢复验收与当前部署
+
+本次恢复修复通过 **420 项回归测试**。Kaggle 跨进程续采保留了前两个已保存分页的原始十进制值、页序和组号，持久映射保持连续。真实上传后模拟客户端 HTTP 499，分别验证了新建和更新发布的结果核对。已验证的现代样本共 **3,209 行、1,200 组**，实际从 v2 升级为 v3 后，通过正式统计导出和最终三表检查。
+
+历史样本完成 **500 页、4,996 行**，但其中一个交易组未满足原有 BUY 重建条件，因此没有生成正式报告。将相同记录的分组列一一替换为旧键后，仍出现相同错误，其他交易字段未变。这本身不能证明上游数据错误。原始快照继续保留 `incomplete` 和错误说明；恢复验收通过不表示每个历史日期都能成功出报。
+
+已完成的[生产恢复版本 13](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=368303307)使用 [`9c7578b`](https://github.com/slowchillchill/predict-market-analysis/tree/9c7578b09a788ed0542ffe5ea9c3b78c17f2c04a)。11 月 10 日已完成：[原始数据集第 3 版](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-10/versions/3)包含 3,298 个完成市场和 4,741 页；[分析数据集第 100 版](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/100)的正式日报已用于生成本地海报。原有 19 个历史日期中，6 日正式完成、12 日保留重建缺口、1 日无法取得市场目录。Notebook 版本 15 保持相同源码，已移除临时日期数量上限；原生 Daily 已安排从 11 月 12 日起运行，本地报表定时器也已恢复。版本和剩余缺口详见[部署记录](docs/kaggle_migration.md)。
 
 为了复现结果，请同时记录**数据集名称与版本、日期范围、原始库格式版本、金额方法和所用代码提交**。分析结果中的 `source_versions` 可用于定位输入；固定版本后再比较研究结果，避免混用历史修订前后的统计。
 
