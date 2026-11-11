@@ -57,6 +57,35 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn(f'daily_{first}.json', files)
         self.assertEqual(json.loads(files[f'daily_{second}.json'])['status'], 'complete')
 
+    def test_fresh_metadata_ambiguity_does_not_starve_history_and_retries_next_session(self):
+        import copy
+        old = fixtures.YESTERDAY - timedelta(days=1)
+        self.seed_history(old)
+        self.pipeline.state['repair_queue'] = [str(old)]
+        original = self.client.get
+
+        def ambiguous(url, params):
+            payload = original(url, params)
+            if url == producer.collector.GAMMA_EVENTS_KEYSET and params['end_date_min'].startswith(str(fixtures.YESTERDAY)):
+                second = copy.deepcopy(payload['events'][0]['markets'][0])
+                second.update(slug='another-real-daily', conditionId='another-condition')
+                payload['events'][0]['markets'].append(second)
+            return payload
+
+        self.client.get = ambiguous
+        with self.quiet(), contextlib.redirect_stderr(io.StringIO()):
+            self.pipeline.run(max_days=2)
+        raw = self.pipeline.state['raw_days'][str(fixtures.YESTERDAY)]
+        self.assertEqual(raw['status'], 'incomplete')
+        self.assertTrue(raw['structural_errors'])
+        self.assertEqual(self.pipeline.state['raw_days'][str(old)]['status'], 'complete')
+        self.assertEqual(self.pipeline.state['history']['next_date_utc'], str(old + timedelta(days=1)))
+        self.assertIn(str(fixtures.YESTERDAY), self.pipeline.attempted)
+        self.assertNotIn(f'daily_{fixtures.YESTERDAY}.json', self.latest_files('pm-updown-analysis-2026-11'))
+        resumed = producer.Pipeline(self.store, self.root / 'next-session', today=lambda: fixtures.TODAY,
+                                    client=self.client)
+        self.assertIn(fixtures.YESTERDAY, resumed._fresh_days())
+
     def elapsed_clock(self, *, stop=100, checkpoint=10):
         elapsed = [0.0]
         self.pipeline.clock = lambda: elapsed[0]

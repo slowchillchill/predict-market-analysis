@@ -418,7 +418,11 @@ class Pipeline:
         if structural:
             self.save()
             shutil.rmtree(path.parent)
-            raise DiscoveryBlocked(f"Historical metadata needs repair for {stamp}: {collection_error}")
+            if historical:
+                raise DiscoveryBlocked(f"Historical metadata needs repair for {stamp}: {collection_error}")
+            print(f"Fresh day {stamp} remains incomplete: {collection_error}. "
+                  "Keeping its errors for retry; historical recovery will continue.", flush=True)
+            return
         # Save once after derived results have been updated. If fresh work is
         # due, keep the completed raw reference durable before yielding.
         if self._should_yield():
