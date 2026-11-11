@@ -55,12 +55,15 @@ python scripts/polymarket_kaggle_pipeline.py --migrate-only
 
 代码入口为 `kaggle/notebook.py`，配置为 `kaggle/kernel-metadata.json`。Notebook 启用 Internet，使用 CPU，按固定 Git 提交加载项目代码。
 
-使用已配置的 Kaggle CLI 上传代码时，必须加 `--no-run`，只上传源码：
+先将 Python 入口打包为标准 Notebook，再用已配置的 Kaggle CLI 上传。必须加 `--no-run`，不执行采集代码：
 
 ```bash
-kaggle kernels push -p kaggle --no-run
+python3 scripts/prepare_kaggle_notebook.py --output-dir /tmp/polymarket-kaggle-upload
+kaggle kernels push -p /tmp/polymarket-kaggle-upload --no-run
 kaggle kernels status qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis
 ```
+
+2026-11-11 云端验收发现，直接以 script 类型 Quick Save 上传 `.py`，虽然 CLI 返回已保存，平台转换预览时仍会出现 `NotJSONError`。打包脚本只生成临时上传文件，保持项目源码和 Notebook 单元一致；不包含 Token。
 
 上传后，在网页完成以下操作：
 
@@ -87,7 +90,7 @@ kaggle kernels status qiuqiuslowchillchill/polymarket-crypto-updown-markets-anal
 
 采集每页仍先将明细、组映射和游标提交到同一个数据库事务。默认每 **30 分钟**检查一次是否有新的已提交状态；有变化才发布一致的 `incomplete` 日库检查点，不在每一页后上传。正常日期完成、日更抢占或可处理错误退出时，也保存需要发布的变化。
 
-任务默认在运行 **11 小时 30 分钟**后停止后续采集，为 [Kaggle 当前 12 小时 CPU 会话上限](https://www.kaggle.com/docs/notebooks)预留发布与处理时间。检查点间隔与停采时间是可调整的工程参数，不是平台规则，也不是防封要求；预留时间不保证网络上传和平台处理必定完成。
+任务默认在运行 **11 小时 30 分钟**后停止后续采集，为 [Kaggle 当前 12 小时 CPU 会话上限](https://www.kaggle.com/docs/notebooks)预留发布与处理时间。从 bootstrap 开始计时，安装依赖和恢复数据也计入本次运行。`--checkpoint-minutes`、`--stop-after-hours` 和 `--session-hours` 可调整检查点、停采及整次运行截止时间。检查点间隔与停采时间是可调整的工程参数，不是平台规则，也不是防封要求；预留时间不保证网络上传和平台处理必定完成。
 
 只有 Kaggle 已处理完成并确认成功的版本才是跨会话恢复点。下次从该版本续采，而不是从上次计划检查的时刻恢复。上传失败、平台强制终止或处理未确认时，可能重采超过 30 分钟的未发布部分，不能承诺最多只丢 30 分钟进度。
 

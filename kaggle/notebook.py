@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 
-SOURCE_COMMIT = "c16edb8353aa78fe6229bc3e164f13788d1e1296"
+SOURCE_COMMIT = "c3adec9ca8bb80d7a37b83da9b22cc33024bb233"
 RUN_ARGUMENTS = []  # Production: fresh UTC days, then continuous historical backfill.
 SOURCE_URL = "https://github.com/slowchillchill/predict-market-analysis.git"
 
