@@ -2,6 +2,7 @@
 
 The bootstrap supplies the checkout, dependencies and existing Kaggle credentials.
 Run in two separate Kaggle processes with POLYMARKET_QA_PHASE=1, then =2.
+Use POLYMARKET_QA_PHASE=audit to recheck the existing cloud versions read-only.
 Only the fixed QA Dataset namespace is writable. Production access is a single
 read of the pre-existing 2025-04-02 v1 database during phase 1.
 """
@@ -45,9 +46,9 @@ def main():
     if not WORKING.is_dir() or not Path.cwd().resolve().is_relative_to(WORKING):
         raise RuntimeError("This acceptance script requires /kaggle/working as its working directory")
     phase_text = os.environ.get("POLYMARKET_QA_PHASE")
-    if phase_text not in {"1", "2"}:
-        raise RuntimeError("Set POLYMARKET_QA_PHASE to 1 or 2")
-    phase = int(phase_text)
+    if phase_text not in {"1", "2", "audit"}:
+        raise RuntimeError("Set POLYMARKET_QA_PHASE to 1, 2 or audit")
+    phase = phase_text if phase_text == "audit" else int(phase_text)
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import polymarket_kaggle_pipeline as producer
     import polymarket_kaggle_store as cloud
@@ -68,7 +69,7 @@ def main():
     root.mkdir(parents=True)
     summary = {"phase": phase, "status": "running", "date_utc": str(DAY),
                "qa_prefix": QA_PREFIX, "production_writes": 0}
-    destination = WORKING / f"acceptance_phase{phase}.json"
+    destination = WORKING / ("acceptance_audit.json" if phase == "audit" else f"acceptance_phase{phase}.json")
 
     class PrivateRunner:
         def __init__(self):
@@ -82,6 +83,7 @@ def main():
             mutation = tuple(command[1:3]) in {("datasets", "create"), ("datasets", "version")}
             marker = metadata = None
             if mutation:
+                require(phase != "audit", "Read-only audit attempted a Dataset mutation")
                 folder = Path(command[command.index("-p") + 1])
                 metadata = json.loads((folder / "dataset-metadata.json").read_text())
                 marker = json.loads((folder / cloud.PUBLICATION_FILE).read_text())
@@ -135,7 +137,193 @@ def main():
 
     store = PrivateStore(work_dir=root / "kaggle", runner=runner)
     client = None
+
+    def open_snapshot(path):
+        db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        db.execute("PRAGMA query_only=ON")
+        return closing(db)
+
+    def snapshot_shape(db, status):
+        require(db.execute("PRAGMA user_version").fetchone()[0] == 3, "Cloud snapshot is not real schema v3")
+        require(db.execute("SELECT date_utc,event_start_time,end_time FROM markets").fetchall()
+                == [(None, None, EXPECTED_END)], "Unknown start or original 12Z source end changed")
+        require(not status.get("structural_errors"), "Snapshot has unresolved structural discovery errors")
+        return db.execute("SELECT committed_page,next_cursor,completed_at FROM collection_progress").fetchone()
+
+    def final_outcome(db, status, state_error):
+        _, cursor, completed = snapshot_shape(db, status)
+        require(completed is not None and cursor is None, "Resumed trade pagination did not finish")
+        require(bool(status["coverage"]["is_complete"]), "Finished raw coverage is not complete")
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "pending_group_map" in tables:
+            require(db.execute("SELECT COUNT(*) FROM pending_group_map").fetchone()[0] == 0,
+                    "Finished trade pagination retained a nonempty group map")
+        error = status.get("error")
+        require(state_error == error, "Monthly progress and raw status disagree about the statistics error")
+        if status["status"] == "complete":
+            require(error is None, "A complete Dataset still has a statistics error")
+            require(tables == {"markets", "collection_progress", "trades"}, "Completed final raw snapshot retained temporary tables")
+            return "passed", None
+        require(status["status"] == "incomplete" and isinstance(error, str)
+                and error.startswith("Statistics: InvalidReconstruction:"),
+                "Incomplete final raw is not the identified existing reconstruction gap")
+        require(tables == {"markets", "collection_progress", "trades", "pending_group_map"},
+                "Statistics rejection unexpectedly finalized or altered the work schema")
+        return "passed_with_existing_reconstruction_gap", error
+
+    def replay_reconstruction(db, expected_error):
+        import polymarket_updown_price_distribution as distribution
+
+        def rejection(connection):
+            try:
+                distribution.load_data(connection, DAY, bot_first_seen={})
+            except distribution.InvalidReconstruction as exc:
+                return str(exc)
+            raise AssertionError("The existing reconstruction gap could not be replayed")
+
+        actual = rejection(db)
+        require("/ 59 " in actual, "The fixed historical sample no longer rejects the observed group 59")
+        require(expected_error == "Statistics: InvalidReconstruction: " + actual,
+                "Replayed grouped rows do not reproduce the published statistics error")
+        with closing(sqlite3.connect(":memory:")) as legacy:
+            db.backup(legacy)
+            before = legacy.execute("SELECT * FROM trades ORDER BY market_slug,page_number,row_number").fetchall()
+            converted = [row[:4] + ("qa-legacy-" + str(row[4]),) + row[5:] for row in before]
+            for (name,) in legacy.execute("SELECT name FROM sqlite_master WHERE type='view' "
+                                         "AND name<>'updown_target_series'").fetchall():
+                legacy.execute('DROP VIEW "' + name.replace('"', '""') + '"')
+            legacy.execute("DROP TABLE trades")
+            legacy.execute("CREATE TABLE trades(market_slug TEXT,page_number INTEGER,row_number INTEGER,"
+                           "wallet TEXT,transaction_hash TEXT,timestamp INTEGER,side TEXT,outcome TEXT,"
+                           "outcome_index INTEGER,token_id TEXT,raw_price TEXT,raw_size TEXT,amount_micro_usdc INTEGER)")
+            legacy.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", converted)
+            legacy.commit()
+            after = legacy.execute("SELECT * FROM trades ORDER BY market_slug,page_number,row_number").fetchall()
+            require([row[:4]+row[5:] for row in before] == [row[:4]+row[5:] for row in after],
+                    "The in-memory legacy replay changed non-key trade fields")
+            old_error = rejection(legacy)
+        require(old_error.replace("qa-legacy-", "") == actual,
+                "A one-to-one legacy grouping key did not reproduce the identical reconstruction rejection")
+        return {"group_id_rejected": True, "one_to_one_legacy_key_rejected": True,
+                "identical_error_after_key_normalization": True, "non_key_trade_fields_unchanged": True,
+                "rows_compared": len(before), "error": actual}
+
+    def modern_positive():
+        import polymarket_updown_price_distribution as distribution
+
+        folder = root / "modern-v2-positive"
+        folder.mkdir()
+        store._run("kernels", "output",
+                   f"{cloud.OWNER}/polymarket-group-id-resume-phase2-20261110/1",
+                   "-p", str(folder), "--file-pattern", "^data[.]sqlite3$", "--quiet")
+        path = folder / "data.sqlite3"
+        require(path.is_file(), "Pinned modern Notebook v1 did not contain data.sqlite3")
+        modern_day = date(2026, 11, 9)
+        with open_snapshot(path) as db:
+            require(db.execute("PRAGMA user_version").fetchone()[0] == 2, "Pinned modern positive input is not schema v2")
+            require(db.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 3209,
+                    "Pinned modern positive input has a different row count")
+            require(db.execute("SELECT COUNT(DISTINCT group_id) FROM trades").fetchone()[0] == 1200,
+                    "Pinned modern positive input has a different group count")
+            require(db.execute("SELECT slug FROM markets").fetchall() == [("btc-updown-5m-1794186600",)],
+                    "Pinned modern positive input has a different market scope")
+            catalog = db.execute("SELECT * FROM updown_target_series").fetchall()
+            require(len(catalog) == 1 and catalog[0][:2] == ("btc-up-or-down-5m", 1),
+                    "Pinned modern positive catalog is not its original single-market scope")
+        with closing(producer.core.connect_database(path)) as db:
+            # Rebuild derived views while preserving the pinned one-market
+            # catalog; collector.connect_database would install 38 series.
+            db.executescript((producer.core.ROOT / "sql/updown_daily.sql").read_text())
+            require([tuple(row) for row in db.execute("SELECT * FROM updown_target_series")] == catalog,
+                    "Modern positive migration changed its original catalog")
+            require(db.execute("PRAGMA user_version").fetchone()[0] == 3,
+                    "Modern positive working copy did not upgrade to v3")
+            prices = distribution.load_data(db, modern_day, bot_first_seen={})
+            features = producer.analysis.extract_day_features(path, modern_day)
+            bundle = producer.analysis.export_day(path, modern_day, {})
+            require(bundle["status"] == "complete" and features["coverage"]["is_complete"]
+                    and sum(wallet["trade_count"] for wallet in features["wallets"]) == 3209
+                    and prices["validation"]["transaction_groups"] == 1200
+                    and bundle["distribution"]["validation"]["source_row_count"] == 3209,
+                    "Modern v3 formal export did not preserve the expected rows/groups or completeness")
+            producer.trade_groups.finalize_database(db)
+            require({row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    == {"markets", "collection_progress", "trades"}, "Modern positive finalization did not retain exactly three tables")
+        return {"input_schema_version": 2, "output_schema_version": 3, "rows": 3209,
+                "groups": 1200, "original_single_market_catalog_preserved": True,
+                "formal_reconstruction_passed": True, "formal_features_and_export_complete": True,
+                "final_three_tables": True,
+                "polymarket_requests": 0, "publications": 0}
+
+    def audit():
+        # Downloads remain inside Kaggle. This branch never creates a Client,
+        # Pipeline, request to Polymarket, publication or simulated HTTP error.
+        require(store.version(RAW_SLUG) == 3, "Audit requires the existing QA raw v1/v2/v3 sequence")
+        month = root / "analysis-evidence"
+        month_version = store.restore(f"pm-updown-analysis-{str(TODAY)[:7]}", month)
+        phase1 = json.loads((month / "qa_checkpoint.json").read_text())
+        progress = json.loads((month / "progress.json").read_text())
+        require(phase1["phase"] == 1 and phase1["raw_version"] == 1 and phase1["schema_version"] == 3,
+                "Audit has no valid phase-1 cloud evidence")
+        versions, markers = {}, []
+        for version in (1, 2, 3):
+            folder = root / f"raw-v{version}"
+            for filename in ("data.sqlite3", "collection_status.json", cloud.PUBLICATION_FILE):
+                store.download_file(RAW_SLUG, filename, version, folder / filename)
+            status = json.loads((folder / "collection_status.json").read_text())
+            marker = json.loads((folder / cloud.PUBLICATION_FILE).read_text())
+            require(marker["dataset"] == store.ref(RAW_SLUG), "Pinned version marker identifies another Dataset")
+            require(isinstance(marker.get("publication_id"), str) and len(marker["publication_id"]) == 32,
+                    "Pinned version lacks a publication UUID")
+            markers.append(marker["publication_id"])
+            with open_snapshot(folder / "data.sqlite3") as db:
+                pages, cursor, completed = snapshot_shape(db, status)
+                rows = db.execute("SELECT * FROM trades WHERE page_number<=2 ORDER BY market_slug,page_number,row_number").fetchall()
+                mapping = (db.execute("SELECT market_slug,transaction_hash,group_id FROM pending_group_map "
+                                      "ORDER BY market_slug,transaction_hash").fetchall()
+                           if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pending_group_map'").fetchone()
+                           else [])
+                count = db.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+                if version < 3:
+                    require(status["status"] == "incomplete" and pages == version and cursor and completed is None,
+                            "A pinned checkpoint does not match its expected resumable page")
+                    require(rows and mapping, "A pinned checkpoint lost its page or persistent group map")
+                    require(json.loads(db.execute("SELECT query_params FROM collection_progress").fetchone()[0])["limit"] == 10,
+                            "Pinned checkpoint query changed its persisted page size")
+                else:
+                    reference = progress["raw_days"][str(DAY)]
+                    require(reference["version"] == 3 and reference["status"] == status["status"],
+                            "Monthly progress does not reference the audited final raw version")
+                    outcome, error = final_outcome(db, status, reference.get("error"))
+                    replay = replay_reconstruction(db, error) if error else None
+            versions[version] = {"rows": rows, "mapping": mapping, "count": count, "pages": pages}
+        require(len(set(markers)) == 3, "Different Dataset versions reused the same publication UUID")
+        first, second, final = (versions[version] for version in (1, 2, 3))
+        require(final["count"] == 5000 and final["pages"] == 500,
+                "The fixed historical audit sample differs from the observed 500-page/5000-row run")
+        require(first["rows"] == [row for row in second["rows"] if row[1] == 1],
+                "Checkpoint v2 changed original page-1 rows or groups")
+        require(second["rows"] == final["rows"], "Final raw v3 changed the first two committed pages/groups")
+        require(set(first["mapping"]) <= set(second["mapping"]), "Checkpoint v2 changed a page-1 group mapping")
+        require(phase1["rows"] == first["count"] and phase1["pending_group_count"] == len(first["mapping"])
+                and phase1["committed_pages"] == first["pages"], "Phase-1 cloud evidence differs from pinned raw v1")
+        require(not runner.mutations, "Read-only audit uploaded data")
+        result = {"status": outcome, "raw_version": 3, "raw_status": "incomplete" if error else "complete",
+                  "schema_version": 3, "committed_pages": final["pages"], "rows": final["count"],
+                  "analysis_evidence_version": month_version,
+                  "existing_reconstruction_gap": error, "real_trade_requests": 0, "actual_uploads": 0,
+                  "audit_checks": {"phase1_evidence": True, "pinned_versions": [1, 2, 3],
+                                   "first_two_pages_preserved": True, "mapping_continuity": True,
+                                   "distinct_publication_uuids": True, "no_mutation_or_recollection": True},
+                  "historical_499_live_checks_repeated": False}
+        result["existing_reconstruction_replay"] = replay
+        result["modern_positive"] = modern_positive()
+        return result
+
     try:
+        if phase == "audit":
+            summary.update(audit())
+            return 0
         if phase == 1:
             if store.status(RAW_SLUG) is not None:
                 raise CannotVerify("The QA raw Dataset already exists; phase 1 requires an unused namespace")
@@ -260,13 +448,12 @@ def main():
                             "committed_pages": pages, "rows": rows, "pending_group_count": mapping_rows,
                             "has_cursor": True, "unknown_start_is_null": True, "source_end_time": EXPECTED_END}
             else:
-                require(raw_version == 3, "Phase 2 did not publish checkpoint v2 followed by completed v3")
-                require(status["status"] == "complete" and completed is not None and cursor is None,
-                        "Resumed market did not finish completely")
-                require(tables == {"markets", "collection_progress", "trades"}, "Final raw snapshot retained temporary tables")
+                require(raw_version == 3, "Phase 2 did not publish checkpoint v2 followed by final raw v3")
+                outcome, error = final_outcome(db, status, pipeline.state["raw_days"][str(DAY)].get("error"))
                 require(read_page(db) == original_rows, "Final cloud snapshot changed the original page/group values")
                 require(all(checks.values()), "A required recovery/checkpoint comparison was not exercised")
                 summary["recovery_checks"] = checks
+                summary.update(status=outcome, raw_status=status["status"], existing_reconstruction_gap=error)
         require(runner.injected is not None and runner.confirmed, "The successful upload's 499 was not reconciled with its pinned marker")
         require(runner.executions[runner.injected["publication_id"]] == 1, "The simulated 499 repeated the actual upload")
         if phase == 1:
@@ -280,10 +467,12 @@ def main():
             pipeline.save()
             require(len(runner.mutations) == before, "An unchanged save created another publication")
             summary["unchanged_save_published"] = False
-        summary.update(status="passed", raw_version=raw_version, schema_version=schema,
+        summary.update(raw_version=raw_version, schema_version=schema,
                        committed_pages=pages, rows=rows, real_trade_requests=client.http_trade_requests,
                        actual_uploads=len(runner.mutations), injected_499_reconciled=True,
                        injected_publication_uploads=1, private_qa_writes_only=True)
+        if phase == 1:
+            summary["status"] = "passed"
     except CannotVerify as exc:
         summary.update(status="cannot_verify", reason=str(exc))
     except BaseException as exc:
@@ -295,7 +484,7 @@ def main():
             client.close()
         cloud.write_json(destination, summary)
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
-    return 0 if summary["status"] == "passed" else 2
+    return 0 if summary["status"] in {"passed", "passed_with_existing_reconstruction_gap"} else 2
 
 
 if __name__ == "__main__":

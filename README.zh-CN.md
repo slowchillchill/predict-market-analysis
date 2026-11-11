@@ -138,6 +138,8 @@ print(Decimal(current['volume_micro_usdc']) / Decimal(1_000_000))
 
 `updown_coverage` 提供整日覆盖，`updown_series_coverage` 提供逐系列覆盖。这里的完整性指目标范围内接口采集和项目统计检查，不是全量链上对账，也不保证上游接口返回了所有历史交易。
 
+全部分页已取得，但统计重建未通过时，可以同时出现 `coverage.is_complete: 1` 和 `status: incomplete`。原始记录仍保留，`error` 说明暂不生成正式报告的原因。这本身不能证明上游数据错误。
+
 周报和月报要求全部目标日期完成；缺失的比较周期或为零的比较基数显示为 `N/A`，不会用部分日期之和替代完整周期。
 
 正式分析 JSON 的 `status` 为 `complete`，并通过 `source_versions` 引用原始日库的准确版本。机器人历史覆盖见 `payload.bot_history`，包括实际观察日期和历史是否仍待补齐。

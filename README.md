@@ -136,6 +136,8 @@ Its engineering defaults check every **30 minutes** for changed, committed colle
 
 Coverage measures expected markets, discovered markets, and completed trade pagination. It does not establish full on-chain completeness or verify every record against the blockchain. Weekly and monthly results require all target dates to be complete. Missing or zero comparison baselines appear as `N/A`.
 
+`coverage.is_complete: 1` can coexist with `status: incomplete` when all pages have arrived but statistical reconstruction fails. The records remain available; `error` explains why the project withholds the prepared report. This does not by itself establish an upstream data error.
+
 ## Files and database schema
 
 ### Daily raw dataset

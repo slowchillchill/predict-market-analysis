@@ -32,6 +32,31 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.store.deadline, self.pipeline.deadline)
         self.assertLess(self.pipeline.client.deadline, self.store.deadline)
 
+    def test_existing_reconstruction_gap_keeps_records_and_continues_next_historical_day(self):
+        from polymarket_updown_price_distribution import InvalidReconstruction
+        first = fixtures.YESTERDAY - timedelta(days=2)
+        second = first + timedelta(days=1)
+        self.seed_history(first)
+        self.pipeline.state['history']['target_end_date_utc'] = str(second)
+        self.pipeline.state['raw_days'][str(fixtures.YESTERDAY)] = {'status': 'complete'}
+        export = producer.analysis.export_day
+
+        def checked(path, day, *args, **kwargs):
+            if day == first:
+                raise InvalidReconstruction('Existing reconstruction condition not satisfied')
+            return export(path, day, *args, **kwargs)
+
+        with patch.object(producer.analysis, 'export_day', side_effect=checked), self.quiet():
+            self.pipeline.run(max_days=2)
+        first_raw = json.loads(self.latest_files(f'pm-updown-raw-{first}')['collection_status.json'])
+        self.assertEqual(first_raw['coverage']['is_complete'], 1)
+        self.assertEqual(first_raw['status'], 'incomplete')
+        self.assertIn('InvalidReconstruction', first_raw['error'])
+        self.assertIn(str(first), self.pipeline.state['history']['gaps'])
+        files = self.latest_files('pm-updown-analysis-2026-11')
+        self.assertNotIn(f'daily_{first}.json', files)
+        self.assertEqual(json.loads(files[f'daily_{second}.json'])['status'], 'complete')
+
     def elapsed_clock(self, *, stop=100, checkpoint=10):
         elapsed = [0.0]
         self.pipeline.clock = lambda: elapsed[0]
