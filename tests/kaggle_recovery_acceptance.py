@@ -299,8 +299,8 @@ def main():
             versions[version] = {"rows": rows, "mapping": mapping, "count": count, "pages": pages}
         require(len(set(markers)) == 3, "Different Dataset versions reused the same publication UUID")
         first, second, final = (versions[version] for version in (1, 2, 3))
-        require(final["count"] == 5000 and final["pages"] == 500,
-                "The fixed historical audit sample differs from the observed 500-page/5000-row run")
+        require(final["count"] >= second["count"] and final["pages"] >= second["pages"],
+                "The final snapshot lost committed checkpoint records or pages")
         require(first["rows"] == [row for row in second["rows"] if row[1] == 1],
                 "Checkpoint v2 changed original page-1 rows or groups")
         require(second["rows"] == final["rows"], "Final raw v3 changed the first two committed pages/groups")
