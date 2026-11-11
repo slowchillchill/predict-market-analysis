@@ -44,7 +44,9 @@ def main():
                     str(source / "requirements-kaggle.txt")], check=True)
     sys.path.insert(0, str(source / "scripts"))
     from polymarket_kaggle_pipeline import main as run
-    raise SystemExit(run(RUN_ARGUMENTS))
+    exit_code = run(RUN_ARGUMENTS)
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

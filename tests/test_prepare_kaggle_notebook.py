@@ -1,9 +1,12 @@
 import json
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 
@@ -13,6 +16,23 @@ import prepare_kaggle_notebook as packaging
 
 
 class PrepareKaggleNotebookTests(unittest.TestCase):
+    def test_successful_bootstrap_finishes_a_notebook_cell_without_system_exit(self):
+        bootstrap = runpy.run_path(str(ROOT / "kaggle/notebook.py"), run_name="bootstrap_test")
+        producer = Mock(return_value=0)
+        secrets = SimpleNamespace(UserSecretsClient=lambda: SimpleNamespace(
+            get_secret=lambda label: "unit-test-placeholder"))
+        with patch.dict(sys.modules, {"kaggle_secrets": secrets,
+                                     "polymarket_kaggle_pipeline": SimpleNamespace(main=producer)}), \
+                patch.dict("os.environ", {}, clear=False), patch.object(Path, "is_dir", return_value=True), \
+                patch.object(Path, "exists", return_value=True), patch.object(subprocess, "run"), \
+                patch.object(sys, "path", list(sys.path)):
+            bootstrap["main"]()
+            producer.assert_called_once_with([])
+            producer.return_value = 1
+            with self.assertRaises(SystemExit) as exit_status:
+                bootstrap["main"]()
+            self.assertEqual(exit_status.exception.code, 1)
+
     def test_cli_packages_production_source_as_valid_notebook_without_changing_metadata(self):
         original = json.loads((ROOT / "kaggle/kernel-metadata.json").read_text())
         with tempfile.TemporaryDirectory() as temporary:
