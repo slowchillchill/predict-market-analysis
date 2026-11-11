@@ -47,8 +47,16 @@ class MigrationTests(unittest.TestCase):
                 next_cursor TEXT, completed_at TEXT, last_error TEXT)""")
             producer.collector.set_series_first_end(db)
             event = self.client.market(DAY)
-            producer.collector.save_event(db, event, fixtures.SERIES, DAY, DAY + fixtures.timedelta(days=1))
-            slug = event["markets"][0]["slug"]
+            market = event["markets"][0]
+            slug = market["slug"]
+            # Seed the historical nine-column schema independently of the
+            # current writer, which now also records optional rule metadata.
+            db.execute("INSERT INTO markets VALUES (?,?,?,?,?,?,?,?,?)", (
+                slug, str(producer.collector.utc_time(market["eventStartTime"]).date()),
+                market["id"], market["conditionId"], event["id"], market["question"],
+                fixtures.SERIES, market["eventStartTime"], market["endDate"]))
+            db.execute("INSERT INTO collection_progress(market_slug,query_params) VALUES (?,?)", (
+                slug, json.dumps(producer.core.trade_params(market["conditionId"]), sort_keys=True)))
             for index, (wallet, side) in enumerate((("buyer", "BUY"), ("seller", "SELL"))):
                 db.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                     slug, 1, index, wallet, "original-long-chain-hash", 100, side,

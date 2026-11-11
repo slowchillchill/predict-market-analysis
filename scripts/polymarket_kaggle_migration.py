@@ -125,6 +125,7 @@ def migrate_day(pipeline, stamp: str) -> dict:
             "schema_version": RAW_SCHEMA_VERSION, "date_utc": stamp, "status": "complete",
             "coverage": coverage, "error": None, "date_basis": "market_end_utc",
             "group_key": ["market_slug", "group_id"], "volume_method": VOLUME_METHOD,
+            "coverage_policy": features.get("coverage_policy", "legacy_nominal_v1"),
         })
         (folder / "README.md").write_text(DESCRIPTION)
         version = pipeline.store.publish(slug, folder, title=f"Polymarket Updown Raw {stamp}",
@@ -144,12 +145,14 @@ def migrate_day(pipeline, stamp: str) -> dict:
     bundle["source_versions"] = {stamp: {"dataset": pipeline.store.ref(slug), "version": version}}
     bundle["raw_schema_version"] = raw_schema_version
     bundle["volume_method"] = VOLUME_METHOD
+    bundle["coverage_policy"] = features.get("coverage_policy", "legacy_nominal_v1")
     analysis.save_day(pipeline.month(month_of(day)) / "features.sqlite3", features, bundle,
                       first_seen=pipeline.state["first_seen"])
     pipeline.put_bundle(bundle)
     pipeline.state["raw_days"][stamp] = {
         "slug": slug, "version": version, "status": "complete", "coverage": coverage,
         "raw_schema_version": raw_schema_version, "volume_method": VOLUME_METHOD,
+        "coverage_policy": bundle["coverage_policy"],
     }
     pipeline.refresh_daily_comparison(day + timedelta(days=1))
     pipeline.refresh_periods(day)

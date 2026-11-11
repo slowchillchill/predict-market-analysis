@@ -57,6 +57,9 @@ def window_start(today: date) -> date:
 DESCRIPTION = """Public Polymarket Crypto Updown Markets Analysis research data.
 Source: https://gamma-api.polymarket.com and https://data-api.polymarket.com/v2/trades.
 Markets are grouped by UTC market end date, retaining all available trades of each market.
+All valid conditions in the 38 target series are retained, including distinct
+contracts sharing an interval. markets.resolution_source and description preserve
+available upstream settlement rules; unknown values remain NULL.
 The collector requests taker_only=false once and retains every returned wallet row.
 Completed SQLite files store short group_id values, scoped to each market, instead
 of transaction hash strings. Unfinished markets alone retain a pending hash mapping
@@ -72,6 +75,9 @@ https://github.com/slowchillchill/predict-market-analysis
 Upstream source terms: https://polymarket.com/tos . Source notices remain applicable.
 The CC0 dedication applies to the contributor's rights in this arranged research dataset.
 An incomplete daily version is a recovery point, not a finished statistical report.
+coverage_policy identifies the collection rule. The official-series policy requires
+complete directory pagination, every planned slot, and finished trade pagination
+for every discovered condition. Older completed snapshots retain their legacy rule.
 Raw schema v3 permits unknown market start times and start dates to remain NULL;
 the source market end time still determines the UTC daily partition.
 Changed work is checkpointed about every 30 minutes. Collection stops after
@@ -259,6 +265,7 @@ class Pipeline:
             "date_utc": str(day), "status": status, "coverage": coverage, "error": error,
             "date_basis": "market_end_utc", "schema_version": RAW_SCHEMA_VERSION,
             "group_key": ["market_slug", "group_id"], "volume_method": VOLUME_METHOD,
+            "coverage_policy": result.get("coverage_policy", "legacy_nominal_v1"),
             "discovery_errors": result.get("discovery_errors", []),
             "structural_errors": result.get("structural_errors", []),
         }
@@ -268,6 +275,7 @@ class Pipeline:
             "slug": f"pm-updown-raw-{day}", "version": version,
             "status": metadata["status"], "coverage": metadata["coverage"],
             "raw_schema_version": RAW_SCHEMA_VERSION, "volume_method": VOLUME_METHOD,
+            "coverage_policy": metadata.get("coverage_policy", "legacy_nominal_v1"),
             "error": metadata["error"],
             "discovery_errors": metadata.get("discovery_errors", []),
             "structural_errors": metadata.get("structural_errors", []),
@@ -276,6 +284,13 @@ class Pipeline:
         self._restored_versions[str(day)] = version
         return reference
 
+    @staticmethod
+    def _checkpoint_signature(db: sqlite3.Connection, result: dict) -> tuple:
+        # Directory and slot proofs are persistent views; DDL changes do not
+        # increment total_changes, but must still trigger a changed checkpoint.
+        return (db.total_changes, db.execute("PRAGMA schema_version").fetchone()[0],
+                json.dumps(result, sort_keys=True))
+
     def _checkpoint_active(self) -> bool:
         active = self._active_day
         if active is None:
@@ -283,7 +298,7 @@ class Pipeline:
         db = active["db"]
         if db.in_transaction:
             raise RuntimeError("A checkpoint requires a committed page, not an active transaction")
-        signature = (db.total_changes, json.dumps(active["result"], sort_keys=True))
+        signature = self._checkpoint_signature(db, active["result"])
         if signature == active["last_signature"]:
             return False
         day = active["day"]
@@ -328,9 +343,10 @@ class Pipeline:
         db = collector.connect_database(path, series_first_end=self._first_ends())
         paused = None
         collection_error = None
-        result = {"discovery_errors": [], "structural_errors": []}
+        result = {"discovery_errors": [], "structural_errors": [],
+                  "coverage_policy": collector.coverage_policy(db)}
         self._active_day = {"day": day, "db": db, "result": result,
-                            "last_signature": (db.total_changes, json.dumps(result, sort_keys=True))}
+                            "last_signature": self._checkpoint_signature(db, result)}
         try:
             collector.collect(db, self.client, day, day + timedelta(days=1),
                 should_yield=lambda: self._collection_should_yield(historical=historical), result=result)
@@ -388,6 +404,7 @@ class Pipeline:
             bundle["source_versions"] = {stamp: {"dataset": self.store.ref(slug), "version": version}}
             bundle["raw_schema_version"] = RAW_SCHEMA_VERSION
             bundle["volume_method"] = VOLUME_METHOD
+            bundle["coverage_policy"] = metadata["coverage_policy"]
             analysis.save_day(self.month(month_of(day)) / "features.sqlite3", features, bundle, first_seen=labels)
             self.put_bundle(bundle)
             if changed:
@@ -463,6 +480,7 @@ class Pipeline:
                 source_reference={"dataset": self.store.ref(reference["slug"]), "version": reference["version"]})
             bundle["raw_schema_version"] = reference.get("raw_schema_version", 1)
             bundle["volume_method"] = reference.get("volume_method", "legacy_taker_api")
+            bundle["coverage_policy"] = reference.get("coverage_policy", "legacy_nominal_v1")
             analysis.save_day(self.month(month_of(day)) / "features.sqlite3", features, bundle,
                               first_seen=self.state["first_seen"])
             self.put_bundle(bundle)

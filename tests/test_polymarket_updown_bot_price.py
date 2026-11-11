@@ -9,10 +9,119 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import polymarket_updown_bot_price as prices
+import polymarket_updown_price_distribution as distribution
+import polymarket_trade_groups as groups
 
 
 DAY = date(2026, 11, 7)
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class OfficialCoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.db = sqlite3.connect(":memory:")
+        self.addCleanup(self.db.close)
+        self.db.executescript((ROOT / "sql/btc5m_schema.sql").read_text())
+        self.db.execute("CREATE VIEW updown_target_series(series_slug,expected_markets,first_end_time) AS "
+                        "VALUES ('daily',1,NULL),('hourly',2,NULL)")
+        self.db.executescript((ROOT / "sql/updown_daily.sql").read_text())
+        self.db.executescript("DROP VIEW updown_coverage_policy;"
+            "CREATE VIEW updown_coverage_policy(policy) AS SELECT 'official_series_all_conditions_v1';"
+            "DROP VIEW updown_expected_slots;"
+            "CREATE VIEW updown_expected_slots(series_slug,date_utc,slot_utc) AS VALUES "
+            "('daily','2026-11-07','2026-11-07'),"
+            "('hourly','2026-11-07','2026-11-07T17:00:00+00:00'),"
+            "('hourly','2026-11-07','2026-11-07T18:00:00+00:00');"
+            "DROP VIEW updown_discovery_status;"
+            "CREATE VIEW updown_discovery_status(series_slug,date_utc,listing_complete) AS VALUES "
+            "('daily','2026-11-07',1),('hourly','2026-11-07',1);")
+        with self.db:
+            for slug, series, hour in (("d1","daily",17),("d2","daily",17),
+                                       ("h1","hourly",17),("h2","hourly",17),("h3","hourly",18)):
+                self.db.execute("INSERT INTO markets(slug,condition_id,series_slug,end_time) VALUES (?,?,?,?)",
+                                (slug,slug,series,f"2026-11-07T{hour}:00:00Z"))
+                self.db.execute("INSERT INTO collection_progress(market_slug,completed_at) VALUES (?,'done')", (slug,))
+
+    def status(self):
+        return self.db.execute("SELECT expected_markets,discovered_markets,completed_markets,is_complete "
+                               "FROM updown_coverage WHERE date_utc='2026-11-07'").fetchone()
+
+    def test_all_official_conditions_share_slots_and_pass_formal_distribution(self):
+        self.assertEqual(self.status(), (5,5,5,1))
+        catalog, markets = prices._snapshot(self.db, DAY)
+        self.assertEqual(catalog, (("daily",2,None),("hourly",3,None)))
+        self.assertEqual(len(prices._complete_markets((catalog,markets), DAY)), 5)
+        self.assertEqual(distribution.load_data(self.db, DAY, bot_first_seen={})["total_markets"], 5)
+        # Reopening a writer must refresh computed views without losing proof.
+        self.db.executescript("DROP VIEW updown_series_coverage; CREATE VIEW updown_series_coverage AS "
+            "SELECT '2026-11-07' AS date_utc,'daily' AS series_slug,1 AS expected_markets,"
+            "1 AS discovered_markets,1 AS completed_markets,0 AS committed_pages,0 AS is_complete;")
+        self.assertEqual(self.status()[-1], 0)
+        self.db.executescript((ROOT / "sql/updown_daily.sql").read_text())
+        self.assertEqual(groups.coverage_policy(self.db), "official_series_all_conditions_v1")
+        self.assertEqual(self.status(), (5,5,5,1))
+
+    def test_extra_conditions_cannot_replace_a_missing_planned_slot(self):
+        with self.db:
+            self.db.execute("UPDATE markets SET end_time='2026-11-07T17:00:00Z' WHERE slug='h3'")
+        self.assertEqual(self.status(), (6,5,5,0))
+        with self.assertRaises(prices.IncompleteDay):
+            distribution.load_data(self.db, DAY, bot_first_seen={})
+
+    def test_complete_rows_without_finished_listing_are_not_complete(self):
+        self.db.executescript("DROP VIEW updown_discovery_status;"
+            "CREATE VIEW updown_discovery_status(series_slug,date_utc,listing_complete) AS VALUES "
+            "('daily','2026-11-07',0),('hourly','2026-11-07',1);")
+        self.assertEqual(self.status(), (5,5,5,0))
+        with self.assertRaises(prices.IncompleteDay):
+            prices._snapshot(self.db, DAY)
+
+    def test_every_extra_condition_must_finish_its_pagination(self):
+        with self.db:
+            self.db.execute("UPDATE collection_progress SET completed_at=NULL WHERE market_slug='d2'")
+        self.assertEqual(self.status(), (5,5,4,0))
+
+    def test_selected_modern_series_ignores_unrelated_incompleteness(self):
+        with self.db:
+            self.db.execute("UPDATE collection_progress SET completed_at=NULL WHERE market_slug='h3'")
+        selected = distribution.load_data(self.db, DAY, series_slug="daily", bot_first_seen={})
+        self.assertEqual(selected["total_markets"], 2)
+        with self.assertRaises(prices.IncompleteDay):
+            distribution.load_data(self.db, DAY, bot_first_seen={})
+        with self.db:
+            self.db.execute("UPDATE collection_progress SET completed_at=NULL WHERE market_slug='d2'")
+        with self.assertRaises(prices.IncompleteDay):
+            distribution.load_data(self.db, DAY, series_slug="daily", bot_first_seen={})
+
+    def test_absent_series_needs_explicit_discovery_status_even_with_no_slots(self):
+        with self.db:
+            self.db.execute("DELETE FROM collection_progress WHERE market_slug IN ('h1','h2','h3')")
+            self.db.execute("DELETE FROM markets WHERE series_slug='hourly'")
+        self.db.executescript("DROP VIEW updown_expected_slots;"
+            "CREATE VIEW updown_expected_slots(series_slug,date_utc,slot_utc) AS "
+            "VALUES ('daily','2026-11-07','2026-11-07');"
+            "DROP VIEW updown_discovery_status;"
+            "CREATE VIEW updown_discovery_status(series_slug,date_utc,listing_complete) AS "
+            "VALUES ('daily','2026-11-07',1);")
+        self.assertEqual(self.status(), (2,2,2,0))
+        with self.assertRaises(prices.IncompleteDay):
+            prices._snapshot(self.db, DAY)
+        # A known, not-yet-launched series is explicitly recorded as finished
+        # with zero planned slots by the collector's frozen first-market bound.
+        self.db.executescript("DROP VIEW updown_target_series;"
+            "CREATE VIEW updown_target_series(series_slug,expected_markets,first_end_time) AS "
+            "VALUES ('daily',1,NULL),('hourly',2,'2027-01-01T00:00:00Z');"
+            "DROP VIEW updown_discovery_status;"
+            "CREATE VIEW updown_discovery_status(series_slug,date_utc,listing_complete) AS "
+            "VALUES ('daily','2026-11-07',1),('hourly','2026-11-07',1);")
+        self.assertEqual(self.status(), (2,2,2,1))
+
+    def test_legacy_profile_keeps_original_nominal_equality(self):
+        self.db.executescript("DROP VIEW updown_coverage_policy;"
+                             "CREATE VIEW updown_coverage_policy(policy) AS SELECT 'legacy_nominal_v1';")
+        self.assertEqual(self.status(), (3,5,5,0))
+        with self.assertRaises(prices.IncompleteDay):
+            prices._complete_markets(prices._snapshot(self.db, DAY), DAY)
 
 
 class BotPriceTests(unittest.TestCase):

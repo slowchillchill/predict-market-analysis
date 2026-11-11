@@ -10,9 +10,12 @@ CREATE TABLE IF NOT EXISTS markets (
     title TEXT,
     series_slug TEXT,
     event_start_time TEXT,
-    end_time TEXT
+    end_time TEXT,
+    resolution_source TEXT,
+    description TEXT
 );
 CREATE INDEX IF NOT EXISTS markets_date ON markets(date_utc);
+CREATE INDEX IF NOT EXISTS markets_series_end ON markets(series_slug,end_time);
 
 CREATE TABLE IF NOT EXISTS collection_progress (
     market_slug TEXT PRIMARY KEY REFERENCES markets(slug),

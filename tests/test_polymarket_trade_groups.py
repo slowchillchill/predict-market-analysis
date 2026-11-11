@@ -196,6 +196,7 @@ class TradeGroupTests(unittest.TestCase):
         db.row_factory = sqlite3.Row
         schema = (ROOT / "sql/btc5m_schema.sql").read_text().replace("date_utc TEXT,", "date_utc TEXT NOT NULL,")
         schema = schema.replace("PRAGMA user_version = 3;", "PRAGMA user_version = 2;")
+        schema = schema.replace(",\n    resolution_source TEXT,\n    description TEXT", "")
         db.executescript(schema)
         db.executescript((ROOT / "sql/btc5m_daily.sql").read_text())
         seed(db, "pending")
@@ -219,7 +220,10 @@ class TradeGroupTests(unittest.TestCase):
             self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
             for table, values in before.items():
-                self.assertEqual([tuple(row) for row in db.execute(f"SELECT * FROM {table}")], values)
+                current = [tuple(row) for row in db.execute(f"SELECT * FROM {table}")]
+                self.assertEqual([row[:9] for row in current] if table == "markets" else current, values)
+            self.assertEqual(tuple(db.execute("SELECT resolution_source,description FROM markets").fetchone()),
+                             (None, None))
             self.assertTrue(db.execute("SELECT 1 FROM sqlite_master WHERE name='custom_market_id'").fetchone())
             with db:
                 db.execute("INSERT INTO markets(slug,date_utc,condition_id) VALUES ('unknown',NULL,'unknown')")
@@ -254,6 +258,52 @@ class TradeGroupTests(unittest.TestCase):
         self.db = core.connect_database(self.path)
         self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 3)
         self.assertIsNone(self.db.execute("SELECT date_utc FROM markets WHERE slug='unknown-start'").fetchone()[0])
+
+    def test_existing_v3_adds_nullable_rule_metadata_without_rewriting_trade_state(self):
+        core.commit_page(self.db, "a", 1, page([trade("x")], "page-2"))
+        self.db.execute("ALTER TABLE markets DROP COLUMN resolution_source")
+        self.db.execute("ALTER TABLE markets DROP COLUMN description")
+        self.db.executescript("CREATE VIEW updown_target_series(series_slug,expected_markets,first_end_time) AS "
+            "VALUES ('test',1,NULL);"
+            "CREATE VIEW updown_coverage_policy(policy) AS SELECT 'official_series_all_conditions_v1';"
+            "CREATE VIEW updown_expected_slots(series_slug,date_utc,slot_utc) AS "
+            "VALUES ('test','2026-11-09','2026-11-09');"
+            "CREATE VIEW updown_discovery_status(series_slug,date_utc,listing_complete) AS "
+            "VALUES ('test','2026-11-09',1);")
+        proof = self.db.execute("SELECT name,sql FROM sqlite_master WHERE type='view' AND name LIKE 'updown_%' "
+                                "ORDER BY name").fetchall()
+        before = {table: [tuple(row) for row in self.db.execute(f"SELECT * FROM {table}")]
+                  for table in ("trades", "collection_progress", "pending_group_map")}
+        self.assertTrue(groups.upgrade_database(self.db))
+        self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual([tuple(row) for row in self.db.execute("SELECT resolution_source,description FROM markets")],
+                         [(None, None), (None, None)])
+        for table, values in before.items():
+            self.assertEqual([tuple(row) for row in self.db.execute(f"SELECT * FROM {table}")], values)
+        self.assertEqual(self.db.execute("SELECT name,sql FROM sqlite_master WHERE type='view' "
+                         "AND name LIKE 'updown_%' ORDER BY name").fetchall(), proof)
+        self.assertFalse(groups.upgrade_database(self.db))
+        self.assertEqual(self.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_v2_parent_rebuild_preserves_rule_metadata_and_coverage_profile(self):
+        _, db = self.v2_database()
+        with closing(db):
+            db.execute("ALTER TABLE markets ADD COLUMN resolution_source TEXT")
+            db.execute("ALTER TABLE markets ADD COLUMN description TEXT")
+            with db:
+                db.execute("UPDATE markets SET resolution_source='https://source.example',description='Actual rules'")
+            db.executescript("CREATE VIEW updown_coverage_policy(policy) AS SELECT 'official_series_all_conditions_v1';"
+                             "CREATE VIEW updown_expected_slots(series_slug,date_utc,slot_utc) AS "
+                             "VALUES ('test','2026-11-09','2026-11-09');"
+                             "CREATE VIEW updown_discovery_status(series_slug,date_utc,listing_complete) AS "
+                             "VALUES ('test','2026-11-09',1);")
+            self.assertTrue(groups.upgrade_database(db))
+            self.assertEqual(tuple(db.execute("SELECT resolution_source,description FROM markets").fetchone()),
+                             ("https://source.example", "Actual rules"))
+            self.assertEqual(groups.coverage_policy(db), "official_series_all_conditions_v1")
+            self.assertEqual(tuple(db.execute("SELECT * FROM updown_expected_slots").fetchone()),
+                             ("test", "2026-11-09", "2026-11-09"))
+            self.assertEqual(db.execute("SELECT listing_complete FROM updown_discovery_status").fetchone()[0], 1)
 
 
 if __name__ == "__main__":

@@ -160,15 +160,18 @@ class KaggleAnalysisTests(unittest.TestCase):
         self.save_days({})
         features = cloud.extract_day_features(self.raw, START)
         daily = cloud.load_day(self.store, START)
-        daily.update(raw_schema_version=2, volume_method="wallet_group_first_row_v1")
+        daily.update(raw_schema_version=2, volume_method="wallet_group_first_row_v1",
+                     coverage_policy="official_series_all_conditions_v1")
         cloud.save_day(self.store, features, daily, first_seen={})
         self.raw.unlink()
         result = cloud.export_period(self.store, START, END, "weekly", {})
         self.assertEqual(result["schema_version"], 1)
         self.assertEqual(result["raw_schema_versions"][str(START)], 2)
         self.assertEqual(result["volume_methods"][str(START)], "wallet_group_first_row_v1")
+        self.assertEqual(result["coverage_policies"][str(START)], "official_series_all_conditions_v1")
         self.assertEqual(result["raw_schema_versions"][str(START + timedelta(days=1))], 1)
         self.assertEqual(result["volume_methods"][str(START + timedelta(days=1))], "legacy_taker_api")
+        self.assertEqual(result["coverage_policies"][str(START + timedelta(days=1))], "legacy_nominal_v1")
         self.assertEqual(len(result["source_versions"]), 7)
 
     def test_affected_dates_exclude_inactive_pre_hit_and_already_classified_days(self):

@@ -164,6 +164,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(metadata["schema_version"], producer.RAW_SCHEMA_VERSION)
         self.assertEqual(metadata["group_key"], ["market_slug", "group_id"])
         self.assertEqual(metadata["volume_method"], "wallet_group_first_row_v1")
+        self.assertEqual(metadata["coverage_policy"], "official_series_all_conditions_v1")
         self.assertNotIn("volume_sources", metadata)
         self.assertFalse(any(key.startswith("market_volume_") for key in metadata["coverage"]))
         self.assert_complete_raw_shape(files)
@@ -173,6 +174,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(bundle["schema_version"], 1)
         self.assertEqual(bundle["raw_schema_version"], producer.RAW_SCHEMA_VERSION)
         self.assertEqual(bundle["volume_method"], "wallet_group_first_row_v1")
+        self.assertEqual(bundle["coverage_policy"], metadata["coverage_policy"])
+        self.assertEqual(self.pipeline.state["raw_days"][str(YESTERDAY)]["coverage_policy"],
+                         metadata["coverage_policy"])
         self.assertEqual(self.pipeline.state["raw_days"][str(YESTERDAY)]["raw_schema_version"], producer.RAW_SCHEMA_VERSION)
         self.assertEqual(self.pipeline.state["raw_days"][str(YESTERDAY)]["volume_method"],
                          "wallet_group_first_row_v1")

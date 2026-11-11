@@ -14,6 +14,7 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 import polymarket_btc5m_daily as core
+from polymarket_trade_groups import coverage_policy
 
 # 范围来自 reports/crypto_updown_market_types_2026-09-17.md。
 # 小时线和日线使用实际系列标识，不能全部由币种缩写拼接。
@@ -63,6 +64,58 @@ def set_series_first_end(db: sqlite3.Connection, first_ends: dict[str, str] | No
 
 def series_first_end(db: sqlite3.Connection) -> dict[str, str | None]:
     return {row[0]: row[1] for row in db.execute("SELECT series_slug,first_end_time FROM updown_target_series")}
+
+
+OFFICIAL_COVERAGE_POLICY = "official_series_all_conditions_v1"
+
+
+def _replace_coverage_views(db: sqlite3.Connection, definitions: list[tuple[str, tuple[str, ...], list[tuple]]]) -> None:
+    if db.in_transaction:
+        raise ValueError("覆盖规则只能在已提交的分页边界更新")
+    statements = ["BEGIN IMMEDIATE"]
+    for name, columns, rows in definitions:
+        body = ("VALUES " + ",".join("(" + ",".join(db.execute("SELECT quote(?)", (value,)).fetchone()[0]
+                                                  for value in row) + ")" for row in rows)
+                if rows else "SELECT " + ",".join("NULL" for _ in columns) + " WHERE 0")
+        statements.extend([f"DROP VIEW IF EXISTS {name}", f"CREATE VIEW {name}({','.join(columns)}) AS {body}"])
+    try:
+        db.executescript(";".join(statements) + ";COMMIT;")
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _prepare_coverage(db: sqlite3.Connection, start: date, end: date) -> None:
+    """持久化真实时段清单；新一轮采集必须重新证明目录已完整遍历。"""
+    first_ends = series_first_end(db)
+    slots = [tuple(row) for row in db.execute("SELECT * FROM updown_expected_slots")]
+    listing = [tuple(row) for row in db.execute("SELECT * FROM updown_discovery_status")]
+    selected = lambda row: row[0] in TARGET_SERIES and str(start) <= row[1] < str(end)
+    slots, listing = [row for row in slots if not selected(row)], [row for row in listing if not selected(row)]
+    day = start
+    while day < end:
+        for series in TARGET_SERIES:
+            expected = list(expected_slots(series, day, first_ends=first_ends))
+            slots.extend((series, str(day), str(day) if series.endswith("-daily") else ended.isoformat())
+                         for ended in expected)
+            listing.append((series, str(day), 0 if expected else 1))
+        day += timedelta(days=1)
+    _replace_coverage_views(db, [
+        ("updown_coverage_policy", ("policy",), [(OFFICIAL_COVERAGE_POLICY,)]),
+        ("updown_expected_slots", ("series_slug", "date_utc", "slot_utc"), slots),
+        ("updown_discovery_status", ("series_slug", "date_utc", "listing_complete"), listing),
+    ])
+
+
+def _listing_finished(db: sqlite3.Connection, series: str, start: date, end: date, result: dict) -> None:
+    if coverage_policy(db) != OFFICIAL_COVERAGE_POLICY:
+        return
+    if any(error.get("series_slug") == series and error.get("stage") != "trades"
+           for error in result["structural_errors"]):
+        return
+    rows = [(row[0], row[1], 1 if row[0] == series and str(start) <= row[1] < str(end) else row[2])
+            for row in db.execute("SELECT * FROM updown_discovery_status")]
+    _replace_coverage_views(db, [("updown_discovery_status", ("series_slug", "date_utc", "listing_complete"), rows)])
 
 
 def utc_time(value: str) -> datetime:
@@ -148,13 +201,15 @@ def _result(result: dict | None) -> dict:
 
 
 def _record_error(result: dict, error: Exception, *, series: str, stage: str,
-                  market_slug=None, day=None, code=None, structural=None) -> None:
+                  market_slug=None, day=None, code=None, structural=None, slot=None) -> None:
     if structural is None:
         structural = isinstance(error, (DiscoveryError, KeyError, TypeError, ValueError, sqlite3.Error))
     item = {"code": code or getattr(error, "code", "discovery_request_failed"), "stage": stage,
             "series_slug": series, "market_slug": getattr(error, "market_slug", None) or market_slug,
             "date_utc": getattr(error, "date_utc", None) or (str(day) if day else None),
             "message": str(error), "structural": structural}
+    if slot is not None:
+        item["slot_utc"] = slot
     if isinstance(error, core.FetchError):
         item["http_status"] = error.status_code
     if item not in result["discovery_errors"]:
@@ -164,12 +219,12 @@ def _record_error(result: dict, error: Exception, *, series: str, stage: str,
     print(f"发现 {series} 未完成：{item['message']}", file=sys.stderr, flush=True)
 
 
-def _clear_resolved(result: dict, series: str, day: date, slug: str) -> None:
+def _clear_resolved(result: dict, series: str, day: date, slug: str, ended: datetime) -> None:
     def unresolved(item):
         if item.get("series_slug") != series:
             return True
         if item.get("code") == "missing_market" and item.get("date_utc") == str(day):
-            return False
+            return not (series.endswith("-daily") or item.get("slot_utc") == ended.isoformat())
         return not (item.get("market_slug") == slug and item.get("code") in
                     {"invalid_market_metadata", "invalid_start_time"})
     for key in ("discovery_errors", "structural_errors"):
@@ -237,24 +292,21 @@ def _save_market(db: sqlite3.Connection, event: dict, market: dict, series: str)
             raise DiscoveryError("同一 condition 的系列或结束时刻冲突", code="condition_identity_conflict",
                                  market_slug=slug, date_utc=str(ended.date()))
         slug = by_condition[0]  # 别名不能改写已有主键和交易归属。
-    if series.endswith("-daily"):
-        other = db.execute("SELECT condition_id FROM markets WHERE series_slug=? AND date(end_time)=? "
-                           "AND condition_id IS NOT NULL AND condition_id<>? LIMIT 1",
-                           (series, str(ended.date()), condition)).fetchone()
-        if other is not None:
-            raise DiscoveryError("同一系列的 UTC 日市场存在多个不同 condition，未选择或覆盖其中任意一个",
-                                 code="ambiguous_daily_slot", market_slug=slug, date_utc=str(ended.date()))
     db.execute(
         "INSERT INTO markets(slug,date_utc,market_id,condition_id,event_id,title,"
-        "series_slug,event_start_time,end_time) VALUES (?,?,?,?,?,?,?,?,?) "
+        "series_slug,event_start_time,end_time,resolution_source,description) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(slug) DO UPDATE SET market_id=COALESCE(excluded.market_id,markets.market_id), "
         "condition_id=excluded.condition_id,event_id=COALESCE(excluded.event_id,markets.event_id), "
         "title=COALESCE(excluded.title,markets.title),series_slug=excluded.series_slug, "
         "date_utc=COALESCE(excluded.date_utc,markets.date_utc), "
-        "event_start_time=COALESCE(excluded.event_start_time,markets.event_start_time),end_time=excluded.end_time",
+        "event_start_time=COALESCE(excluded.event_start_time,markets.event_start_time),end_time=excluded.end_time, "
+        "resolution_source=COALESCE(excluded.resolution_source,markets.resolution_source), "
+        "description=COALESCE(excluded.description,markets.description)",
         (slug, str(began.date()) if began else None, str(market["id"]) if market.get("id") is not None else None,
          condition, str(event["id"]) if event.get("id") is not None else None, market.get("question"),
-         series, began.isoformat() if began else None, ended.isoformat()),
+         series, began.isoformat() if began else None, ended.isoformat(),
+         market.get("resolutionSource") if market.get("resolutionSource") is not None else event.get("resolutionSource"),
+         market.get("description") if market.get("description") is not None else event.get("description")),
     )
     db.execute(
         "INSERT INTO collection_progress(market_slug,query_params) VALUES (?,?) "
@@ -286,7 +338,8 @@ def save_event(db: sqlite3.Connection, event: dict, series: str, start: date, en
             with db:
                 slug = _save_market(db, event, valid, series)
             saved += 1
-            _clear_resolved(result, series, utc_time(valid["endDate"]).date(), slug)
+            ended = utc_time(valid["endDate"])
+            _clear_resolved(result, series, ended.date(), slug, ended)
         except (DiscoveryError, KeyError, TypeError, ValueError, sqlite3.Error) as exc:
             _record_error(result, exc, series=series, stage=stage,
                           market_slug=market.get("slug") if isinstance(market, dict) else None)
@@ -316,10 +369,12 @@ def discover_series(db: sqlite3.Connection, client: core.Client, series: str,
             raise DiscoveryError("Gamma 分页 events 不是数组")
         for event in events:
             save_event(db, event, series, start, end, result=result, stage="series_listing")
-        core.check_pause(should_yield)
         cursor = page.get("next_cursor")
         if not cursor:
+            _listing_finished(db, series, start, end, result)
+            core.check_pause(should_yield)
             return result
+        core.check_pause(should_yield)
 
 
 def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start: date, end: date, *,
@@ -328,7 +383,6 @@ def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start:
     """补查列表接口未返回的预期时段；404 等失败保留为覆盖缺口。"""
     result = _result(result)
     existing = {}
-    discovered_counts = {}
     conditions = {}
     for row in db.execute(
         "SELECT series_slug,end_time,condition_id FROM markets WHERE date(end_time)>=? AND date(end_time)<? "
@@ -336,7 +390,6 @@ def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start:
         ended = utc_time(row["end_time"])
         key = row["series_slug"], ended.date()
         existing.setdefault(key, set()).add(ended)
-        discovered_counts[key] = discovered_counts.get(key, 0) + 1
         conditions.setdefault(key, set()).add(row["condition_id"])
     day = start
     first_ends = series_first_end(db)
@@ -345,17 +398,9 @@ def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start:
             slots = list(expected_slots(series, day, first_ends=first_ends))
             if series.endswith("-daily") and slots:
                 found = conditions.get((series, day), set())
-                if len(found) > 1:
-                    _record_error(result, DiscoveryError("同一系列的 UTC 日市场存在多个不同 condition",
-                                  code="ambiguous_daily_slot", date_utc=str(day)),
-                                  series=series, stage="missing_market")
+                if found:
+                    # 同一天可存在多个真实合约；旧 daily 也可能在 12Z 结束。
                     continue
-                if len(found) == 1:
-                    # 旧 daily endDate 可为 12Z；按唯一 UTC 日槽位匹配，不与模板小时比较。
-                    continue
-            # 完整列表是实际元数据。达到预期数量时，不再凭推算时刻补查不存在的 slug。
-            if discovered_counts.get((series, day), 0) >= len(slots):
-                continue
             for ended in slots:
                 if ended in existing.get((series, day), set()):
                     continue
@@ -374,12 +419,17 @@ def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start:
                     core.check_pause(should_yield)
                     if saved and not series.endswith("-daily"):
                         break
-                if saved:
+                actual_ends = [utc_time(row[0]) for row in db.execute(
+                    "SELECT end_time FROM markets WHERE series_slug=? AND date(end_time)=? AND condition_id IS NOT NULL",
+                    (series, str(day)))]
+                covered = bool(actual_ends) if series.endswith("-daily") else ended in actual_ends
+                if covered:
                     print(f"详情补查 {slug} 完成", flush=True)
                 else:
                     detail = "; ".join(failures) or "响应未包含该系列、结束日的有效 Up/Down 市场"
                     _record_error(result, ValueError(detail), series=series, stage="missing_market",
-                                  market_slug=slug, day=day, code="missing_market", structural=False)
+                                  market_slug=slug, day=day, code="missing_market", structural=False,
+                                  slot=str(day) if series.endswith("-daily") else ended.isoformat())
         day += timedelta(days=1)
     return result
 
@@ -399,6 +449,8 @@ def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date,
             result: dict | None = None) -> dict:
     result = _result(result)
     try:
+        _prepare_coverage(db, start, end)
+        result["coverage_policy"] = coverage_policy(db)
         return _collect(db, client, start, end, should_yield=should_yield, retry_failed=retry_failed, result=result)
     except (Exception, KeyboardInterrupt) as exc:
         exc.collection_result = result
@@ -441,9 +493,6 @@ def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, e
     ).fetchall()
     for index, row in enumerate(pending, 1):
         slug = row["slug"]
-        if any(item.get("code") == "ambiguous_daily_slot" and item.get("series_slug") == row["series_slug"]
-               and item.get("date_utc") == row["end_day"] for item in result["structural_errors"]):
-            continue
         if ("wallet", slug) in blocked:
             continue
         core.check_pause(should_yield)

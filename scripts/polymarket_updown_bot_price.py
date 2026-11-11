@@ -14,6 +14,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 
 from polymarket_updown_rules import MAX_INTERVAL_SECONDS, MIN_SPAN_MINUTES
+from polymarket_trade_groups import coverage_policy
 
 
 class IncompleteDay(ValueError):
@@ -61,6 +62,19 @@ def _snapshot(db: sqlite3.Connection, day: date,
                          "ORDER BY series_slug", (series_slug, series_slug)))
     if series_slug is not None and not catalog:
         raise ValueError(f"未知市场系列：{series_slug}。")
+    if coverage_policy(db) == "official_series_all_conditions_v1":
+        status = (_rows(db, "SELECT is_complete FROM updown_coverage WHERE date_utc=?", (day.isoformat(),))
+                  if series_slug is None else _rows(db,
+                    "SELECT is_complete FROM updown_series_coverage WHERE date_utc=? AND series_slug=?",
+                    (day.isoformat(), series_slug)))
+        if not status or status[0][0] != 1:
+            raise IncompleteDay(f"{day} 的官方系列目录、计划时段或成交分页尚未完整。")
+        # 当日覆盖已检查全部计划时段与列表证明；这里用真实合约数量，
+        # 避免再次用旧 daily=1 或小时=24 拒绝同一时段的不同官方合约。
+        catalog = tuple((series, count, None) for series, count in _rows(db,
+            "SELECT series_slug,expected_markets FROM updown_series_coverage "
+            "WHERE date_utc=? AND (? IS NULL OR series_slug=?) ORDER BY series_slug",
+            (day.isoformat(), series_slug, series_slug)))
     markets = tuple(_rows(db, """
         SELECT m.slug, m.series_slug, m.condition_id, m.end_time,
                p.committed_page, p.completed_at, p.next_cursor, p.last_error, p.query_params

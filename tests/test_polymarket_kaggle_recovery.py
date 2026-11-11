@@ -68,7 +68,7 @@ class RecoveryTests(unittest.TestCase):
             payload = original(url, params)
             if url == producer.collector.GAMMA_EVENTS_KEYSET and params['end_date_min'].startswith(str(fixtures.YESTERDAY)):
                 second = copy.deepcopy(payload['events'][0]['markets'][0])
-                second.update(slug='another-real-daily', conditionId='another-condition')
+                second.update(conditionId='another-condition')
                 payload['events'][0]['markets'].append(second)
             return payload
 
@@ -153,7 +153,7 @@ class RecoveryTests(unittest.TestCase):
         db = producer.collector.connect_database(folder / 'data.sqlite3')
         result = {'discovery_errors': [], 'structural_errors': []}
         self.pipeline._active_day = {'day': day, 'db': db, 'result': result,
-                                    'last_signature': (db.total_changes, json.dumps(result, sort_keys=True))}
+                                    'last_signature': self.pipeline._checkpoint_signature(db, result)}
         try:
             self.assertFalse(self.pipeline._checkpoint_active())
             producer.collector.discover_series(db, self.client, fixtures.SERIES, day, fixtures.TODAY)
@@ -163,6 +163,29 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(len(self.store.published), publications)
             self.assertTrue((folder / 'data.sqlite3').exists())
             self.assertIsNone(db.execute('SELECT completed_at FROM collection_progress').fetchone()[0])
+        finally:
+            self.pipeline._active_day = None
+            db.close()
+
+    def test_directory_view_change_without_new_rows_is_checkpointed(self):
+        day = fixtures.YESTERDAY
+        folder = self.root / 'work/raw' / str(day)
+        db = producer.collector.connect_database(folder / 'data.sqlite3')
+        result = {'discovery_errors': [], 'structural_errors': []}
+        self.pipeline._active_day = {'day': day, 'db': db, 'result': result,
+                                    'last_signature': self.pipeline._checkpoint_signature(db, result)}
+        try:
+            changes = db.total_changes
+            db.execute('DROP VIEW updown_discovery_status')
+            db.execute("CREATE VIEW updown_discovery_status(series_slug,date_utc,listing_complete) "
+                       "AS SELECT 'btc-up-or-down-daily','2026-11-09',1")
+            self.assertEqual(db.total_changes, changes)
+            with self.quiet():
+                self.assertTrue(self.pipeline._checkpoint_active())
+            files = self.latest_files(f'pm-updown-raw-{day}')
+            with contextlib.closing(self.inspect_raw(files)) as restored:
+                self.assertEqual(restored.execute('SELECT listing_complete FROM updown_discovery_status').fetchone()[0], 1)
+            self.assertFalse(self.pipeline._checkpoint_active())
         finally:
             self.pipeline._active_day = None
             db.close()

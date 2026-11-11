@@ -68,6 +68,135 @@ class UpdownTests(unittest.TestCase):
         return copy.deepcopy(next(item["event"] for item in json.loads(fixture.read_text())["samples"]
                                   if item["date_utc"] == stamp))
 
+    def test_real_btc_variants_all_conditions_are_saved_and_collected(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures/polymarket_btc_variants_20261110.json").read_text())
+        day = date.fromisoformat(fixture["date_utc"])
+        daily, hourly = "btc-up-or-down-daily", "btc-up-or-down-hourly"
+        events = {daily: fixture["real_daily_events"], hourly: fixture["real_hourly_overlap_events"][:]}
+        # Only the four overlapping hourly contracts are real fixture records.
+        # Fill the other 22 distinct hourly slots with explicitly synthetic rows.
+        overlap_ends = {up.utc_time(e["markets"][0]["endDate"]) for e in events[hourly]}
+        for ended in up.expected_slots(hourly, day):
+            if ended not in overlap_ends:
+                events[hourly].append(event("synthetic-hour-" + str(ended.hour), ended.isoformat(),
+                                            (ended-timedelta(hours=1)).isoformat(), hourly))
+        self.assertEqual(len(events[hourly]), 26)
+        alias = copy.deepcopy(events[daily][0])
+        alias["markets"][0]["slug"] += "-same-condition-alias"
+        events[daily] = [*events[daily], alias]
+        client, trade_conditions, second_hourly_page = Mock(), [], []
+
+        def fetch(url, params):
+            if url == up.GAMMA_SERIES:
+                return [{"slug": params["slug"], "id": params["slug"]}]
+            if url == up.GAMMA_EVENTS_KEYSET:
+                rows = events[params["series_id"]]
+                if params["series_id"] == hourly:
+                    if not params.get("after_cursor"):
+                        return {"events": rows[:25], "next_cursor": "last-hourly-page"}
+                    second_hourly_page.append(True)
+                    return {"events": rows[25:], "next_cursor": None}
+                return {"events": rows, "next_cursor": None}
+            self.assertEqual(url, up.core.TRADES_URL)
+            trade_conditions.append(params["condition"])
+            return {"data": [], "pagination": {"next_cursor": None}}
+
+        client.get.side_effect = fetch
+        with patch.dict(up.TARGET_SERIES, {daily: 1, hourly: 24}, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            up.set_series_first_end(self.db)
+            result = up.collect(self.db, client, day, day+timedelta(days=1))
+        self.assertEqual(result["structural_errors"], [])
+        self.assertEqual(result["coverage_policy"], "official_series_all_conditions_v1")
+        self.assertTrue(second_hourly_page)
+        self.assertEqual(len(trade_conditions), 28)
+        self.assertEqual(len(set(trade_conditions)), 28)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM markets").fetchone()[0], 28)
+        status = up.coverage(self.db, str(day))
+        self.assertEqual((status["expected_markets"], status["completed_markets"], status["is_complete"]), (28, 28, 1))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM updown_expected_slots").fetchone()[0], 25)
+        self.assertEqual([row[0] for row in self.db.execute("SELECT listing_complete FROM updown_discovery_status")], [1, 1])
+        for observed in fixture["real_daily_events"] + fixture["real_hourly_overlap_events"]:
+            market = observed["markets"][0]
+            stored = self.db.execute("SELECT resolution_source,description FROM markets WHERE condition_id=?",
+                                     (market["conditionId"],)).fetchone()
+            self.assertEqual(tuple(stored), (market["resolutionSource"], market["description"]))
+        self.db.close()
+        with patch.dict(up.TARGET_SERIES, {daily: 1, hourly: 24}, clear=True):
+            self.db = up.connect_database(self.path)
+        self.assertEqual(up.coverage_policy(self.db), "official_series_all_conditions_v1")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM updown_expected_slots").fetchone()[0], 25)
+        self.assertTrue(up.coverage(self.db, str(day))["is_complete"])
+
+    def test_listing_failure_is_not_repaired_by_successful_slug_guess(self):
+        series, day = "btc-up-or-down-daily", date(2025, 4, 2)
+        observed = self.historical_sample(str(day))
+        client = Mock()
+
+        def fetch(url, params):
+            if url == up.GAMMA_SERIES:
+                return [{"slug": series, "id": "41"}]
+            if url == up.GAMMA_EVENTS_KEYSET:
+                raise up.core.FetchError("HTTP503", status_code=503)
+            if url == up.core.TRADES_URL:
+                return {"data": [], "pagination": {"next_cursor": None}}
+            return observed
+
+        client.get.side_effect = fetch
+        with patch.dict(up.TARGET_SERIES, {series: 1}, clear=True), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            up.set_series_first_end(self.db)
+            result = up.collect(self.db, client, day, day+timedelta(days=1))
+        self.assertEqual(result["structural_errors"], [])
+        self.assertEqual(self.db.execute("SELECT listing_complete FROM updown_discovery_status").fetchone()[0], 0)
+        status = up.coverage(self.db, str(day))
+        self.assertEqual((status["discovered_markets"], status["completed_markets"], status["is_complete"]), (1, 1, 0))
+        self.assertEqual(result["discovery_errors"][0]["stage"], "series_listing")
+
+    def test_each_collect_resets_old_listing_proof_before_a_safe_pause(self):
+        series, day = "btc-up-or-down-daily", date(2025, 4, 2)
+        observed, client = self.historical_sample(str(day)), Mock()
+        client.get.side_effect = [[{"slug": series, "id": "41"}], {"events": [observed]},
+                                  {"data": [], "pagination": {"next_cursor": None}}]
+        with patch.dict(up.TARGET_SERIES, {series: 1}, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            up.set_series_first_end(self.db)
+            up.collect(self.db, client, day, day+timedelta(days=1))
+            self.assertTrue(up.coverage(self.db, str(day))["is_complete"])
+            client.get.reset_mock()
+            with self.assertRaises(up.core.CollectionPaused):
+                up.collect(self.db, client, day, day+timedelta(days=1), should_yield=lambda: True)
+        client.get.assert_not_called()
+        self.assertEqual(self.db.execute("SELECT listing_complete FROM updown_discovery_status").fetchone()[0], 0)
+        self.assertFalse(up.coverage(self.db, str(day))["is_complete"])
+        self.assertFalse(self.db.in_transaction)
+
+    def test_identity_conflicts_remain_structural_and_block_listing_proof(self):
+        series, day = "btc-up-or-down-daily", date(2025, 4, 2)
+        observed = self.historical_sample(str(day))
+        conflicting = copy.deepcopy(observed)
+        conflicting["markets"][0]["conditionId"] = "different-condition-for-same-slug"
+        client = Mock()
+        client.get.side_effect = [[{"slug": series, "id": "41"}], {"events": [observed, conflicting]},
+                                  {"data": [], "pagination": {"next_cursor": None}}]
+        with patch.dict(up.TARGET_SERIES, {series: 1}, clear=True), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            up.set_series_first_end(self.db)
+            result = up.collect(self.db, client, day, day+timedelta(days=1))
+        self.assertEqual(result["structural_errors"][0]["code"], "slug_identity_conflict")
+        self.assertEqual(self.db.execute("SELECT listing_complete FROM updown_discovery_status").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM markets").fetchone()[0], 1)
+        self.assertFalse(up.coverage(self.db, str(day))["is_complete"])
+
+    def test_actual_rule_fields_can_come_from_event_without_inventing_values(self):
+        series, day = "btc-up-or-down-daily", date(2025, 4, 2)
+        observed = self.historical_sample(str(day))
+        observed.update(resolutionSource="https://example.test/official-source", description="actual event rule")
+        up.save_event(self.db, observed, series, day, day+timedelta(days=1))
+        self.assertEqual(tuple(self.db.execute("SELECT resolution_source,description FROM markets").fetchone()),
+                         ("https://example.test/official-source", "actual event rule"))
+        up.save_event(self.db, self.historical_sample(str(day)), series, day, day+timedelta(days=1))
+        self.assertEqual(tuple(self.db.execute("SELECT resolution_source,description FROM markets").fetchone()),
+                         ("https://example.test/official-source", "actual event rule"))
+
     def test_real_old_daily_metadata_keeps_unknown_start_null_and_original_end(self):
         series = "btc-up-or-down-daily"
         for stamp in ("2025-03-15", "2025-04-02", "2026-11-09"):
@@ -171,7 +300,7 @@ class UpdownTests(unittest.TestCase):
         self.assertEqual(tuple(self.db.execute("SELECT * FROM collection_progress").fetchone()), before)
         self.assertEqual(result["structural_errors"], [])
 
-    def test_daily_ambiguity_is_returned_even_if_one_market_is_already_complete(self):
+    def test_same_daily_slot_collects_each_real_condition_instead_of_rejecting_it(self):
         series, day = "btc-up-or-down-daily", date(2025, 4, 2)
         first = self.historical_sample(str(day))
         up.save_event(self.db, first, series, day, day+timedelta(days=1))
@@ -181,16 +310,18 @@ class UpdownTests(unittest.TestCase):
         second = copy.deepcopy(first)
         second["markets"][0].update(slug="different-valid-condition", conditionId="different-condition")
         client = Mock()
-        client.get.side_effect = [[{"slug": series, "id": "41"}], {"events": [first, second], "next_cursor": None}]
+        client.get.side_effect = [[{"slug": series, "id": "41"}], {"events": [first, second], "next_cursor": None},
+                                  {"data": [], "pagination": {"next_cursor": None}}]
         supplied = {}
         with patch.dict(up.TARGET_SERIES, {series: 1}, clear=True), contextlib.redirect_stdout(io.StringIO()), \
              contextlib.redirect_stderr(io.StringIO()):
             result = up.collect(self.db, client, day, day+timedelta(days=1), result=supplied)
         self.assertIs(result, supplied)
         self.assertTrue(up.coverage(self.db, str(day))["is_complete"])
-        self.assertEqual(result["structural_errors"][0]["code"], "ambiguous_daily_slot")
-        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM markets").fetchone()[0], 1)
-        self.assertTrue(all(call.args[0] != up.core.TRADES_URL for call in client.get.call_args_list))
+        self.assertEqual(result["structural_errors"], [])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM markets").fetchone()[0], 2)
+        self.assertEqual([call.args[1]["condition"] for call in client.get.call_args_list
+                          if call.args[0] == up.core.TRADES_URL], ["different-condition"])
 
     def test_malformed_market_does_not_roll_back_other_markets_in_the_same_page(self):
         first = event("good-first", "2026-09-17T00:00:00Z")
@@ -539,7 +670,9 @@ class UpdownTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             up.collect(self.db, client, START, END)
         client.get.assert_not_called()
-        self.assertEqual(load_market_volume(self.db, START, END)["volume_micro_usdc"], 200000)
+        # Mocked discovery has not proved the official directory complete.
+        self.assertIsNone(load_market_volume(self.db, START, END)["volume_micro_usdc"])
+        self.assertFalse(up.coverage(self.db, str(START))["is_complete"])
         self.assertIsNone(self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_volume'").fetchone())
         state = self.db.execute("SELECT * FROM collection_progress WHERE market_slug='done-wallet'").fetchone()
         self.assertEqual(state["committed_page"], 1)
@@ -556,7 +689,8 @@ class UpdownTests(unittest.TestCase):
             up.collect(self.db, client, START, END)
         self.assertEqual(client.get.call_count, 2)
         self.assertTrue(all(call.args[1]["taker_only"] == "false" for call in client.get.call_args_list))
-        self.assertEqual(load_market_volume(self.db, START, END)["volume_micro_usdc"], 400000)
+        self.assertIsNone(load_market_volume(self.db, START, END)["volume_micro_usdc"])
+        self.assertEqual(self.db.execute("SELECT SUM(amount_micro_usdc) FROM trades").fetchone()[0], 400000)
 
     def test_pause_after_wallet_page_commit_preserves_group_map_without_market_error(self):
         self.discover([event("done-wallet", "2026-09-17T00:00:00Z")])
@@ -692,10 +826,10 @@ class UpdownTests(unittest.TestCase):
         self.assertEqual(up.market_slug(series, datetime(2026, 3, 8, 9, tzinfo=timezone.utc)),
                          'btc-updown-4h-1772946000')
 
-    def test_complete_series_does_not_lookup_predicted_missing_slots(self):
+    def test_extra_off_grid_conditions_cannot_hide_missing_expected_slots(self):
         day = date(2026, 11, 9)
         series = 'btc-up-or-down-4h'
-        # 即使实际时间不匹配推算网格，已达到预期市场数量也不能继续猜 slug。
+        # 六个错误小时的条件不能抵掉六个实际计划时段。
         with self.db:
             for index, hour in enumerate((0, 4, 8, 12, 16, 20)):
                 self.db.execute('INSERT INTO markets(slug,date_utc,condition_id,series_slug,end_time) '
@@ -703,9 +837,11 @@ class UpdownTests(unittest.TestCase):
                                 (f'listed-{index}', str(day), f'condition-{index}', series,
                                  datetime(2026, 11, 9, hour, tzinfo=timezone.utc).isoformat()))
         client = Mock()
-        with patch.dict(up.TARGET_SERIES, {series: 6}, clear=True):
-            up.discover_missing_markets(self.db, client, day, day + timedelta(days=1))
-        client.get.assert_not_called()
+        client.get.side_effect = up.core.FetchError("HTTP404", status_code=404)
+        with patch.dict(up.TARGET_SERIES, {series: 6}, clear=True), contextlib.redirect_stderr(io.StringIO()):
+            result = up.discover_missing_markets(self.db, client, day, day + timedelta(days=1))
+        self.assertEqual(client.get.call_count, 6)
+        self.assertEqual(len(result["discovery_errors"]), 6)
 
     def test_four_hour_winter_gap_queries_only_correct_missing_slug(self):
         day = date(2026, 11, 9)
