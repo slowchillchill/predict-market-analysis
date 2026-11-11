@@ -190,6 +190,71 @@ class TradeGroupTests(unittest.TestCase):
             groups.upgrade_database(fake)
         fake.execute.assert_called_once_with("PRAGMA database_list")
 
+    def v2_database(self):
+        path = Path(self.temp.name) / "v2.sqlite3"
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        schema = (ROOT / "sql/btc5m_schema.sql").read_text().replace("date_utc TEXT,", "date_utc TEXT NOT NULL,")
+        schema = schema.replace("PRAGMA user_version = 3;", "PRAGMA user_version = 2;")
+        db.executescript(schema)
+        db.executescript((ROOT / "sql/btc5m_daily.sql").read_text())
+        seed(db, "pending")
+        core.commit_page(db, "pending", 1, page([trade("x")], "page-2"))
+        with db:
+            db.execute("UPDATE markets SET event_start_time='2026-11-08T17:00:00Z',"
+                       "end_time='2026-11-09T17:00:00Z' WHERE slug='pending'")
+        db.execute("CREATE INDEX custom_market_id ON markets(market_id)")
+        return path, db
+
+    def test_v2_markets_constraint_is_rebuilt_without_changing_children_or_known_times(self):
+        path, db = self.v2_database()
+        with closing(db):
+            before = {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table}")]
+                      for table in ("markets", "trades", "collection_progress", "pending_group_map")}
+            with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro", uri=True)) as immutable:
+                self.assertEqual(groups.group_column(immutable), "group_id")
+                self.assertEqual(immutable.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertTrue(groups.upgrade_database(db))
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+            for table, values in before.items():
+                self.assertEqual([tuple(row) for row in db.execute(f"SELECT * FROM {table}")], values)
+            self.assertTrue(db.execute("SELECT 1 FROM sqlite_master WHERE name='custom_market_id'").fetchone())
+            with db:
+                db.execute("INSERT INTO markets(slug,date_utc,condition_id) VALUES ('unknown',NULL,'unknown')")
+            self.assertIsNone(db.execute("SELECT date_utc FROM markets WHERE slug='unknown'").fetchone()[0])
+            self.assertFalse(groups.upgrade_database(db))
+
+    def test_v3_market_migration_failure_restores_old_constraints_views_and_foreign_keys(self):
+        _, db = self.v2_database()
+        with closing(db):
+            upgrade = groups._upgrade_market_start_nullability
+
+            def fail_after_parent_swap(connection):
+                upgrade(connection)
+                raise RuntimeError("simulate interruption before commit")
+
+            with patch.object(groups, "_upgrade_market_start_nullability", side_effect=fail_after_parent_swap), \
+                    self.assertRaises(RuntimeError):
+                groups.upgrade_database(db)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            self.assertEqual(next(row[3] for row in db.execute("PRAGMA table_info(markets)") if row[1] == "date_utc"), 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM pending_group_map").fetchone()[0], 1)
+            self.assertIsNotNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='btc5m_coverage'").fetchone())
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_v3_connect_does_not_downgrade_or_assign_an_unknown_start_date(self):
+        with self.db:
+            self.db.execute("INSERT INTO markets(slug,date_utc,condition_id,end_time) "
+                            "VALUES ('unknown-start',NULL,'unknown-start','2025-04-02T12:00:00Z')")
+        self.db.close()
+        self.db = core.connect_database(self.path)
+        self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertIsNone(self.db.execute("SELECT date_utc FROM markets WHERE slug='unknown-start'").fetchone()[0])
+
 
 if __name__ == "__main__":
     unittest.main()

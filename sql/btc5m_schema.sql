@@ -3,7 +3,7 @@ PRAGMA foreign_keys = ON;
 -- 未发现的标准时段也占一行，元数据保持 NULL，不能当作零成交。
 CREATE TABLE IF NOT EXISTS markets (
     slug TEXT PRIMARY KEY,
-    date_utc TEXT NOT NULL,
+    date_utc TEXT,
     market_id TEXT,
     condition_id TEXT UNIQUE,
     event_id TEXT,
@@ -50,4 +50,4 @@ CREATE TABLE IF NOT EXISTS pending_group_map (
     UNIQUE (market_slug, group_id)
 ) WITHOUT ROWID;
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;

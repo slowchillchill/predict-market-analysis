@@ -66,7 +66,12 @@ def series_first_end(db: sqlite3.Connection) -> dict[str, str | None]:
 
 
 def utc_time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    if not isinstance(value, str):
+        raise ValueError("时间字段必须是含时区的字符串")
+    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if stamp.tzinfo is None:
+        raise ValueError("时间字段缺少时区，不能推断 UTC 日期")
+    return stamp.astimezone(timezone.utc)
 
 
 def midnight(day: date) -> datetime:
@@ -120,37 +125,178 @@ def market_slug(series: str, ended: datetime) -> str:
     return f"{coin}-up-or-down-{stamp_text}-{hour}{'am' if local.hour < 12 else 'pm'}-et"
 
 
-def save_event(db: sqlite3.Connection, event: dict, series: str, start: date, end: date) -> None:
-    membership = {s["slug"] for s in event.get("series", [])}
+def market_slug_candidates(series: str, ended: datetime) -> list[str]:
+    current = market_slug(series, ended)
+    if not series.endswith("-daily"):
+        return [current]
+    # 已由官方历史样本确认的三种名称；HTTP 200 后仍须核对系列、结束日与 condition。
+    yearless = current.rsplit("-", 1)[0]
+    return [current, yearless, yearless + "-noon"]
+
+
+class DiscoveryError(ValueError):
+    def __init__(self, message: str, *, code: str = "invalid_market_metadata", market_slug=None, date_utc=None):
+        super().__init__(message)
+        self.code, self.market_slug, self.date_utc = code, market_slug, date_utc
+
+
+def _result(result: dict | None) -> dict:
+    result = {} if result is None else result
+    result.setdefault("discovery_errors", [])
+    result.setdefault("structural_errors", [])
+    return result
+
+
+def _record_error(result: dict, error: Exception, *, series: str, stage: str,
+                  market_slug=None, day=None, code=None, structural=None) -> None:
+    if structural is None:
+        structural = isinstance(error, (DiscoveryError, KeyError, TypeError, ValueError, sqlite3.Error))
+    item = {"code": code or getattr(error, "code", "discovery_request_failed"), "stage": stage,
+            "series_slug": series, "market_slug": getattr(error, "market_slug", None) or market_slug,
+            "date_utc": getattr(error, "date_utc", None) or (str(day) if day else None),
+            "message": str(error), "structural": structural}
+    if isinstance(error, core.FetchError):
+        item["http_status"] = error.status_code
+    if item not in result["discovery_errors"]:
+        result["discovery_errors"].append(item)
+    if structural and item not in result["structural_errors"]:
+        result["structural_errors"].append(item)
+    print(f"发现 {series} 未完成：{item['message']}", file=sys.stderr, flush=True)
+
+
+def _clear_resolved(result: dict, series: str, day: date, slug: str) -> None:
+    def unresolved(item):
+        if item.get("series_slug") != series:
+            return True
+        if item.get("code") == "missing_market" and item.get("date_utc") == str(day):
+            return False
+        return not (item.get("market_slug") == slug and item.get("code") in
+                    {"invalid_market_metadata", "invalid_start_time"})
+    for key in ("discovery_errors", "structural_errors"):
+        result[key][:] = [item for item in result[key] if unresolved(item)]
+
+
+def _target_market(event: dict, market: dict, series: str, start: date, end: date) -> dict | None:
+    listed_series = event.get("series") or []
+    if not isinstance(listed_series, list):
+        raise DiscoveryError("事件 series 不是数组", market_slug=market.get("slug"))
+    membership = {s.get("slug") for s in listed_series if isinstance(s, dict)}
     membership.add(event.get("seriesSlug"))
     if series not in membership:
-        return
-    for market in event["markets"]:
+        return None
+    slug, ended = market.get("slug"), None
+    try:
         ended = utc_time(market["endDate"])
-        # Gamma 时间边界可能包含上限，必须在市场层落实半开区间。
         if not midnight(start) <= ended < midnight(end):
-            continue
-        began = utc_time(market["eventStartTime"])
-        slug = market["slug"]
-        db.execute(
-            "INSERT INTO markets(slug,date_utc,market_id,condition_id,event_id,title,"
-            "series_slug,event_start_time,end_time) VALUES (?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(slug) DO UPDATE SET market_id=excluded.market_id, "
-            "condition_id=excluded.condition_id,event_id=excluded.event_id, "
-            "title=excluded.title,series_slug=excluded.series_slug, "
-            "event_start_time=excluded.event_start_time,end_time=excluded.end_time",
-            (slug, began.date().isoformat(), str(market["id"]), market["conditionId"],
-             str(event["id"]), market["question"], series, began.isoformat(), ended.isoformat()),
-        )
-        db.execute(
-            "INSERT INTO collection_progress(market_slug,query_params) VALUES (?,?) "
-            "ON CONFLICT(market_slug) DO UPDATE SET query_params=excluded.query_params",
-            (slug, json.dumps(core.trade_params(market["conditionId"]), sort_keys=True)),
-        )
+            return None
+        outcomes = market["outcomes"]
+        if isinstance(outcomes, str):
+            outcomes = json.loads(outcomes)
+        if not isinstance(outcomes, list):
+            raise ValueError("outcomes 不是数组")
+        if len(outcomes) != 2 or set(outcomes) != {"Up", "Down"}:
+            return None
+        if not isinstance(slug, str) or not slug or not isinstance(market.get("conditionId"), str) or not market["conditionId"]:
+            raise ValueError("目标市场缺少真实 slug 或 conditionId")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DiscoveryError(f"市场元数据无法识别：{exc}", market_slug=slug,
+                             date_utc=str(ended.date()) if ended else None) from exc
+    return market
+
+
+def iter_target_markets(event: dict, series: str, start: date, end: date):
+    """正式发现和历史边界共用过滤；不要求开始时间，不将坏结构静默当空结果。"""
+    if not isinstance(event, dict):
+        raise DiscoveryError("events 中出现非对象记录")
+    markets = event.get("markets")
+    if not isinstance(markets, list):
+        raise DiscoveryError("事件 markets 不是数组")
+    for market in markets:
+        if not isinstance(market, dict):
+            raise DiscoveryError("markets 中出现非对象记录")
+        valid = _target_market(event, market, series, start, end)
+        if valid is not None:
+            yield valid
+
+
+def _save_market(db: sqlite3.Connection, event: dict, market: dict, series: str) -> str:
+    ended, slug, condition = utc_time(market["endDate"]), market["slug"], market["conditionId"]
+    raw_begin = market.get("eventStartTime")
+    try:
+        began = utc_time(raw_begin) if raw_begin else None
+    except (ValueError, TypeError) as exc:
+        raise DiscoveryError(f"明确的 eventStartTime 无法解析：{exc}", code="invalid_start_time",
+                             market_slug=slug, date_utc=str(ended.date())) from exc
+    by_condition = db.execute("SELECT slug,series_slug,end_time FROM markets WHERE condition_id=?", (condition,)).fetchone()
+    by_slug = db.execute("SELECT condition_id FROM markets WHERE slug=?", (slug,)).fetchone()
+    if by_slug is not None and by_slug[0] not in (None, condition):
+        raise DiscoveryError("同一 slug 指向不同 condition", code="slug_identity_conflict",
+                             market_slug=slug, date_utc=str(ended.date()))
+    if by_condition is not None:
+        if by_condition[1] not in (None, series) or (by_condition[2] and utc_time(by_condition[2]) != ended):
+            raise DiscoveryError("同一 condition 的系列或结束时刻冲突", code="condition_identity_conflict",
+                                 market_slug=slug, date_utc=str(ended.date()))
+        slug = by_condition[0]  # 别名不能改写已有主键和交易归属。
+    if series.endswith("-daily"):
+        other = db.execute("SELECT condition_id FROM markets WHERE series_slug=? AND date(end_time)=? "
+                           "AND condition_id IS NOT NULL AND condition_id<>? LIMIT 1",
+                           (series, str(ended.date()), condition)).fetchone()
+        if other is not None:
+            raise DiscoveryError("同一系列的 UTC 日市场存在多个不同 condition，未选择或覆盖其中任意一个",
+                                 code="ambiguous_daily_slot", market_slug=slug, date_utc=str(ended.date()))
+    db.execute(
+        "INSERT INTO markets(slug,date_utc,market_id,condition_id,event_id,title,"
+        "series_slug,event_start_time,end_time) VALUES (?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(slug) DO UPDATE SET market_id=COALESCE(excluded.market_id,markets.market_id), "
+        "condition_id=excluded.condition_id,event_id=COALESCE(excluded.event_id,markets.event_id), "
+        "title=COALESCE(excluded.title,markets.title),series_slug=excluded.series_slug, "
+        "date_utc=COALESCE(excluded.date_utc,markets.date_utc), "
+        "event_start_time=COALESCE(excluded.event_start_time,markets.event_start_time),end_time=excluded.end_time",
+        (slug, str(began.date()) if began else None, str(market["id"]) if market.get("id") is not None else None,
+         condition, str(event["id"]) if event.get("id") is not None else None, market.get("question"),
+         series, began.isoformat() if began else None, ended.isoformat()),
+    )
+    db.execute(
+        "INSERT INTO collection_progress(market_slug,query_params) VALUES (?,?) "
+        "ON CONFLICT(market_slug) DO UPDATE SET query_params=excluded.query_params",
+        (slug, json.dumps(core.trade_params(condition), sort_keys=True)),
+    )
+    return slug
+
+
+def save_event(db: sqlite3.Connection, event: dict, series: str, start: date, end: date, *,
+               result: dict | None = None, stage: str = "metadata") -> int:
+    result = _result(result)
+    if not isinstance(event, dict):
+        _record_error(result, DiscoveryError("events 中出现非对象记录"), series=series, stage=stage)
+        return 0
+    markets = event.get("markets")
+    if not isinstance(markets, list):
+        _record_error(result, DiscoveryError("事件 markets 不是数组"), series=series, stage=stage)
+        return 0
+    saved = 0
+    for market in markets:
+        try:
+            if not isinstance(market, dict):
+                raise DiscoveryError("markets 中出现非对象记录")
+            valid = _target_market(event, market, series, start, end)
+            if valid is None:
+                continue
+            # 一个错误市场不能回滚此前已保存的其他市场；调用者不持有外层页事务。
+            with db:
+                slug = _save_market(db, event, valid, series)
+            saved += 1
+            _clear_resolved(result, series, utc_time(valid["endDate"]).date(), slug)
+        except (DiscoveryError, KeyError, TypeError, ValueError, sqlite3.Error) as exc:
+            _record_error(result, exc, series=series, stage=stage,
+                          market_slug=market.get("slug") if isinstance(market, dict) else None)
+    return saved
 
 
 def discover_series(db: sqlite3.Connection, client: core.Client, series: str,
-                    start: date, end: date, *, should_yield: Callable[[], bool] | None = None) -> None:
+                    start: date, end: date, *, should_yield: Callable[[], bool] | None = None,
+                    result: dict | None = None) -> dict:
+    result = _result(result)
     core.check_pause(should_yield)
     series_rows = client.get(GAMMA_SERIES, {"slug": series})
     series_id = next(row["id"] for row in series_rows if row["slug"] == series)
@@ -165,32 +311,48 @@ def discover_series(db: sqlite3.Connection, client: core.Client, series: str,
         if cursor:
             params["after_cursor"] = cursor
         page = client.get(GAMMA_EVENTS_KEYSET, params)
-        with db:
-            for event in page["events"]:
-                save_event(db, event, series, start, end)
+        events = page.get("events") if isinstance(page, dict) else None
+        if not isinstance(events, list):
+            raise DiscoveryError("Gamma 分页 events 不是数组")
+        for event in events:
+            save_event(db, event, series, start, end, result=result, stage="series_listing")
         core.check_pause(should_yield)
         cursor = page.get("next_cursor")
         if not cursor:
-            return
+            return result
 
 
 def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start: date, end: date, *,
-                             should_yield: Callable[[], bool] | None = None) -> None:
+                             should_yield: Callable[[], bool] | None = None,
+                             result: dict | None = None) -> dict:
     """补查列表接口未返回的预期时段；404 等失败保留为覆盖缺口。"""
+    result = _result(result)
     existing = {}
     discovered_counts = {}
+    conditions = {}
     for row in db.execute(
-        "SELECT series_slug,end_time FROM markets WHERE date(end_time)>=? AND date(end_time)<? "
+        "SELECT series_slug,end_time,condition_id FROM markets WHERE date(end_time)>=? AND date(end_time)<? "
         "AND condition_id IS NOT NULL", (str(start), str(end))):
         ended = utc_time(row["end_time"])
         key = row["series_slug"], ended.date()
         existing.setdefault(key, set()).add(ended)
         discovered_counts[key] = discovered_counts.get(key, 0) + 1
+        conditions.setdefault(key, set()).add(row["condition_id"])
     day = start
     first_ends = series_first_end(db)
     while day < end:
         for series in TARGET_SERIES:
             slots = list(expected_slots(series, day, first_ends=first_ends))
+            if series.endswith("-daily") and slots:
+                found = conditions.get((series, day), set())
+                if len(found) > 1:
+                    _record_error(result, DiscoveryError("同一系列的 UTC 日市场存在多个不同 condition",
+                                  code="ambiguous_daily_slot", date_utc=str(day)),
+                                  series=series, stage="missing_market")
+                    continue
+                if len(found) == 1:
+                    # 旧 daily endDate 可为 12Z；按唯一 UTC 日槽位匹配，不与模板小时比较。
+                    continue
             # 完整列表是实际元数据。达到预期数量时，不再凭推算时刻补查不存在的 slug。
             if discovered_counts.get((series, day), 0) >= len(slots):
                 continue
@@ -198,18 +360,28 @@ def discover_missing_markets(db: sqlite3.Connection, client: core.Client, start:
                 if ended in existing.get((series, day), set()):
                     continue
                 slug = market_slug(series, ended)
-                core.check_pause(should_yield)
-                try:
-                    event = client.get(GAMMA_EVENT_SLUG + slug, {})
-                    with db:
-                        save_event(db, event, series, start, end)
+                saved, failures = 0, []
+                for candidate in market_slug_candidates(series, ended):
+                    core.check_pause(should_yield)
+                    try:
+                        event = client.get(GAMMA_EVENT_SLUG + candidate, {})
+                        saved += save_event(db, event, series, day, day + timedelta(days=1),
+                                            result=result, stage="missing_market")
+                    except core.RateLimitError:
+                        raise
+                    except core.FetchError as exc:
+                        failures.append(f"{candidate}: HTTP {exc.status_code or 'request failed'}")
+                    core.check_pause(should_yield)
+                    if saved and not series.endswith("-daily"):
+                        break
+                if saved:
                     print(f"详情补查 {slug} 完成", flush=True)
-                except core.RateLimitError:
-                    raise
-                except (core.FetchError, KeyError, TypeError, ValueError) as exc:
-                    print(f"详情补查 {slug} 未完成：{exc}", file=sys.stderr, flush=True)
-                core.check_pause(should_yield)
+                else:
+                    detail = "; ".join(failures) or "响应未包含该系列、结束日的有效 Up/Down 市场"
+                    _record_error(result, ValueError(detail), series=series, stage="missing_market",
+                                  market_slug=slug, day=day, code="missing_market", structural=False)
         day += timedelta(days=1)
+    return result
 
 
 def coverage(db: sqlite3.Connection, day: str) -> dict:
@@ -223,31 +395,45 @@ def coverage(db: sqlite3.Connection, day: str) -> dict:
 
 
 def collect(db: sqlite3.Connection, client: core.Client, start: date, end: date, *,
-            should_yield: Callable[[], bool] | None = None, retry_failed: bool = True) -> None:
+            should_yield: Callable[[], bool] | None = None, retry_failed: bool = True,
+            result: dict | None = None) -> dict:
+    result = _result(result)
+    try:
+        return _collect(db, client, start, end, should_yield=should_yield, retry_failed=retry_failed, result=result)
+    except (Exception, KeyboardInterrupt) as exc:
+        exc.collection_result = result
+        raise
+
+
+def _collect(db: sqlite3.Connection, client: core.Client, start: date, end: date, *,
+             should_yield: Callable[[], bool] | None, retry_failed: bool, result: dict) -> dict:
     first_ends = series_first_end(db)
     for index, series in enumerate(TARGET_SERIES, 1):
         core.check_pause(should_yield)
         if first_ends.get(series) and utc_time(first_ends[series]) >= midnight(end):
             continue
         try:
-            discover_series(db, client, series, start, end, should_yield=should_yield)
+            discover_series(db, client, series, start, end, should_yield=should_yield, result=result)
             print(f"发现 [{index}/{len(TARGET_SERIES)}] {series} 完成", flush=True)
         except core.RateLimitError:
             raise
-        except (core.FetchError, KeyError, TypeError, ValueError, StopIteration) as exc:
-            print(f"发现 {series} 未完成：{exc}", file=sys.stderr, flush=True)
+        except (core.FetchError, KeyError, TypeError, ValueError, StopIteration, sqlite3.Error) as exc:
+            _record_error(result, exc, series=series, stage="series_listing")
     # 首轮遍历后仅重试尚未完成的市场；永久参数/数据错误不在同次任务中盲目重复。
     blocked: set[tuple[str, str]] = set()
     for _ in range(2 if retry_failed else 1):
-        discover_missing_markets(db, client, start, end, should_yield=should_yield)
-        _collect_pending(db, client, start, end, blocked, should_yield=should_yield)
+        discover_missing_markets(db, client, start, end, should_yield=should_yield, result=result)
+        _collect_pending(db, client, start, end, blocked, should_yield=should_yield, result=result)
+    return result
 
 
 def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, end: date,
                      blocked: set[tuple[str, str]], *,
-                     should_yield: Callable[[], bool] | None = None) -> None:
+                     should_yield: Callable[[], bool] | None = None, result: dict | None = None) -> None:
+    result = _result(result)
     pending = db.execute(
-        "SELECT m.slug FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug "
+        "SELECT m.slug,m.series_slug,date(m.end_time) AS end_day FROM markets m "
+        "JOIN updown_target_series s ON s.series_slug=m.series_slug "
         "JOIN collection_progress p ON p.market_slug=m.slug "
         "WHERE date(m.end_time)>=? AND date(m.end_time)<? AND m.condition_id IS NOT NULL "
         "AND p.completed_at IS NULL ORDER BY m.series_slug,m.end_time,m.slug",
@@ -255,11 +441,17 @@ def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, e
     ).fetchall()
     for index, row in enumerate(pending, 1):
         slug = row["slug"]
+        if any(item.get("code") == "ambiguous_daily_slot" and item.get("series_slug") == row["series_slug"]
+               and item.get("date_utc") == row["end_day"] for item in result["structural_errors"]):
+            continue
         if ("wallet", slug) in blocked:
             continue
         core.check_pause(should_yield)
         try:
             core.collect_market(db, client, slug, should_yield=should_yield)
+            for key in ("discovery_errors", "structural_errors"):
+                result[key][:] = [item for item in result[key]
+                                  if not (item.get("stage") == "trades" and item.get("market_slug") == slug)]
             print(f"成交 [{index}/{len(pending)}] {slug} 完成", flush=True)
         except core.RateLimitError as exc:
             with db:
@@ -269,6 +461,9 @@ def _collect_pending(db: sqlite3.Connection, client: core.Client, start: date, e
             with db:
                 db.execute("UPDATE collection_progress SET last_error=? WHERE market_slug=?", (str(exc), slug))
             print(f"成交 [{index}/{len(pending)}] {slug} 未完成：{exc}", file=sys.stderr, flush=True)
+            _record_error(result, exc, series=row["series_slug"], stage="trades", market_slug=slug,
+                          day=date.fromisoformat(row["end_day"]), code="trade_request_failed" if isinstance(exc, core.FetchError)
+                          else "invalid_trade_payload", structural=not isinstance(exc, core.FetchError))
             if not isinstance(exc, core.FetchError) or (exc.status_code is not None and exc.status_code < 500):
                 blocked.add(("wallet", slug))
 
@@ -383,8 +578,8 @@ def main(argv: list[str] | None = None) -> int:
     db = connect_database(args.db)
     client = core.Client(args.proxy)
     try:
-        collect(db, client, args.start_date, args.end_date)
-        complete = True
+        result = collect(db, client, args.start_date, args.end_date)
+        complete = not result["structural_errors"]
         day = args.start_date
         while day < args.end_date:
             status = coverage(db, day.isoformat())

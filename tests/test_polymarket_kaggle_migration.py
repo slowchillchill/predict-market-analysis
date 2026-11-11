@@ -90,7 +90,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(self.pipeline.state["first_seen"], labels)
         self.assertEqual(self.client.trades, [])
         raw = self.store.datasets[slug][2]
-        self.assertEqual(json.loads(raw["collection_status.json"])["schema_version"], 2)
+        self.assertEqual(json.loads(raw["collection_status.json"])["schema_version"], producer.RAW_SCHEMA_VERSION)
         file = self.root / "read.sqlite3"
         file.write_bytes(raw["data.sqlite3"])
         with contextlib.closing(sqlite3.connect(file)) as db:
@@ -103,7 +103,7 @@ class MigrationTests(unittest.TestCase):
         bundle = json.loads(month[f"daily_{DAY}.json"])
         self.assertEqual(bundle["source_versions"][str(DAY)]["version"], 2)
         self.assertEqual(bundle["payload"]["current"]["volume_micro_usdc"], 2000000)
-        self.assertEqual(bundle["raw_schema_version"], 2)
+        self.assertEqual(bundle["raw_schema_version"], producer.RAW_SCHEMA_VERSION)
         self.assertFalse((self.pipeline.work_dir / "migration" / str(DAY)).exists())
         self.assertEqual(migration.migrate_existing(self.pipeline), [])
         self.assertEqual(self.store.version(slug), 2)
@@ -147,6 +147,37 @@ class MigrationTests(unittest.TestCase):
         month = self.store.datasets["pm-updown-analysis-2026-11"][self.store.version("pm-updown-analysis-2026-11")]
         self.assertEqual(json.loads(month[f"daily_{DAY}.json"])["source_versions"][str(DAY)]["version"], 2)
         self.assertEqual(self.client.trades, [])
+
+    def test_existing_grouped_v2_is_reused_without_claiming_v3_or_republishing_raw(self):
+        slug = self.seed_legacy()
+        original_reference = copy.deepcopy(self.pipeline.state["raw_days"][str(DAY)])
+        with self.quiet():
+            migration.migrate_existing(self.pipeline)
+        raw = self.store.datasets[slug][2]
+        source = self.root / "grouped.sqlite3"
+        source.write_bytes(raw["data.sqlite3"])
+        with contextlib.closing(sqlite3.connect(source)) as db:
+            script = "\n".join(db.iterdump()).replace("date_utc TEXT,", "date_utc TEXT NOT NULL,")
+        old = self.root / "actual-v2.sqlite3"
+        with contextlib.closing(sqlite3.connect(old)) as db:
+            db.executescript(script)
+            db.execute("PRAGMA user_version=2")
+        raw["data.sqlite3"] = old.read_bytes()
+        status = json.loads(raw["collection_status.json"])
+        status["schema_version"] = 2
+        raw["collection_status.json"] = json.dumps(status).encode()
+        raw.pop("migration_summary.json", None)
+        self.pipeline.state["raw_days"][str(DAY)] = original_reference
+        with self.quiet():
+            migration.migrate_existing(self.pipeline)
+        self.assertEqual(self.store.version(slug), 2)
+        self.assertEqual(self.pipeline.state["raw_days"][str(DAY)]["raw_schema_version"], 2)
+        month = self.latest_month()
+        self.assertEqual(json.loads(month[f"daily_{DAY}.json"])["raw_schema_version"], 2)
+
+    def latest_month(self):
+        slug = "pm-updown-analysis-2026-11"
+        return self.store.datasets[slug][self.store.version(slug)]
 
 
 if __name__ == "__main__":

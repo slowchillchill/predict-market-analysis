@@ -15,6 +15,8 @@
 
 原始日库命名为 `pm-updown-raw-YYYY-MM-DD`，分析库命名为 `pm-updown-analysis-YYYY-MM`，发布者为 `qiuqiuslowchillchill`。日期和月份均使用 UTC。
 
+**本分支的恢复修复：**原始库格式 v3 允许未知的真实市场开始时间保留为 `NULL`，并增加采集与发布恢复行为；本次修复尚待验收和部署。已发布的 11 月 9 日 v2 示例仍可读取，不会仅为更改格式版本号而强制重发。报告 JSON 保持 v1，分组、钱包和 BUY 指标口径不变。
+
 以上为 **2026-11-10 核实的固定版本示例**。后续版本可能修正数据或增加已完成日期。
 
 **钱包记录行不等于独立撮合成交，`group_id` 也不是 fill ID。**使用数据前，请先查看下方记录粒度、金额与日期定义。
@@ -124,6 +126,10 @@ print(Decimal(current['volume_micro_usdc']) / Decimal(1_000_000))
 
 采集按日运行，先处理新日期，再从较早日期补采历史。**历史范围尚未补齐。**某日或某月的数据集存在，不表示整段历史已经完整；月度分析库名称也不表示当月所有日期或完整月报已就绪。采集安排不保证每天在某个精确时刻发布。
 
+本次恢复修复先处理新日期，再修复 **2025-03-15 至 2025-04-02 已有的 19 个未完成日期**，然后继续历史补采。确实无法取得的市场保留为缺口，不标为完成，也不填零。
+
+恢复机制默认每 **30 分钟**检查是否有新的已提交采集状态，仅在有变化时发布 `incomplete` 检查点；采集运行 **11 小时 30 分钟**后停止，给 12 小时会话上限预留发布时间。这些是可调整的工程参数，不是 Kaggle 使用规则或防封阈值。它不在每页后上传；中断后从最后**确认成功**的数据集版本恢复，上传失败或强制终止可能丢失超过 30 分钟的未发布进度。没有变化的月度快照也不反复发布。详情见 [恢复操作说明](docs/kaggle_migration.md)。
+
 使用原始日库前，查看 `collection_status.json`：
 
 - `status: complete`：目标市场覆盖与分页完成，并通过项目的正式统计重建检查。
@@ -145,27 +151,30 @@ pm-updown-raw-YYYY-MM-DD/
 ├── data.sqlite3
 ├── collection_status.json
 ├── README.md
-└── migration_summary.json    # 由旧格式转换的日库附带；新采日期不一定有
+├── migration_summary.json    # 由旧格式转换的日库附带；新采日期不一定有
+└── publication.json          # 恢复修复的发布标记；旧示例不一定有
 ```
 
-完成的 v2 日库有 `markets`、`collection_progress`、`trades` 三个实体表。`PRAGMA user_version` 为 `2`；`collection_status.json` 的 `schema_version` 为 `2`，并记录 `group_key` 和 `volume_method`。
+完成的 v2、v3 日库均有 `markets`、`collection_progress`、`trades` 三个实体表。已发布示例的 `PRAGMA user_version` 与 `collection_status.json.schema_version` 为 `2`；本次修复格式为 `3`，继续记录 `group_key` 和 `volume_method`。下方字段说明以 v3 为准：相比 v2，只放宽 `markets.date_utc` 的非空约束，不改变交易字段和分组口径。
+
+恢复修复写出的快照另带 `publication.json` 小标记，用于上传返回 HTTP 499 等不确定结果时核对发布身份；不要求读者计算整库 SHA。旧的固定示例不因此被认为已经包含这个新文件。
 
 下表未标为 `NOT NULL` 的字段可能为空，准确约束见 schema 源文件。
 
-`incomplete` 日库可能另有 `pending_group_map`，用于未完成市场的分页续采。该表将交易哈希映射到短编号，不属于完成日库的数据模型；完成后删除。v2 完成日库不含长交易哈希列，也没有独立 `market_volume` 实体表。
+`incomplete` 日库可能另有 `pending_group_map`，用于未完成市场的分页续采。该表将交易哈希映射到短编号，不属于完成日库的数据模型；完成后删除。v2、v3 完成日库不含长交易哈希列，也没有独立 `market_volume` 实体表。
 
 #### `markets`：市场元数据
 
 | 字段 | SQLite 类型与约束 | 含义 |
 | --- | --- | --- |
 | `slug` | `TEXT PRIMARY KEY` | 市场标识；其他表通过它关联市场 |
-| `date_utc` | `TEXT NOT NULL` | **市场开始日**，UTC `YYYY-MM-DD`；不是日库分区日期 |
+| `date_utc` | `TEXT`，v3 可空 | 已知的**真实市场开始日**，UTC `YYYY-MM-DD`；未知为 `NULL`，不是日库分区日期；v2 为 `NOT NULL` |
 | `market_id` | `TEXT` | 上游市场 ID |
 | `condition_id` | `TEXT UNIQUE` | 上游 condition ID；尚未取得元数据时可为空 |
 | `event_id` | `TEXT` | 所属 event ID |
 | `title` | `TEXT` | 市场问题或标题 |
 | `series_slug` | `TEXT` | 市场系列，例如 `btc-up-or-down-5m` |
-| `event_start_time` | `TEXT` | 市场开始时间，UTC ISO 8601 |
+| `event_start_time` | `TEXT`，可空 | 真实市场开始时间，UTC ISO 8601；未知为 `NULL`，不使用创建时间或结束时间推造 |
 | `end_time` | `TEXT` | 市场结束时间，UTC ISO 8601；决定日库归属 |
 
 #### `collection_progress`：分页状态
@@ -226,7 +235,8 @@ pm-updown-analysis-YYYY-MM/
 ├── daily_YYYY-MM-DD.json
 ├── weekly_YYYY-MM-DD.json     # 日期为周一
 ├── monthly_YYYY-MM.json
-└── progress.json             # 全局采集与历史状态；并非每个历史月份都有
+├── progress.json             # 全局采集与历史状态；并非每个历史月份都有
+└── publication.json          # 恢复修复的发布标记
 ```
 
 周报归入最后一个包含日期所属月份，例如 `2026-10-26` 至 `2026-11-01` 的周结果归入 11 月分析库。只有完成的报告周期才会出现在结果索引中。
@@ -241,7 +251,7 @@ pm-updown-analysis-YYYY-MM/
 
 `wallet_days` 的活动次数和时间范围统计 BUY＋SELL；它的 `amount_micro_usdc` 与报告的 `payload.current.wallet_volume_micro_usdc` 都只统计 **BUY**。前者采用十进制整数字符串 `TEXT` 保存，与原始日库钱包视图的 BUY＋SELL 金额口径不同。`daily_hits` 记录当天首次或重复命中规则的钱包，不是当天全部沿用历史标签的钱包。字段定义见 [分析代码](scripts/polymarket_kaggle_analysis.py)。
 
-报告 JSON 接口仍为 v1，与原始库格式 v2 分开编号。主要字段为：
+报告 JSON 接口仍为 v1，与原始库格式 v2、v3 分开编号。已完成 v2 输入仍可保留在来源引用中。主要字段为：
 
 - `kind`、`target_utc`、`start_date_utc`、`end_date_utc_exclusive`：日、周、月类型和 UTC 半开日期区间。
 - `status`、`source_versions`：报告完成状态与原始日库版本引用。
@@ -251,7 +261,7 @@ pm-updown-analysis-YYYY-MM/
 
 ## 关键统计口径
 
-**日期。**数据集日期和全系列视图按 `markets.end_time` 的 UTC 日期归属；`markets.date_utc` 保留市场开始日。选定市场的全部可得交易都会纳入，包括提前或跨日成交。原 `btc5m_*` 视图使用开始日，不能与 `updown_*` 直接混用。
+**日期。**数据集日期和全系列视图按 **API 原始 `markets.end_time` 的 UTC 日期**归属；`markets.date_utc` 只在真实开始时间已知时保存开始日，v3 未知时为 `NULL`。`event_start_time` 原本就允许为空；不能把创建相关的 `startDate` 当作真实开始时间，也不能用 `end_time - 24 小时` 补造。选定市场的全部可得交易都会纳入，包括提前或跨日成交。原 `btc5m_*` 视图使用开始日，不能与 `updown_*` 直接混用。
 
 **记录粒度。**`trades` 每行是上游返回的一条钱包视角记录。同一交易组可含汇总方与多个对手方记录。不能用原始行数或交易组数直接替代重建后的成交笔数，也不能按相同价格、数量删除看似重复的行。逐行金额求和不是单边市场金额，除以二也不是通用成交重建规则。
 
@@ -265,7 +275,7 @@ pm-updown-analysis-YYYY-MM/
 
 **机器人标签。**同一 UTC 市场结束日内，钱包活动记录数大于 1、首末跨度至少 90 分钟且平均间隔不超过 60 秒时，命中高频行为规则。活动特征包括 BUY＋SELL；标签从最早有效命中日起延续，较晚命中不应用于较早日期。历史补采可能发现更早命中并更新云端统计。这是行为筛选，不是身份验证，也不能确认钱包由机器人控制。
 
-## 质量证据与复现
+## 已发布 v2 的历史质量证据与复现
 
 [2026-11-09 日库版本 2](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2)包含公开的 `migration_summary.json`，记录从版本 1 转为短编号格式的比较结果：
 
@@ -281,7 +291,7 @@ pm-updown-analysis-YYYY-MM/
 
 旧数据集版本继续保留。这个文件大小变化与该日迁移检查，不能推断所有日期均无缺失或未来接口都符合首行方法。
 
-实现版本 [`c16edb8`](https://github.com/slowchillchill/predict-market-analysis/tree/c16edb8353aa78fe6229bc3e164f13788d1e1296)验收通过 **340 项测试**，覆盖分页事务、定向重试、旧格式兼容、金额精度、统计及图文生成。另做真实两会话续采试验：先保存一页，再从后续会话恢复三页，共保留 **3,209 行、1,200 组**，原记录和组号不变，完成后清空续采映射。该样本用于验证续采机制，不表示全历史已采齐。详见 [项目记录](docs/kaggle_migration.md)、[分组测试](tests/test_polymarket_trade_groups.py)和[迁移测试](tests/test_polymarket_kaggle_migration.py)。这些是项目自身的检查，不是独立审计。
+v2 实现版本 [`c16edb8`](https://github.com/slowchillchill/predict-market-analysis/tree/c16edb8353aa78fe6229bc3e164f13788d1e1296)验收通过 **340 项测试**，覆盖分页事务、定向重试、旧格式兼容、金额精度、统计及图文生成。另做真实两会话续采试验：先保存一页，再从后续会话恢复三页，共保留 **3,209 行、1,200 组**，原记录和组号不变，完成后清空续采映射。这些是旧版 v2 的历史结果，不是本次 v3 恢复修复的验收结果；新提交、测试计数和部署证据将在验收后记录。该样本不表示全历史已采齐。详见 [项目记录](docs/kaggle_migration.md)、[分组测试](tests/test_polymarket_trade_groups.py)和[迁移测试](tests/test_polymarket_kaggle_migration.py)。这些是项目自身的检查，不是独立审计。
 
 为了复现结果，请同时记录**数据集名称与版本、日期范围、原始库格式版本、金额方法和所用代码提交**。分析结果中的 `source_versions` 可用于定位输入；固定版本后再比较研究结果，避免混用历史修订前后的统计。
 

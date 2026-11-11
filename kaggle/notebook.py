@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 SOURCE_COMMIT = "c16edb8353aa78fe6229bc3e164f13788d1e1296"
 RUN_ARGUMENTS = []  # Production: fresh UTC days, then continuous historical backfill.
@@ -26,6 +27,9 @@ SOURCE_URL = "https://github.com/slowchillchill/predict-market-analysis.git"
 
 
 def main():
+    # Include setup and restoration in the session clock; never restart the
+    # deadline when collection begins or when a day is resumed.
+    os.environ.setdefault("POLYMARKET_RUN_STARTED_MONOTONIC", str(time.monotonic()))
     if not Path("/kaggle/working").is_dir():
         raise RuntimeError("Run this entrypoint on Kaggle, not on the local collector")
     from kaggle_secrets import UserSecretsClient

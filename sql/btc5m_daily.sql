@@ -11,7 +11,7 @@ SELECT m.date_utc, 288 AS expected_markets,
        COALESCE(SUM(p.committed_page), 0) AS committed_pages,
        COUNT(*) = 288 AND COUNT(p.completed_at) = 288 AS is_complete
 FROM markets m LEFT JOIN collection_progress p ON p.market_slug = m.slug
-WHERE m.slug GLOB 'btc-updown-5m-*'
+WHERE m.slug GLOB 'btc-updown-5m-*' AND m.date_utc IS NOT NULL
 GROUP BY m.date_utc;
 
 -- 完整日才进入统计视图；缺失或失败的市场不会被计为零成交。
@@ -19,7 +19,7 @@ CREATE VIEW IF NOT EXISTS btc5m_wallet_daily AS
 SELECT m.date_utc, t.wallet, SUM(t.amount_micro_usdc) AS amount_micro_usdc
 FROM trades t JOIN markets m ON m.slug = t.market_slug
 JOIN btc5m_coverage c ON c.date_utc = m.date_utc AND c.is_complete
-WHERE m.slug GLOB 'btc-updown-5m-*'
+WHERE m.slug GLOB 'btc-updown-5m-*' AND m.date_utc IS NOT NULL
 GROUP BY m.date_utc, t.wallet;
 
 CREATE VIEW IF NOT EXISTS btc5m_wallet_ranked AS

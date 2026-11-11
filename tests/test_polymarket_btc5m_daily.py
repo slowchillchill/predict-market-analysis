@@ -336,6 +336,70 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 503)
         self.assertIsNone(ctx.exception.retry_after)
 
+    def test_absolute_deadline_stops_before_request_and_caps_timeout(self):
+        client = btc.Client()
+        self.addCleanup(client.close)
+        client.deadline = 100.0
+        with patch.object(btc.time, "monotonic", return_value=100.0), \
+             patch.object(client.session, "get") as get, self.assertRaises(btc.CollectionPaused):
+            client.get(btc.TRADES_URL, {})
+        get.assert_not_called()
+        client.deadline = 105.0
+        with patch.object(btc.time, "monotonic", return_value=100.0), \
+             patch.object(client.session, "get", return_value=self.response(200, '[]')) as get:
+            self.assertEqual(client.get(btc.TRADES_URL, {}), [])
+        self.assertEqual(get.call_args.kwargs["timeout"], 5.0)
+
+    def test_retry_after_and_rate_limiter_cannot_sleep_past_deadline(self):
+        client = btc.Client()
+        self.addCleanup(client.close)
+        client.deadline = 105.0
+        with patch.object(btc.time, "monotonic", return_value=100.0), \
+             patch.object(client.session, "get", return_value=self.response(429, '{}', {"Retry-After": "300"})) as get, \
+             patch.object(btc.time, "sleep") as sleep, self.assertRaises(btc.CollectionPaused):
+            client.get(btc.TRADES_URL, {})
+        get.assert_called_once()
+        sleep.assert_not_called()
+        client._next_request_at = 100.5
+        client.deadline = 100.4
+        with patch.object(btc.time, "monotonic", return_value=100.0), \
+             patch.object(client.session, "get") as get, patch.object(btc.time, "sleep") as sleep, \
+             self.assertRaises(btc.CollectionPaused):
+            client.get(btc.TRADES_URL, {})
+        get.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_timeout_at_deadline_is_control_pause_instead_of_more_retries(self):
+        client = btc.Client()
+        self.addCleanup(client.close)
+        now = [100.0]
+        client.deadline = 103.0
+
+        def timeout(*args, **kwargs):
+            self.assertEqual(kwargs["timeout"], 3.0)
+            now[0] = 103.0
+            raise client.requests.Timeout()
+
+        with patch.object(btc.time, "monotonic", side_effect=lambda: now[0]), \
+             patch.object(client.session, "get", side_effect=timeout) as get, self.assertRaises(btc.CollectionPaused):
+            client.get(btc.TRADES_URL, {})
+        get.assert_called_once()
+
+    def test_response_arriving_after_deadline_is_paused_before_decoding(self):
+        client = btc.Client()
+        self.addCleanup(client.close)
+        now = [100.0]
+        client.deadline = 103.0
+
+        def late_response(*args, **kwargs):
+            now[0] = 103.0
+            return self.response(200, '[]')
+
+        with patch.object(btc.time, "monotonic", side_effect=lambda: now[0]), \
+             patch.object(client.session, "get", side_effect=late_response) as get, self.assertRaises(btc.CollectionPaused):
+            client.get(btc.TRADES_URL, {})
+        get.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

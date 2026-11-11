@@ -82,17 +82,36 @@ class Client:
         self.session.headers["User-Agent"] = "poly-market-analysis/btc5m"
         self.request_interval = max(0.0, request_interval)
         self._next_request_at = 0.0
+        self.deadline: float | None = None
 
     def close(self) -> None:
         self.session.close()
 
+    def _remaining(self) -> float | None:
+        if self.deadline is None:
+            return None
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise CollectionPaused("采集请求已到绝对截止时间，保留已提交进度")
+        return remaining
+
+    def _wait_for_request(self) -> None:
+        remaining = self._remaining()
+        wait = self._next_request_at - time.monotonic()
+        if wait > 0:
+            if remaining is not None and wait >= remaining:
+                raise CollectionPaused("请求退避将超过截止时间，保留已提交进度")
+            time.sleep(wait)
+        self._remaining()
+
     def get(self, url: str, params: dict) -> object:
         for attempt in range(1, REQUEST_RETRIES + 1):
-            wait = self._next_request_at - time.monotonic()
-            if wait > 0:
-                time.sleep(wait)
+            self._wait_for_request()
+            remaining = self._remaining()
+            timeout = REQUEST_TIMEOUT_SECONDS if remaining is None else min(REQUEST_TIMEOUT_SECONDS, remaining)
             try:
-                response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+                response = self.session.get(url, params=params, timeout=timeout)
+                self._remaining()
                 if response.status_code == 200:
                     # 保留接口十进制字面值，不经过二进制浮点转换。
                     return json.loads(response.text, parse_float=str)
@@ -117,6 +136,7 @@ class Client:
                 if response.status_code != 429 and response.status_code < 500:
                     raise error
             except (self.requests.RequestException, json.JSONDecodeError) as exc:
+                self._remaining()
                 # 不将可能带有本机代理凭据的异常文本写入数据库或报告。
                 error = FetchError(f"{url}: {type(exc).__name__}")
             finally:
