@@ -7,6 +7,12 @@ DROP VIEW IF EXISTS updown_wallet_ranked;
 DROP VIEW IF EXISTS updown_wallet_daily;
 DROP VIEW IF EXISTS updown_coverage;
 DROP VIEW IF EXISTS updown_series_coverage;
+-- 旧工作副本默认沿用原规则；正式采集入口持久保存本次列表与时段证明。
+CREATE VIEW IF NOT EXISTS updown_coverage_policy(policy) AS SELECT 'legacy_nominal_v1';
+CREATE VIEW IF NOT EXISTS updown_expected_slots(series_slug,date_utc,slot_utc) AS
+SELECT NULL,NULL,NULL WHERE 0;
+CREATE VIEW IF NOT EXISTS updown_discovery_status(series_slug,date_utc,listing_complete) AS
+SELECT NULL,NULL,0 WHERE 0;
 CREATE VIEW IF NOT EXISTS updown_series_coverage AS
 WITH days AS (
     SELECT DISTINCT date(m.end_time) AS date_utc
@@ -21,7 +27,7 @@ WITH days AS (
                    + 86400/s.expected_markets - 1) / (86400/s.expected_markets)
         END AS expected_markets
     FROM days d CROSS JOIN updown_target_series s
-)
+), legacy AS (
 SELECT s.date_utc, s.series_slug, s.expected_markets,
        COUNT(m.condition_id) AS discovered_markets,
        COUNT(p.completed_at) AS completed_markets,
@@ -31,7 +37,50 @@ SELECT s.date_utc, s.series_slug, s.expected_markets,
 FROM expected s
 LEFT JOIN markets m ON m.series_slug=s.series_slug AND date(m.end_time)=s.date_utc
 LEFT JOIN collection_progress p ON p.market_slug=m.slug
-GROUP BY s.date_utc, s.series_slug, s.expected_markets;
+GROUP BY s.date_utc, s.series_slug, s.expected_markets
+), modern_days AS (
+    SELECT date_utc FROM days
+    UNION SELECT date_utc FROM updown_expected_slots
+    UNION SELECT date_utc FROM updown_discovery_status
+), slots AS (
+    SELECT DISTINCT series_slug,date_utc,slot_utc FROM updown_expected_slots
+), slot_coverage AS (
+    SELECT e.series_slug,e.date_utc,COUNT(*) AS planned_slots,
+           SUM(EXISTS (
+               SELECT 1 FROM markets m
+               WHERE m.series_slug=e.series_slug AND m.condition_id IS NOT NULL
+                 AND date(m.end_time)=e.date_utc
+                 AND CASE WHEN length(e.slot_utc)=10 THEN date(m.end_time)=e.slot_utc
+                          ELSE datetime(m.end_time)=datetime(e.slot_utc) END
+           )) AS covered_slots
+    FROM slots e GROUP BY e.series_slug,e.date_utc
+), market_counts AS (
+    SELECT m.series_slug,date(m.end_time) AS date_utc,
+           COUNT(m.condition_id) AS discovered_markets,
+           SUM(CASE WHEN m.condition_id IS NOT NULL AND p.completed_at IS NOT NULL THEN 1 ELSE 0 END)
+               AS completed_markets,
+           COALESCE(SUM(p.committed_page),0) AS committed_pages
+    FROM markets m JOIN updown_target_series s ON s.series_slug=m.series_slug
+    LEFT JOIN collection_progress p ON p.market_slug=m.slug
+    GROUP BY m.series_slug,date(m.end_time)
+), modern AS (
+    SELECT d.date_utc,s.series_slug,
+           COALESCE(m.discovered_markets,0) + COALESCE(e.planned_slots,0)
+             - COALESCE(e.covered_slots,0) AS expected_markets,
+           COALESCE(m.discovered_markets,0) AS discovered_markets,
+           COALESCE(m.completed_markets,0) AS completed_markets,
+           COALESCE(m.committed_pages,0) AS committed_pages,
+           COALESCE(e.covered_slots,0)=COALESCE(e.planned_slots,0)
+             AND COALESCE((SELECT MIN(p.listing_complete) FROM updown_discovery_status p
+                           WHERE p.series_slug=s.series_slug AND p.date_utc=d.date_utc),0)=1
+             AND COALESCE(m.completed_markets,0)=COALESCE(m.discovered_markets,0) AS is_complete
+    FROM modern_days d CROSS JOIN updown_target_series s
+    LEFT JOIN slot_coverage e ON e.series_slug=s.series_slug AND e.date_utc=d.date_utc
+    LEFT JOIN market_counts m ON m.series_slug=s.series_slug AND m.date_utc=d.date_utc
+)
+SELECT * FROM legacy WHERE (SELECT policy FROM updown_coverage_policy)='legacy_nominal_v1'
+UNION ALL
+SELECT * FROM modern WHERE (SELECT policy FROM updown_coverage_policy)='official_series_all_conditions_v1';
 
 CREATE VIEW IF NOT EXISTS updown_coverage AS
 SELECT date_utc, SUM(expected_markets) AS expected_markets,

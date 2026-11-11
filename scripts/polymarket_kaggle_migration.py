@@ -62,7 +62,7 @@ def business_values(features: dict, bundle: dict) -> dict:
 
 
 def migrate_day(pipeline, stamp: str) -> dict:
-    """Publish a v2 day then its analysis; safely resume a publication gap."""
+    """Convert a legacy day then its analysis; safely resume a publication gap."""
     from polymarket_kaggle_pipeline import DESCRIPTION, RAW_SCHEMA_VERSION, VOLUME_METHOD, month_of
 
     day = date.fromisoformat(stamp)
@@ -83,6 +83,7 @@ def migrate_day(pipeline, stamp: str) -> dict:
     previous = pipeline._previous_day(day)
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         already_v2 = groups.group_column(db) == "group_id"
+        raw_schema_version = db.execute("PRAGMA user_version").fetchone()[0]
         original_bounds = collector.series_first_end(db)
     if not already_v2:
         before_bytes = path.stat().st_size
@@ -95,6 +96,7 @@ def migrate_day(pipeline, stamp: str) -> dict:
         with closing(collector.connect_database(path, series_first_end=original_bounds)) as db:
             coverage = collector.coverage(db, stamp)
             groups.finalize_database(db)
+            raw_schema_version = db.execute("PRAGMA user_version").fetchone()[0]
         after_raw = raw_summary(path)
         features = analysis.extract_day_features(path, day)
         bundle = analysis.export_day(path, day, pipeline.state["first_seen"],
@@ -123,6 +125,7 @@ def migrate_day(pipeline, stamp: str) -> dict:
             "schema_version": RAW_SCHEMA_VERSION, "date_utc": stamp, "status": "complete",
             "coverage": coverage, "error": None, "date_basis": "market_end_utc",
             "group_key": ["market_slug", "group_id"], "volume_method": VOLUME_METHOD,
+            "coverage_policy": features.get("coverage_policy", "legacy_nominal_v1"),
         })
         (folder / "README.md").write_text(DESCRIPTION)
         version = pipeline.store.publish(slug, folder, title=f"Polymarket Updown Raw {stamp}",
@@ -138,16 +141,18 @@ def migrate_day(pipeline, stamp: str) -> dict:
             history_metadata=metadata, previous=previous)
         summary_path = folder / "migration_summary.json"
         summary = json.loads(summary_path.read_text()) if summary_path.exists() else {
-            "date_utc": stamp, "status": "already_v2", "raw_schema_version": RAW_SCHEMA_VERSION}
+            "date_utc": stamp, "status": "already_v2", "raw_schema_version": raw_schema_version}
     bundle["source_versions"] = {stamp: {"dataset": pipeline.store.ref(slug), "version": version}}
-    bundle["raw_schema_version"] = RAW_SCHEMA_VERSION
+    bundle["raw_schema_version"] = raw_schema_version
     bundle["volume_method"] = VOLUME_METHOD
+    bundle["coverage_policy"] = features.get("coverage_policy", "legacy_nominal_v1")
     analysis.save_day(pipeline.month(month_of(day)) / "features.sqlite3", features, bundle,
                       first_seen=pipeline.state["first_seen"])
     pipeline.put_bundle(bundle)
     pipeline.state["raw_days"][stamp] = {
         "slug": slug, "version": version, "status": "complete", "coverage": coverage,
-        "raw_schema_version": RAW_SCHEMA_VERSION, "volume_method": VOLUME_METHOD,
+        "raw_schema_version": raw_schema_version, "volume_method": VOLUME_METHOD,
+        "coverage_policy": bundle["coverage_policy"],
     }
     pipeline.refresh_daily_comparison(day + timedelta(days=1))
     pipeline.refresh_periods(day)

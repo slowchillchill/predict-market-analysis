@@ -1,0 +1,76 @@
+{
+  "description": "Selected public Gamma metadata observed 2026-11-11; no trade records.",
+  "samples": [
+    {
+      "date_utc": "2025-03-15",
+      "source_url": "https://gamma-api.polymarket.com/events/slug/bitcoin-up-or-down-on-march-15-noon",
+      "event": {
+        "id": "20926",
+        "slug": "bitcoin-up-or-down-on-march-15-noon",
+        "seriesSlug": "btc-dailies",
+        "series": [{"slug": "btc-up-or-down-daily"}],
+        "startDate": "2025-03-14T15:08:44.649291Z",
+        "endDate": "2025-03-15T12:00:00Z",
+        "markets": [{
+          "id": "528107",
+          "slug": "bitcoin-up-or-down-on-march-15-noon",
+          "question": "Bitcoin Up or Down on March 15? (noon)",
+          "conditionId": "0x72997442e76dfc8ce295a8ff2de65e7fdc219f6ab72b6103147a35451ca55352",
+          "startDate": "2025-03-14T15:08:24.271151Z",
+          "endDate": "2025-03-15T12:00:00Z",
+          "outcomes": "[\"Up\", \"Down\"]"
+        }]
+      }
+    },
+    {
+      "date_utc": "2025-04-02",
+      "source_url": "https://gamma-api.polymarket.com/events/slug/bitcoin-up-or-down-on-april-2",
+      "event": {
+        "id": "21892",
+        "slug": "bitcoin-up-or-down-on-april-2",
+        "seriesSlug": "btc-dailies",
+        "series": [{"slug": "btc-up-or-down-daily"}],
+        "startDate": "2025-03-31T14:36:53.532813Z",
+        "endDate": "2025-04-02T12:00:00Z",
+        "markets": [{
+          "id": "532702",
+          "slug": "bitcoin-up-or-down-on-april-2",
+          "question": "Bitcoin Up or Down on April 2?",
+          "conditionId": "0xb1c20e5e3aa1259364c2bdc4145f5e58a89f6d0885a14ec2867248d9958472d2",
+          "startDate": "2025-03-31T14:35:10.696445Z",
+          "endDate": "2025-04-02T12:00:00Z",
+          "outcomes": "[\"Up\", \"Down\"]"
+        }]
+      }
+    },
+    {
+      "date_utc": "2026-11-09",
+      "source_url": "https://gamma-api.polymarket.com/events/slug/bitcoin-up-or-down-on-november-9-2026",
+      "event": {
+        "id": "1333414",
+        "slug": "bitcoin-up-or-down-on-november-9-2026",
+        "seriesSlug": "btc-up-or-down-daily",
+        "series": [{"slug": "btc-up-or-down-daily"}],
+        "startDate": "2026-11-07T17:07:08Z",
+        "startTime": "2026-11-08T17:00:00Z",
+        "endDate": "2026-11-09T17:00:00Z",
+        "markets": [{
+          "id": "6803498",
+          "slug": "bitcoin-up-or-down-on-november-9-2026",
+          "question": "Bitcoin Up or Down on November 9?",
+          "conditionId": "0xaf7014c3fa021c5b315d78f2aab4697949a182713393156d782e105de6ea88b5",
+          "eventStartTime": "2026-11-08T17:00:00Z",
+          "startDate": "2026-11-07T17:07:08Z",
+          "endDate": "2026-11-09T17:00:00Z",
+          "outcomes": "[\"Up\", \"Down\"]"
+        }]
+      }
+    }
+  ],
+  "unavailable_sample": {
+    "date_utc": "2025-03-31",
+    "series_id": "41",
+    "observed_events": [],
+    "meaning": "No market returned in the observed series/date requests; not proof that no market ever existed."
+  }
+}

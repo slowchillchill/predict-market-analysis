@@ -93,6 +93,7 @@ def extract_day_features(db_path: Path, day: date) -> dict:
         return {
             "date_utc": str(day),
             "coverage": collector.coverage(db, str(day)),
+            "coverage_policy": collector.coverage_policy(db),
             "market_volume": load_market_volume(db, day, day + timedelta(days=1)),
             "series": [dict(row) for row in db.execute(
                 "SELECT series_slug,expected_markets,first_end_time FROM updown_target_series ORDER BY series_slug")],
@@ -146,6 +147,7 @@ def export_day(db_path: Path, day: date, first_seen: Mapping[str, str], *,
         data = poster.load_data(db, day, bot_first_seen=labels)
         data = poster.PosterData(day, data.current, previous if previous is not None else data.previous)
         prices = distribution.load_data(db, day, bot_first_seen=labels)
+        coverage_policy = collector.coverage_policy(db)
     values = poster.display_values(data, prices)
     payload = {
         "date_utc": str(day), "date_basis": "market_end_utc",
@@ -156,8 +158,10 @@ def export_day(db_path: Path, day: date, first_seen: Mapping[str, str], *,
         "display": values, "copy_version": values["copy_version"],
         "buy_event_summary": event_summary(prices), "bot_panel_basis": BASIS,
     }
-    return _bundle("daily", day, day + timedelta(days=1), payload, prices,
-                   {str(day): source_reference} if source_reference is not None else {})
+    bundle = _bundle("daily", day, day + timedelta(days=1), payload, prices,
+                     {str(day): source_reference} if source_reference is not None else {})
+    bundle["coverage_policy"] = coverage_policy
+    return bundle
 
 
 def save_day(store_path: Path, features: dict, bundle: dict, *,
@@ -393,4 +397,5 @@ def export_period(store_paths: Path | Iterable[Path], start: date, end: date, ki
     bundle = _bundle(kind, start, end, payload, prices, sources)
     bundle["raw_schema_versions"] = {row[0]["date_utc"]: row[1].get("raw_schema_version", 1) for row in rows}
     bundle["volume_methods"] = {row[0]["date_utc"]: row[1].get("volume_method", "legacy_taker_api") for row in rows}
+    bundle["coverage_policies"] = {row[0]["date_utc"]: row[1].get("coverage_policy", "legacy_nominal_v1") for row in rows}
     return bundle

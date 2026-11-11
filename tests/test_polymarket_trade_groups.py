@@ -190,6 +190,121 @@ class TradeGroupTests(unittest.TestCase):
             groups.upgrade_database(fake)
         fake.execute.assert_called_once_with("PRAGMA database_list")
 
+    def v2_database(self):
+        path = Path(self.temp.name) / "v2.sqlite3"
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        schema = (ROOT / "sql/btc5m_schema.sql").read_text().replace("date_utc TEXT,", "date_utc TEXT NOT NULL,")
+        schema = schema.replace("PRAGMA user_version = 3;", "PRAGMA user_version = 2;")
+        schema = schema.replace(",\n    resolution_source TEXT,\n    description TEXT", "")
+        db.executescript(schema)
+        db.executescript((ROOT / "sql/btc5m_daily.sql").read_text())
+        seed(db, "pending")
+        core.commit_page(db, "pending", 1, page([trade("x")], "page-2"))
+        with db:
+            db.execute("UPDATE markets SET event_start_time='2026-11-08T17:00:00Z',"
+                       "end_time='2026-11-09T17:00:00Z' WHERE slug='pending'")
+        db.execute("CREATE INDEX custom_market_id ON markets(market_id)")
+        return path, db
+
+    def test_v2_markets_constraint_is_rebuilt_without_changing_children_or_known_times(self):
+        path, db = self.v2_database()
+        with closing(db):
+            before = {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table}")]
+                      for table in ("markets", "trades", "collection_progress", "pending_group_map")}
+            with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro", uri=True)) as immutable:
+                self.assertEqual(groups.group_column(immutable), "group_id")
+                self.assertEqual(immutable.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertTrue(groups.upgrade_database(db))
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+            for table, values in before.items():
+                current = [tuple(row) for row in db.execute(f"SELECT * FROM {table}")]
+                self.assertEqual([row[:9] for row in current] if table == "markets" else current, values)
+            self.assertEqual(tuple(db.execute("SELECT resolution_source,description FROM markets").fetchone()),
+                             (None, None))
+            self.assertTrue(db.execute("SELECT 1 FROM sqlite_master WHERE name='custom_market_id'").fetchone())
+            with db:
+                db.execute("INSERT INTO markets(slug,date_utc,condition_id) VALUES ('unknown',NULL,'unknown')")
+            self.assertIsNone(db.execute("SELECT date_utc FROM markets WHERE slug='unknown'").fetchone()[0])
+            self.assertFalse(groups.upgrade_database(db))
+
+    def test_v3_market_migration_failure_restores_old_constraints_views_and_foreign_keys(self):
+        _, db = self.v2_database()
+        with closing(db):
+            upgrade = groups._upgrade_market_start_nullability
+
+            def fail_after_parent_swap(connection):
+                upgrade(connection)
+                raise RuntimeError("simulate interruption before commit")
+
+            with patch.object(groups, "_upgrade_market_start_nullability", side_effect=fail_after_parent_swap), \
+                    self.assertRaises(RuntimeError):
+                groups.upgrade_database(db)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            self.assertEqual(next(row[3] for row in db.execute("PRAGMA table_info(markets)") if row[1] == "date_utc"), 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM pending_group_map").fetchone()[0], 1)
+            self.assertIsNotNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='btc5m_coverage'").fetchone())
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_v3_connect_does_not_downgrade_or_assign_an_unknown_start_date(self):
+        with self.db:
+            self.db.execute("INSERT INTO markets(slug,date_utc,condition_id,end_time) "
+                            "VALUES ('unknown-start',NULL,'unknown-start','2025-04-02T12:00:00Z')")
+        self.db.close()
+        self.db = core.connect_database(self.path)
+        self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertIsNone(self.db.execute("SELECT date_utc FROM markets WHERE slug='unknown-start'").fetchone()[0])
+
+    def test_existing_v3_adds_nullable_rule_metadata_without_rewriting_trade_state(self):
+        core.commit_page(self.db, "a", 1, page([trade("x")], "page-2"))
+        self.db.execute("ALTER TABLE markets DROP COLUMN resolution_source")
+        self.db.execute("ALTER TABLE markets DROP COLUMN description")
+        self.db.executescript("CREATE VIEW updown_target_series(series_slug,expected_markets,first_end_time) AS "
+            "VALUES ('test',1,NULL);"
+            "CREATE VIEW updown_coverage_policy(policy) AS SELECT 'official_series_all_conditions_v1';"
+            "CREATE VIEW updown_expected_slots(series_slug,date_utc,slot_utc) AS "
+            "VALUES ('test','2026-11-09','2026-11-09');"
+            "CREATE VIEW updown_discovery_status(series_slug,date_utc,listing_complete) AS "
+            "VALUES ('test','2026-11-09',1);")
+        proof = self.db.execute("SELECT name,sql FROM sqlite_master WHERE type='view' AND name LIKE 'updown_%' "
+                                "ORDER BY name").fetchall()
+        before = {table: [tuple(row) for row in self.db.execute(f"SELECT * FROM {table}")]
+                  for table in ("trades", "collection_progress", "pending_group_map")}
+        self.assertTrue(groups.upgrade_database(self.db))
+        self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual([tuple(row) for row in self.db.execute("SELECT resolution_source,description FROM markets")],
+                         [(None, None), (None, None)])
+        for table, values in before.items():
+            self.assertEqual([tuple(row) for row in self.db.execute(f"SELECT * FROM {table}")], values)
+        self.assertEqual(self.db.execute("SELECT name,sql FROM sqlite_master WHERE type='view' "
+                         "AND name LIKE 'updown_%' ORDER BY name").fetchall(), proof)
+        self.assertFalse(groups.upgrade_database(self.db))
+        self.assertEqual(self.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_v2_parent_rebuild_preserves_rule_metadata_and_coverage_profile(self):
+        _, db = self.v2_database()
+        with closing(db):
+            db.execute("ALTER TABLE markets ADD COLUMN resolution_source TEXT")
+            db.execute("ALTER TABLE markets ADD COLUMN description TEXT")
+            with db:
+                db.execute("UPDATE markets SET resolution_source='https://source.example',description='Actual rules'")
+            db.executescript("CREATE VIEW updown_coverage_policy(policy) AS SELECT 'official_series_all_conditions_v1';"
+                             "CREATE VIEW updown_expected_slots(series_slug,date_utc,slot_utc) AS "
+                             "VALUES ('test','2026-11-09','2026-11-09');"
+                             "CREATE VIEW updown_discovery_status(series_slug,date_utc,listing_complete) AS "
+                             "VALUES ('test','2026-11-09',1);")
+            self.assertTrue(groups.upgrade_database(db))
+            self.assertEqual(tuple(db.execute("SELECT resolution_source,description FROM markets").fetchone()),
+                             ("https://source.example", "Actual rules"))
+            self.assertEqual(groups.coverage_policy(db), "official_series_all_conditions_v1")
+            self.assertEqual(tuple(db.execute("SELECT * FROM updown_expected_slots").fetchone()),
+                             ("test", "2026-11-09", "2026-11-09"))
+            self.assertEqual(db.execute("SELECT listing_complete FROM updown_discovery_status").fetchone()[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

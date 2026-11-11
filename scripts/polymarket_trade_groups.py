@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _PRESERVED_LOCAL_DATABASE = Path(__file__).resolve().parents[1] / "data/raw/btc5m.sqlite3"
 _PENDING_SCHEMA = """
 CREATE TABLE IF NOT EXISTS pending_group_map (
@@ -33,6 +33,15 @@ def group_column(db: sqlite3.Connection) -> str:
     raise ValueError("交易表缺少 group_id 或旧 transaction_hash")
 
 
+def coverage_policy(db: sqlite3.Connection) -> str:
+    """旧只读日库没有覆盖策略视图时，沿用原名义数量规则。"""
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='updown_coverage_policy' AND type='view'").fetchone():
+        row = db.execute("SELECT policy FROM updown_coverage_policy").fetchone()
+        if row:
+            return row[0]
+    return "legacy_nominal_v1"
+
+
 def ensure_pending_map(db: sqlite3.Connection) -> None:
     # 必须是普通持久表，不能用 TEMP TABLE；暂停发布后仍需恢复哈希映射。
     db.execute(_PENDING_SCHEMA)
@@ -47,7 +56,9 @@ def _protect_local_database(db: sqlite3.Connection) -> None:
 def _drop_old_views(db: sqlite3.Connection) -> None:
     # 升级后由 connect_database 重建项目视图，避免旧视图引用已移除的金额实体表。
     names = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='view' "
-             "AND (name LIKE 'btc5m_%' OR name LIKE 'updown_%') AND name<>'updown_target_series'")]
+             "AND (name LIKE 'btc5m_%' OR name LIKE 'updown_%') "
+             "AND name NOT IN ('updown_target_series','updown_coverage_policy',"
+             "'updown_expected_slots','updown_discovery_status')")]
     for name in names:
         db.execute('DROP VIEW "' + name.replace('"', '""') + '"')
 
@@ -73,11 +84,68 @@ def _new_trade_table(db: sqlite3.Connection) -> None:
     """)
 
 
-def upgrade_database(db: sqlite3.Connection) -> bool:
-    """升级工作副本，不改原行、页序或金额；返回是否转换旧结构。
+def _upgrade_hash_trades(db: sqlite3.Connection) -> None:
+    complete = {row[0] for row in db.execute("SELECT market_slug FROM collection_progress WHERE completed_at IS NOT NULL")}
+    db.execute("DROP TABLE IF EXISTS pending_group_map")
+    ensure_pending_map(db)
+    _new_trade_table(db)
+    current_market, mapping = None, {}
+    cursor = db.execute("SELECT market_slug,page_number,row_number,wallet,transaction_hash,timestamp,"
+                        "side,outcome,outcome_index,token_id,raw_price,raw_size,amount_micro_usdc "
+                        "FROM trades ORDER BY market_slug,page_number,row_number")
+    try:
+        for row in cursor:
+            slug, transaction_hash = row[0], row[4]
+            if slug != current_market:
+                current_market, mapping = slug, {}
+            if transaction_hash not in mapping:
+                mapping[transaction_hash] = len(mapping) + 1
+                if slug not in complete:
+                    db.execute("INSERT INTO pending_group_map VALUES (?,?,?)",
+                               (slug, transaction_hash, mapping[transaction_hash]))
+            converted = (*tuple(row[:4]), mapping[transaction_hash], *tuple(row[5:]))
+            db.execute("INSERT INTO trades_grouped_upgrade VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", converted)
+    finally:
+        cursor.close()
+    db.execute("DROP TABLE trades")
+    db.execute("ALTER TABLE trades_grouped_upgrade RENAME TO trades")
 
-    旧分析视图会被移除，调用方随后通过 collector.connect_database 重建。
-    此函数不做 VACUUM；未完成市场仍须保留普通持久映射表。
+
+def _upgrade_market_start_nullability(db: sqlite3.Connection) -> None:
+    """SQLite 不能直接放宽 NOT NULL；保留父键名并重建小型市场表。"""
+    objects = [row[0] for row in db.execute("SELECT sql FROM sqlite_master WHERE tbl_name='markets' "
+               "AND type IN ('index','trigger') AND sql IS NOT NULL")]
+    db.execute("""
+        CREATE TABLE markets_nullable_upgrade (
+            slug TEXT PRIMARY KEY,
+            date_utc TEXT,
+            market_id TEXT,
+            condition_id TEXT UNIQUE,
+            event_id TEXT,
+            title TEXT,
+            series_slug TEXT,
+            event_start_time TEXT,
+            end_time TEXT,
+            resolution_source TEXT,
+            description TEXT
+        )
+    """)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(markets)")}
+    optional = ",".join(name if name in columns else "NULL" for name in ("resolution_source", "description"))
+    db.execute("INSERT INTO markets_nullable_upgrade SELECT slug,date_utc,market_id,condition_id,"
+               "event_id,title,series_slug,event_start_time,end_time," + optional + " FROM markets")
+    db.execute("DROP TABLE markets")
+    db.execute("ALTER TABLE markets_nullable_upgrade RENAME TO markets")
+    for statement in objects:
+        db.execute(statement)
+    db.execute("CREATE INDEX IF NOT EXISTS markets_date ON markets(date_utc)")
+
+
+def upgrade_database(db: sqlite3.Connection) -> bool:
+    """升级工作副本；保持交易、页序、金额和已有可靠时间不变。
+
+    v3 实际重建 markets 的 date_utc 约束，未知开始可以保存 NULL。
+    旧分析视图由调用方 connect_database 重建；不在这里 VACUUM。
     """
     _protect_local_database(db)
     if db.in_transaction:
@@ -86,49 +154,42 @@ def upgrade_database(db: sqlite3.Connection) -> bool:
         return False
     old_hash = group_column(db) == "transaction_hash"
     old_volume = _table_exists(db, "market_volume")
-    if not old_hash:
-        if not _table_exists(db, "pending_group_map") and db.execute("""
-            SELECT 1 FROM trades t JOIN collection_progress p ON p.market_slug=t.market_slug
-            WHERE p.completed_at IS NULL LIMIT 1
-        """).fetchone():
-            raise ValueError("未完成市场缺少持久成交组映射，不能靠内存重新分配组号")
+    market_columns = {row[1]: row for row in db.execute("PRAGMA table_info(markets)")}
+    starts_not_null = bool(market_columns.get("date_utc", (None, None, None, 0))[3])
+    missing_metadata = [name for name in ("resolution_source", "description") if name not in market_columns]
+    version = db.execute("PRAGMA user_version").fetchone()[0]
+    if not old_hash and not _table_exists(db, "pending_group_map") and db.execute("""
+        SELECT 1 FROM trades t JOIN collection_progress p ON p.market_slug=t.market_slug
+        WHERE p.completed_at IS NULL LIMIT 1
+    """).fetchone():
+        raise ValueError("未完成市场缺少持久成交组映射，不能靠内存重新分配组号")
+    changed = old_hash or old_volume or starts_not_null or version < SCHEMA_VERSION or bool(missing_metadata)
+    if not changed:
+        return False
+    foreign_keys = db.execute("PRAGMA foreign_keys").fetchone()[0]
+    # 更换父表时须在事务外临时关闭 FK；子表仍引用最终保留的 markets 名称。
+    if starts_not_null:
+        db.execute("PRAGMA foreign_keys=OFF")
+    try:
         with db:
             db.execute("BEGIN IMMEDIATE")
-            if old_volume:
+            if old_hash or old_volume or starts_not_null:
                 _drop_old_views(db)
+            if old_hash:
+                _upgrade_hash_trades(db)
+            if starts_not_null:
+                _upgrade_market_start_nullability(db)
+            else:
+                for name in missing_metadata:
+                    db.execute(f"ALTER TABLE markets ADD COLUMN {name} TEXT")
+            if old_volume:
                 db.execute("DROP TABLE market_volume")
-            db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        return old_volume
-    complete = {row[0] for row in db.execute("SELECT market_slug FROM collection_progress WHERE completed_at IS NOT NULL")}
-    with db:
-        db.execute("BEGIN IMMEDIATE")
-        db.execute("DROP TABLE IF EXISTS pending_group_map")
-        ensure_pending_map(db)
-        _new_trade_table(db)
-        current_market, mapping = None, {}
-        cursor = db.execute("SELECT market_slug,page_number,row_number,wallet,transaction_hash,timestamp,"
-                            "side,outcome,outcome_index,token_id,raw_price,raw_size,amount_micro_usdc "
-                            "FROM trades ORDER BY market_slug,page_number,row_number")
-        try:
-            for row in cursor:
-                slug, transaction_hash = row[0], row[4]
-                if slug != current_market:
-                    current_market, mapping = slug, {}
-                if transaction_hash not in mapping:
-                    mapping[transaction_hash] = len(mapping) + 1
-                    if slug not in complete:
-                        db.execute("INSERT INTO pending_group_map VALUES (?,?,?)",
-                                   (slug, transaction_hash, mapping[transaction_hash]))
-                converted = (*tuple(row[:4]), mapping[transaction_hash], *tuple(row[5:]))
-                db.execute("INSERT INTO trades_grouped_upgrade VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", converted)
-        finally:
-            cursor.close()
-        _drop_old_views(db)
-        db.execute("DROP TABLE trades")
-        db.execute("ALTER TABLE trades_grouped_upgrade RENAME TO trades")
-        if old_volume:
-            db.execute("DROP TABLE market_volume")
-        db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            if starts_not_null and db.execute("PRAGMA foreign_key_check").fetchone():
+                raise sqlite3.IntegrityError("市场开始字段迁移后外键不一致")
+            db.execute(f"PRAGMA user_version={max(version, SCHEMA_VERSION)}")
+    finally:
+        if starts_not_null:
+            db.execute(f"PRAGMA foreign_keys={foreign_keys}")
     return True
 
 

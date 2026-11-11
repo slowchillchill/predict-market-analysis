@@ -75,7 +75,8 @@ class PublicAPI:
         slug = producer.collector.market_slug(SERIES, ended)
         event = {"id": slug, "seriesSlug": SERIES, "slug": slug, "markets": [{
             "id": slug, "slug": slug, "conditionId": str(day), "question": "BTC up or down",
-            "eventStartTime": (ended - timedelta(days=1)).isoformat(), "endDate": ended.isoformat()}]}
+            "eventStartTime": (ended - timedelta(days=1)).isoformat(), "endDate": ended.isoformat(),
+            "outcomes": ["Up", "Down"]}]}
         self.events[str(day)] = event
         return event
 
@@ -151,7 +152,7 @@ class PipelineTests(unittest.TestCase):
             rows = db.execute("SELECT group_id,typeof(group_id) FROM trades").fetchall()
             self.assertTrue(rows)
             self.assertTrue(all(value > 0 and storage_type == "integer" for value, storage_type in rows))
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], producer.RAW_SCHEMA_VERSION)
 
     def test_complete_day_publishes_exact_raw_version_then_formal_result(self):
         with self.quiet():
@@ -160,9 +161,10 @@ class PipelineTests(unittest.TestCase):
         files = self.latest_files(slug)
         metadata = json.loads(files["collection_status.json"])
         self.assertEqual(metadata["status"], "complete")
-        self.assertEqual(metadata["schema_version"], 2)
+        self.assertEqual(metadata["schema_version"], producer.RAW_SCHEMA_VERSION)
         self.assertEqual(metadata["group_key"], ["market_slug", "group_id"])
         self.assertEqual(metadata["volume_method"], "wallet_group_first_row_v1")
+        self.assertEqual(metadata["coverage_policy"], "official_series_all_conditions_v1")
         self.assertNotIn("volume_sources", metadata)
         self.assertFalse(any(key.startswith("market_volume_") for key in metadata["coverage"]))
         self.assert_complete_raw_shape(files)
@@ -170,9 +172,12 @@ class PipelineTests(unittest.TestCase):
         bundle = json.loads(month[f"daily_{YESTERDAY}.json"])
         self.assertEqual(bundle["source_versions"][str(YESTERDAY)], {"dataset": "owner/" + slug, "version": 1})
         self.assertEqual(bundle["schema_version"], 1)
-        self.assertEqual(bundle["raw_schema_version"], 2)
+        self.assertEqual(bundle["raw_schema_version"], producer.RAW_SCHEMA_VERSION)
         self.assertEqual(bundle["volume_method"], "wallet_group_first_row_v1")
-        self.assertEqual(self.pipeline.state["raw_days"][str(YESTERDAY)]["raw_schema_version"], 2)
+        self.assertEqual(bundle["coverage_policy"], metadata["coverage_policy"])
+        self.assertEqual(self.pipeline.state["raw_days"][str(YESTERDAY)]["coverage_policy"],
+                         metadata["coverage_policy"])
+        self.assertEqual(self.pipeline.state["raw_days"][str(YESTERDAY)]["raw_schema_version"], producer.RAW_SCHEMA_VERSION)
         self.assertEqual(self.pipeline.state["raw_days"][str(YESTERDAY)]["volume_method"],
                          "wallet_group_first_row_v1")
         self.assertEqual(bundle["payload"]["current"]["volume_micro_usdc"], 2000000)
@@ -374,9 +379,12 @@ class PipelineTests(unittest.TestCase):
         self.pipeline.attempted.add(str(YESTERDAY))
         earlier = "2026-04-01T17:00:00Z"
         later = "2026-05-01T17:00:00Z"
+        def boundary_event(ended):
+            return {"seriesSlug": SERIES, "markets": [{"slug": ended, "conditionId": ended,
+                    "endDate": ended, "outcomes": ["Up", "Down"]}]}
         responses = [[{"slug": SERIES, "id": "1"}],
-                     {"events": [{"markets": [{"endDate": later}]}], "next_cursor": "next"},
-                     {"events": [{"markets": [{"endDate": earlier}]}], "next_cursor": None}]
+                     {"events": [boundary_event(later)], "next_cursor": "next"},
+                     {"events": [boundary_event(earlier)], "next_cursor": None}]
         self.client.get = Mock(side_effect=responses)
         with self.quiet():
             self.pipeline.discover_history()
