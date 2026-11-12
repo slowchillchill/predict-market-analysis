@@ -158,6 +158,7 @@ class RecoveryTests(unittest.TestCase):
             self.assertFalse(self.pipeline._checkpoint_active())
             producer.collector.discover_series(db, self.client, fixtures.SERIES, day, fixtures.TODAY)
             self.assertTrue(self.pipeline._checkpoint_active())
+            self.assertEqual(list((self.root / 'work/checkpoints').iterdir()), [])
             publications = len(self.store.published)
             self.assertFalse(self.pipeline._checkpoint_active())
             self.assertEqual(len(self.store.published), publications)
@@ -290,23 +291,82 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn('index.json', self.latest_files('pm-updown-analysis-2026-11'))
 
     def test_uncertain_checkpoint_failure_does_not_blindly_publish_again(self):
+        day = fixtures.YESTERDAY - timedelta(days=1)
+        self.seed_history(day)
+        self.pipeline.attempted.add(str(fixtures.YESTERDAY))
         elapsed = self.elapsed_clock()
         self.client.after_wallet = lambda _: elapsed.__setitem__(0, 11)
         original = self.store.publish
         calls = []
+        marker = {'schema_version': 1, 'dataset': self.store.ref(f'pm-updown-raw-{day}'),
+                  'publication_id': 'unknown-checkpoint'}
 
         def publish(slug, directory, **kwargs):
             if slug.startswith('pm-updown-raw-'):
-                calls.append(slug)
+                calls.append(directory)
+                producer.write_json(directory / 'publication.json', marker)
                 raise producer.KaggleError('Publication outcome remains unknown')
             return original(slug, directory, **kwargs)
 
         self.store.publish = publish
         with self.quiet(), self.assertRaises(producer.KaggleError):
-            self.pipeline.process_day(fixtures.YESTERDAY)
+            self.pipeline.process_day(day, historical=True)
         self.assertEqual(len(calls), 1)
-        self.assertTrue((self.root / 'work/raw' / str(fixtures.YESTERDAY) / 'data.sqlite3').exists())
-        self.assertNotIn(str(fixtures.YESTERDAY), self.pipeline.state['raw_days'])
+        active = self.root / 'work/raw' / str(day) / 'data.sqlite3'
+        self.assertTrue(active.exists())
+        self.assertNotIn(str(day), self.pipeline.state['raw_days'])
+        self.assertEqual(self.pipeline.state['history']['next_date_utc'], str(day))
+        folder = calls[0]
+        self.assertEqual(list((self.root / 'work/checkpoints').iterdir()), [folder])
+        self.assertEqual(json.loads((folder / 'publication.json').read_text()), marker)
+        self.assertEqual(json.loads((folder / 'collection_status.json').read_text())['status'], 'incomplete')
+        with contextlib.closing(sqlite3.connect(active)) as work, \
+                contextlib.closing(sqlite3.connect(folder / 'data.sqlite3')) as snapshot:
+            self.assertEqual(list(snapshot.iterdump()), list(work.iterdump()))
+
+    def test_confirmed_checkpoint_survives_monthly_failure_and_new_session_resumes_raw(self):
+        day = fixtures.YESTERDAY - timedelta(days=1)
+        slug = f'pm-updown-raw-{day}'
+        self.seed_history(day)
+        self.pipeline.save()
+        self.pipeline.attempted.add(str(fixtures.YESTERDAY))
+        elapsed = self.elapsed_clock()
+        self.client.after_wallet = lambda _: elapsed.__setitem__(0, 11)
+        original = self.store.publish
+        checkpoints = []
+
+        def publish(name, directory, **kwargs):
+            if name.startswith('pm-updown-analysis-'):
+                raise producer.KaggleError('Monthly publication confirmation failed')
+            producer.write_json(directory / 'publication.json', {
+                'schema_version': 1, 'dataset': self.store.ref(name), 'publication_id': 'confirmed-raw'})
+            checkpoints.append(directory)
+            return original(name, directory, **kwargs)
+
+        self.store.publish = publish
+        with self.quiet(), self.assertRaisesRegex(producer.KaggleError, 'Monthly'):
+            self.pipeline.process_day(day, historical=True)
+        self.assertEqual(self.store.version(slug), 1)
+        self.assertEqual(len(checkpoints), 1)
+        self.assertTrue((checkpoints[0] / 'publication.json').is_file())
+        self.assertTrue((checkpoints[0] / 'data.sqlite3').is_file())
+        self.assertEqual(self.pipeline.state['history']['next_date_utc'], str(day))
+        saved = json.loads(self.latest_files('pm-updown-analysis-2026-11')['progress.json'])
+        self.assertNotIn(str(day), saved['raw_days'])
+
+        self.store.publish = original
+        self.client.after_wallet = None
+        self.client.trades.clear()
+        resumed = producer.Pipeline(self.store, self.root / 'resumed-after-month-failure',
+                                    today=lambda: fixtures.TODAY, client=self.client)
+        resumed.attempted.add(str(fixtures.YESTERDAY))
+        self.assertNotIn(str(day), resumed.state['raw_days'])
+        with self.quiet():
+            resumed.process_day(day, historical=True)
+        self.assertIn((slug, 1), self.store.restores)
+        self.assertEqual(self.client.trades, [])
+        self.assertEqual(resumed.state['raw_days'][str(day)]['status'], 'complete')
+        self.assertEqual(resumed.state['history']['next_date_utc'], str(day + timedelta(days=1)))
 
     def test_setup_elapsed_time_is_included_before_collection(self):
         pipeline = producer.Pipeline(self.store, self.root / 'late-start', today=lambda: fixtures.TODAY,

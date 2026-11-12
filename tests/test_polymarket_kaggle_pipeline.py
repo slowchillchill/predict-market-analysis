@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -415,6 +416,64 @@ class PipelineTests(unittest.TestCase):
             self.pipeline.run(max_days=1)
         self.assertEqual(self.pipeline.state["history"]["next_date_utc"], str(YESTERDAY))
         self.assertEqual(self.pipeline.state["history"]["gaps"], {})
+
+
+class ProducerMainTests(unittest.TestCase):
+    def invoke(self, pipeline, *, initialization_error=None):
+        client = Mock()
+        stream = io.StringIO()
+        with patch.object(producer.Path, 'is_dir', return_value=True), \
+                patch.object(producer.core, 'Client', return_value=client), \
+                patch.object(producer, 'KaggleStore') as store, \
+                patch.object(producer, 'Pipeline', return_value=pipeline,
+                             side_effect=initialization_error) as constructor, \
+                patch.object(producer.signal, 'signal'), \
+                patch('polymarket_kaggle_migration.migrate_existing'), \
+                contextlib.redirect_stdout(stream):
+            result = producer.main([])
+        return result, stream.getvalue(), client, constructor, store
+
+    def test_default_work_directory_retains_failure_evidence_in_notebook_output(self):
+        pipeline = Mock()
+        result, _, client, constructor, store = self.invoke(pipeline)
+        self.assertEqual(result, 0)
+        self.assertEqual(constructor.call_args.args[1], Path('/kaggle/working/polymarket-pipeline'))
+        self.assertEqual(store.call_args.args[1], Path('/kaggle/working/polymarket-pipeline/downloads'))
+        self.assertIs(constructor.call_args.kwargs['client'], client)
+        client.close.assert_called_once_with()
+
+    def test_publication_failure_logs_redacted_underlying_cause(self):
+        cause = producer.KaggleError('HTTP 403 Forbidden Authorization: Bearer secret-test-token')
+        failure = producer.KaggleError('Cannot determine Dataset publication result; keep working files')
+        failure.__cause__ = cause
+        pipeline = Mock()
+        pipeline.run.side_effect = failure
+        with patch.dict(os.environ, {'KAGGLE_API_TOKEN': 'secret-test-token'}):
+            result, output, client, _, _ = self.invoke(pipeline)
+        self.assertEqual(result, 1)
+        self.assertIn('Producer stopped without advancing unconfirmed work:', output)
+        self.assertIn('Cannot determine Dataset publication result', output)
+        self.assertIn('403', output)
+        self.assertNotIn('secret-test-token', output)
+        pipeline.save.assert_not_called()
+        client.close.assert_called_once_with()
+
+    def test_restore_failure_reports_cause_and_closes_client_before_pipeline_exists(self):
+        result, output, client, _, _ = self.invoke(Mock(),
+            initialization_error=producer.KaggleError('HTTP 503 during restore'))
+        self.assertEqual(result, 1)
+        self.assertIn('503 during restore', output)
+        client.close.assert_called_once_with()
+
+    def test_paused_collection_save_failure_uses_publication_error_handler(self):
+        pipeline = Mock()
+        pipeline.run.side_effect = producer.core.CollectionPaused('Stopping')
+        pipeline.save.side_effect = producer.KaggleError('Pending publication failed')
+        result, output, client, _, _ = self.invoke(pipeline)
+        self.assertEqual(result, 1)
+        self.assertIn('Pending publication failed', output)
+        pipeline.save.assert_called_once_with()
+        client.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

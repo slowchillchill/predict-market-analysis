@@ -1,4 +1,5 @@
 import json
+import io
 import subprocess
 import sys
 import tempfile
@@ -424,6 +425,176 @@ class KaggleStoreTests(unittest.TestCase):
                 self.publish(folder)
         self.assertEqual(self.store._run.call_count, 1)
         self.assertTrue((folder / "result.json").exists())
+
+    def test_exception_chain_redacts_credentials_and_stops_at_cycles(self):
+        root = RuntimeError("HTTP 403 env-secret Authorization: Bearer bearer-secret "
+                            "Basic basic-secret https://files.example/file?X-Goog-Signature=url-secret&Expires=1 "
+                            "https://user:password-secret@example.test/path api_key=key-secret")
+        outer = cloud.KaggleError("Cannot determine publication")
+        outer.__cause__ = root
+        root.__cause__ = outer
+        with patch.dict(cloud.os.environ, {"KAGGLE_API_TOKEN": "env-secret"}):
+            detail = cloud.describe_exception(outer)
+        self.assertIn("KaggleError: Cannot determine publication", detail)
+        self.assertIn("RuntimeError: HTTP 403", detail)
+        self.assertEqual(detail.count("KaggleError:"), 1)
+        for secret in ("env-secret", "bearer-secret", "basic-secret", "url-secret", "password-secret", "key-secret"):
+            self.assertNotIn(secret, detail)
+        self.assertIn("https://files.example/file", detail)
+
+    def test_read_command_diagnostics_include_operation_and_exit_code_without_secrets(self):
+        self.store.runner = Mock(return_value=subprocess.CompletedProcess(
+            [], 7, "", "HTTP 503 Bearer retry-secret https://host/path?signature=query-secret"))
+        output = io.StringIO()
+        with patch.object(cloud.time, "sleep"), patch("sys.stdout", output), \
+                self.assertRaises(cloud.KaggleError) as failure:
+            self.store._run("datasets", "status", "owner/research")
+        detail = cloud.describe_exception(failure.exception) + output.getvalue()
+        self.assertIn("datasets status exited 7", detail)
+        self.assertIn("HTTP 503", detail)
+        self.assertNotIn("retry-secret", detail)
+        self.assertNotIn("query-secret", detail)
+        self.assertEqual(self.store.runner.call_count, 3)
+
+    def test_malformed_status_is_a_diagnostic_error_not_dataset_absence(self):
+        responses = ["not JSON", "[]", "null", "{}",
+                     json.dumps(status("", 1)), json.dumps(status("ready", 0)),
+                     json.dumps(status(version=True)), json.dumps(status(version=-1)),
+                     json.dumps(status(version=1.5)), json.dumps(status(version="abc")),
+                     json.dumps({"status": "ready"})]
+        for response in responses:
+            with self.subTest(response=response):
+                self.store._run = Mock(return_value=response)
+                with self.assertRaisesRegex(cloud.KaggleError, "Invalid Dataset status response for owner/research") as failure:
+                    self.store.status("research")
+                self.assertIsNotNone(failure.exception.__cause__)
+                self.assertEqual(self.store._run.call_count, 1)
+
+    def test_processing_status_accepts_unassigned_version(self):
+        for version in (None, 0, "0"):
+            with self.subTest(version=version):
+                self.store._run = Mock(return_value=json.dumps(status("processing", version)))
+                self.assertEqual(self.store.status("research"), status("processing", 0))
+
+    def test_malformed_status_response_is_redacted(self):
+        self.store._run = Mock(return_value="Bearer status-secret not JSON")
+        with self.assertRaises(cloud.KaggleError) as failure:
+            self.store.status("research")
+        self.assertNotIn("status-secret", cloud.describe_exception(failure.exception))
+
+    def test_successful_status_resets_consecutive_confirmation_failures(self):
+        folder = self.publication_folder()
+        self.store.status = Mock(side_effect=[None,
+            cloud.KaggleError("HTTP 503"), status("processing", 1),
+            cloud.KaggleError("HTTP 503"), status("processing", 1),
+            cloud.KaggleError("HTTP 503"), status("ready", 1)])
+        self.store._run = Mock(return_value="")
+        self.matching_marker(folder)
+        with patch.object(cloud.time, "sleep"):
+            self.assertEqual(self.publish(folder), 1)
+        self.assertEqual(self.store._run.call_count, 1)
+        self.assertEqual(list((self.store.work_dir / "pending-publications").iterdir()), [])
+
+    def test_permanent_confirmation_failure_preserves_cause_and_accepted_journal(self):
+        folder = self.publication_folder()
+        self.store.status = Mock(side_effect=[status(version=4), cloud.KaggleError("HTTP 401 Unauthorized")])
+        self.store._run = Mock(return_value="")
+        with self.assertRaises(cloud.KaggleError) as failure:
+            self.publish(folder)
+        marker = json.loads((folder / cloud.PUBLICATION_FILE).read_text())
+        detail = cloud.describe_exception(failure.exception)
+        for text in ("Cannot determine", "HTTP 401 Unauthorized", "dataset=owner/research",
+                     "expected_version=5", "submitted=True", "consecutive_read_failures=1",
+                     marker["publication_id"]):
+            self.assertIn(text, detail)
+        journals = list((self.store.work_dir / "pending-publications").glob("*.json"))
+        self.assertEqual(len(journals), 1)
+        journal = json.loads(journals[0].read_text())
+        self.assertEqual(journal["publication"], marker)
+        self.assertEqual(journal["phase"], "accepted")
+        self.assertTrue(journal["submitted"])
+        self.assertEqual(journal["expected_version"], 5)
+        self.assertEqual(journal["source_directory"], str(folder.resolve()))
+        self.assertTrue((folder / "result.json").exists())
+        self.assertEqual(self.store._run.call_count, 1)
+
+    def test_unknown_write_keeps_journal_without_repeating_upload(self):
+        folder = self.publication_folder()
+        self.store.status = Mock(side_effect=[None, cloud.KaggleError("HTTP 403 Forbidden")])
+        self.store._run = Mock(side_effect=cloud.KaggleError("499 Client Error"))
+        with self.assertRaisesRegex(cloud.KaggleError, "Cannot determine"):
+            self.publish(folder)
+        journals = list((self.store.work_dir / "pending-publications").glob("*.json"))
+        self.assertEqual(len(journals), 1)
+        journal = json.loads(journals[0].read_text())
+        self.assertEqual(journal["phase"], "unknown")
+        self.assertIsNone(journal["submitted"])
+        self.assertEqual(journal["attempt"], 1)
+        self.assertEqual(self.store._run.call_count, 1)
+
+    def test_journal_exists_before_upload_and_is_not_in_upload_directory(self):
+        folder = self.publication_folder()
+        self.store.status = Mock(side_effect=[None, status(version=1)])
+
+        def upload(*args):
+            journal_paths = list((self.store.work_dir / "pending-publications").glob("*.json"))
+            self.assertEqual(len(journal_paths), 1)
+            self.assertEqual(json.loads(journal_paths[0].read_text())["phase"], "submitting")
+            self.assertFalse(journal_paths[0].is_relative_to(folder))
+            self.assertEqual(Path(args[args.index("-p") + 1]), folder)
+            return ""
+
+        self.store._run = Mock(side_effect=upload)
+        self.matching_marker(folder)
+        self.assertEqual(self.publish(folder), 1)
+        self.assertEqual(list((self.store.work_dir / "pending-publications").iterdir()), [])
+
+    def test_journal_write_failure_before_submission_prevents_upload(self):
+        folder = self.publication_folder()
+        self.store.status = Mock(return_value=None)
+        self.store._run = Mock(return_value="")
+        write_json = cloud.write_json
+
+        def write(path, value):
+            if path.parent.name == "pending-publications":
+                raise OSError("disk full")
+            write_json(path, value)
+
+        with patch.object(cloud, "write_json", side_effect=write), self.assertRaisesRegex(cloud.KaggleError, "Cannot save publication journal"):
+            self.publish(folder)
+        self.store._run.assert_not_called()
+        self.assertTrue((folder / "result.json").exists())
+
+    def test_journal_update_failure_after_submission_keeps_prior_evidence(self):
+        folder = self.publication_folder()
+        self.store.status = Mock(return_value=None)
+        self.store._run = Mock(return_value="")
+        write_json = cloud.write_json
+
+        def write(path, value):
+            if path.parent.name == "pending-publications" and value["phase"] == "accepted":
+                raise OSError("disk full after upload")
+            write_json(path, value)
+
+        with patch.object(cloud, "write_json", side_effect=write), self.assertRaises(cloud.KaggleError) as failure:
+            self.publish(folder)
+        self.assertIn("disk full after upload", cloud.describe_exception(failure.exception))
+        journal = json.loads(next((self.store.work_dir / "pending-publications").glob("*.json")).read_text())
+        self.assertEqual(journal["phase"], "submitting")
+        self.assertEqual(self.store._run.call_count, 1)
+        self.assertTrue((folder / cloud.PUBLICATION_FILE).exists())
+
+    def test_official_terminal_states_stop_waiting_and_publication(self):
+        for state in ("processing_error", "deleted"):
+            with self.subTest(state=state):
+                self.store.status = Mock(return_value=status(state, 1))
+                with self.assertRaisesRegex(cloud.KaggleError, "Dataset processing failed"):
+                    self.store.wait_ready("research")
+                self.assertEqual(self.store.status.call_count, 1)
+                self.store.status = Mock(return_value=status(state, 1))
+                with self.assertRaisesRegex(cloud.KaggleError, "Dataset processing failed"):
+                    self.store._confirm_publication("research", {"publication_id": "id"}, 1, submitted=True)
+                self.assertEqual(self.store.status.call_count, 1)
 
 
 if __name__ == "__main__":

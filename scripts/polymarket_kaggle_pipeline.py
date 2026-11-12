@@ -18,7 +18,7 @@ from pathlib import Path
 import polymarket_btc5m_daily as core
 import polymarket_updown_daily as collector
 import polymarket_kaggle_analysis as analysis
-from polymarket_kaggle_store import KaggleError, KaggleStore, TITLE, OWNER, write_json
+from polymarket_kaggle_store import KaggleError, KaggleStore, TITLE, OWNER, describe_exception, write_json
 import polymarket_trade_groups as trade_groups
 
 
@@ -310,8 +310,12 @@ class Pipeline:
         # mappings, remove the active work database, or advance the history date.
         checkpoint_root = self.work_dir / "checkpoints"
         checkpoint_root.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=f"{day}-", dir=checkpoint_root) as temporary:
-            folder = Path(temporary)
+        # Keep this exact snapshot and its publication marker if either upload
+        # confirmation or the monthly progress publication fails. A fresh
+        # session still restores cloud Datasets; retained output is evidence,
+        # not an instruction to repeat an uncertain upload.
+        folder = Path(tempfile.mkdtemp(prefix=f"{day}-", dir=checkpoint_root))
+        try:
             with closing(sqlite3.connect(folder / "data.sqlite3")) as target:
                 db.backup(target)
             write_json(folder / "collection_status.json", metadata)
@@ -319,8 +323,12 @@ class Pipeline:
             version = self.store.publish(f"pm-updown-raw-{day}", folder,
                 title=f"Polymarket Updown Raw {day}", description=DESCRIPTION,
                 message=f"{day}: recoverable collection checkpoint")
-        self._record_raw(day, version, metadata)
-        self.save()
+            self._record_raw(day, version, metadata)
+            self.save()
+        except BaseException:
+            print(f"Retained checkpoint for publication recovery: {folder}", flush=True)
+            raise
+        shutil.rmtree(folder)
         active["last_signature"] = signature
         print(f"Checkpointed {day}: version {version}, {coverage['committed_pages']} committed pages", flush=True)
         return True
@@ -673,7 +681,8 @@ class Pipeline:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--owner", default=OWNER)
-    parser.add_argument("--work-dir", type=Path, default=Path("/tmp/polymarket-pipeline"))
+    parser.add_argument("--work-dir", type=Path, default=Path("/kaggle/working/polymarket-pipeline"),
+                        help="Working files and retained failure evidence; fresh sessions restore cloud Datasets")
     parser.add_argument("--max-days", type=int, help="Explicit finite acceptance run; production has no day cap")
     parser.add_argument("--migrate-only", action="store_true", help="Upgrade completed cloud snapshots without collecting trades")
     parser.add_argument("--checkpoint-minutes", type=float, default=CHECKPOINT_SECONDS / 60,
@@ -688,26 +697,27 @@ def main(argv=None) -> int:
     if not Path("/kaggle/working").is_dir():
         parser.error("The producer runs only on Kaggle; local machines run polymarket_kaggle_reports.py")
     started_at = float(os.environ.get("POLYMARKET_RUN_STARTED_MONOTONIC", time.monotonic()))
-    pipeline = Pipeline(KaggleStore(args.owner, args.work_dir / "downloads"), args.work_dir,
-        started_at=started_at, checkpoint_seconds=args.checkpoint_minutes * 60,
-        stop_after_seconds=args.stop_after_hours * 3600, session_seconds=args.session_hours * 3600)
-    signal.signal(signal.SIGTERM, lambda *_: setattr(pipeline, "stopping", True))
+    client = core.Client(None)
     try:
-        from polymarket_kaggle_migration import migrate_existing
-        migrate_existing(pipeline)
-        if not args.migrate_only:
-            pipeline.run(max_days=args.max_days)
+        pipeline = Pipeline(KaggleStore(args.owner, args.work_dir / "downloads"), args.work_dir,
+            client=client, started_at=started_at, checkpoint_seconds=args.checkpoint_minutes * 60,
+            stop_after_seconds=args.stop_after_hours * 3600, session_seconds=args.session_hours * 3600)
+        signal.signal(signal.SIGTERM, lambda *_: setattr(pipeline, "stopping", True))
+        try:
+            from polymarket_kaggle_migration import migrate_existing
+            migrate_existing(pipeline)
+            if not args.migrate_only:
+                pipeline.run(max_days=args.max_days)
+        except (KeyboardInterrupt, core.CollectionPaused):
+            pipeline.save()
     except core.RateLimitError as exc:
         print(f"Polymarket collection paused after sustained rate limiting: {exc}", flush=True)
         return 0
-    except (KeyboardInterrupt, core.CollectionPaused):
-        pipeline.save()
-        return 0
     except (KaggleError, DiscoveryBlocked) as exc:
-        print(f"Producer stopped without advancing unconfirmed work: {type(exc).__name__}: {exc}", flush=True)
+        print(f"Producer stopped without advancing unconfirmed work: {describe_exception(exc)}", flush=True)
         return 1
     finally:
-        pipeline.client.close()
+        client.close()
     return 0
 
 

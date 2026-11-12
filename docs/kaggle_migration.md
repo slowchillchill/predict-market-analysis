@@ -100,6 +100,20 @@ kaggle kernels status qiuqiuslowchillchill/polymarket-crypto-updown-markets-anal
 
 恢复修复发布的快照带有小型 `publication.json` 标记。遇到 HTTP 499 等上传结果不确定的响应，先查询平台版本及处理状态，再读取标记确认是否为本次快照；已成功发布则复用该版本，避免盲目重复上传。未确认成功时不将其作为新的持久恢复点。
 
+发布确认查询失败时，日志会记录 Dataset、目标版本、发布标记、提交阶段和脱敏后的底层异常链。成功的状态查询会清零连续读取失败次数；永久权限错误仍立即退出，总操作和会话截止时间不变。不能将 `Cannot determine Dataset publication result` 解释为上传已经失败。
+
+默认工作目录为 `/kaggle/working/polymarket-pipeline`。未确认发布会保留 `downloads/pending-publications/<publication_id>.json`，其中记录目标版本、源目录和发布标记，不包含认证凭据。原始检查点的不可变副本仅在 raw 发布确认且月度进度保存成功后删除；失败时保留在 `checkpoints/`。这些文件是故障核对材料，程序不会自动重放 journal。它们是否可下载取决于 Kaggle 是否保留该次运行的输出，不能保证强制终止后仍存在；下一次新会话仍从已处理成功的云端 Dataset 恢复。
+
+可显式运行小型真实发布验收，它创建一个独立的私有 QA Dataset，仅上传合成 JSON，不读写生产数据集：
+
+```bash
+python3 tests/kaggle_publication_acceptance.py --work-dir /tmp/kaggle-publication-acceptance
+```
+
+验收先确认一次正常发布，再在第二次真实上传后模拟状态查询 403，检查诊断和 journal 保留，并通过固定版本标记只读核对结果。它不会将模拟的 403 当作线上故障根因，也不代替生产 Notebook 的 Secret 授权、单实例恢复和 Daily 验收。工作目录必须不存在，结果写入该目录的 `acceptance.json`。
+
+2026-11-12 的发布确认修复通过全部 437 项回归和独立代码审查。真实验收 Dataset 为 `qiuqiuslowchillchill/qa-publication-20261112-003858`：第 1 版正常确认，第 2 版上传后模拟查询 403，再通过相同发布标记只读确认；总共只有一次 create 和一次 version。另行下载的云端 metadata 确认 `info.isPrivate = true`。这次验收没有修改生产 Dataset。生产 Notebook 的 Secret 和 Daily 设置尚需网页验收，不能将这项 Dataset 验收视为生产调度已恢复。
+
 这个标记用于生产程序核对发布身份，不要求数据使用者读取整个数据库计算 SHA，也不改变报告的 `source_versions` 引用方式。
 
 ### 手动运行与暂停
