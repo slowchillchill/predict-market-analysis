@@ -122,6 +122,14 @@ python3 tests/kaggle_publication_acceptance.py --work-dir /tmp/kaggle-publicatio
 
 随后第 18 版使用同一源码，已成功读取 Secret 并运行约 92 分钟。2026-11-11 raw 第 3 版完成 3,295/3,295 个市场、4,843 页，正式日报已发布。历史补采推进到 2025-07-06，发现 XRP 日线条目 `xrp-up-or-down-on-july-6` 的 `conditionId` 为空；该日 raw 第 1 版保存 100/101 个市场，分析第 204 版保存缺口后，旧调度逻辑抛出 `DiscoveryBlocked`。官方详情显示该条目未激活、无交易代币标识、成交量为 0，但这些事实不足以直接把它排除并声称当天完整。本次后续修复按用户要求保留这种数据异常并继续采集其他日期。原生 Daily 的配置未在这次复核中重新验收。
 
+市场异常隔离修复 [`4663a5c`](https://github.com/slowchillchill/predict-market-analysis/commit/4663a5c044ad70c9f1371fadbf54ba848dea27bd) 通过全部 **443 项**回归和独立审查，固定源码后另外通过 3 项 Notebook 打包测试。行为测试覆盖 101 个市场中一个失败时保留另外 100 个市场、继续下一健康日期、重启后仅补失败市场、异常修复后清除缺口并生成正式日报；同时验证 raw 或月度发布未确认时不能继续下一日期。首次历史边界发现还覆盖异常系列隔离、失败分页从头重试、重复游标检测和持续限流保护。
+
+2026-11-12 03:28 UTC 的第 19 版验收：通过 CLI 上传并启动，拉回准确版本确认 `SOURCE_COMMIT = 4663a5c044ad70c9f1371fadbf54ba848dea27bd` 和 `RUN_ARGUMENTS = []`。该版在约 12.6 秒读取 `KAGGLE_API_TOKEN` 时返回 HTTP 400，尚未启动 producer。当时只读核对确认 2025-07-06 raw 仍为第 1 版（100/101 个市场、131 页、`incomplete`），月库仍为第 204 版，历史游标仍为 2025-07-06。刷新编辑页后确认第 19 版草稿的 Secret 列表为空；旧的第 18 版编辑页仍显示已勾选，不能用未刷新的页面推断新版本授权有效。CLI 不支持配置 Notebook Secret，不能靠反复 push 修复授权。
+
+随后通过已授权的浏览器操作，在同一 Notebook 的 Secret 中恢复本机已有 Token，确认勾选后 **Save & Run All**，生成[第 20 版](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=368646498)。拉回源码确认仍固定 `4663a5c044ad70c9f1371fadbf54ba848dea27bd`，生产参数无日期数量限制。该版通过认证，运行日志在 **94.8 秒**记录 2025-07-06 保留异常、继续其他日期，紧接着出现 `Collecting 2025-07-07 (historical)` 并取得该日交易。固定版本核对确认 [07-06 raw 第 2 版](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2025-07-06/versions/2)仍为 `incomplete`、100/101 个市场、131 页，错误保留；[月库第 205 版](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/205)在 03:37:45 UTC 保存 `next_date_utc = 2025-07-07`、对应 raw v2 引用及 07-06 缺口。验收时第 20 版仍在运行，未把启动与越过故障点等同于全历史采集完成。网页原生计划仍为 Daily，活动面板显示下一次计划运行日期为 2026-11-13；本次未修改计划。
+
+这一步可以由已授权的浏览器自动化完成，不要求操作者亲自点击，也不需要生成新 Token。已有可用草稿只更新源码提交时，可直接在网页保存运行并核对 Secret。若先用 CLI 上传，应使用 `--no-run`，再核对刷新后的草稿源码和 Secret，最后通过网页保存运行。过去的第 13、15 版部署也采用网页步骤；本机 CLI 认证和云端运行时 Secret 是两种不同的授权来源。
+
 这个标记用于生产程序核对发布身份，不要求数据使用者读取整个数据库计算 SHA，也不改变报告的 `source_versions` 引用方式。
 
 ### 手动运行与暂停
