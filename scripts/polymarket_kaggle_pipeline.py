@@ -428,10 +428,12 @@ class Pipeline:
                 history["gaps"].pop(stamp, None)
             else:
                 history["gaps"][stamp] = collection_error or "Missing markets or unfinished trade pages"
-            if not structural:
-                history["next_date_utc"] = max(history["next_date_utc"], str(day + timedelta(days=1)))
-                self.state["repair_queue"] = [other for other in self.state.get("repair_queue", [])
-                                              if other != stamp]
+            # The raw snapshot is confirmed. Preserve incomplete work as a
+            # gap, but let the scan reach other dates and markets. Each gap is
+            # retried at most once in this session, including repair entries.
+            history["next_date_utc"] = max(history["next_date_utc"], str(day + timedelta(days=1)))
+            self.state["repair_queue"] = [other for other in self.state.get("repair_queue", [])
+                                          if other != stamp]
         # Published raw files are the durable copy; do not accumulate daily raw
         # databases in the Notebook output or the local consumer's filesystem.
         if paused is not None:
@@ -443,10 +445,9 @@ class Pipeline:
         if structural:
             self.save()
             shutil.rmtree(path.parent)
-            if historical:
-                raise DiscoveryBlocked(f"Historical metadata needs repair for {stamp}: {collection_error}")
-            print(f"Fresh day {stamp} remains incomplete: {collection_error}. "
-                  "Keeping its errors for retry; historical recovery will continue.", flush=True)
+            kind = "Historical" if historical else "Fresh"
+            print(f"{kind} day {stamp} remains incomplete: {collection_error}. "
+                  "Keeping its errors for retry; collection of other dates will continue.", flush=True)
             return
         # Save once after derived results have been updated. If fresh work is
         # due, keep the completed raw reference durable before yielding.
@@ -540,38 +541,59 @@ class Pipeline:
         lower = date.fromisoformat(discovery["window_start_utc"])
         upper = date.fromisoformat(discovery["end_date_utc_exclusive"])
         first_ends = discovery["series_first_end"]
+        errors = discovery.setdefault("errors", {})
+        legacy_error = discovery.pop("error", None)
+        if legacy_error:
+            errors[legacy_error["series_slug"]] = legacy_error
         for series in collector.TARGET_SERIES:
             if series in first_ends:
+                errors.pop(series, None)
                 continue
             if self._should_yield():
                 raise core.CollectionPaused("Fresh UTC day is due")
-            rows = self.client.get(collector.GAMMA_SERIES, {"slug": series})
-            series_id = next(row["id"] for row in rows if row["slug"] == series)
-            params = {
-                "series_id": series_id, "end_date_min": collector.midnight(lower).isoformat(),
-                "end_date_max": collector.midnight(upper).isoformat(),
-                "limit": collector.EVENT_PAGE_SIZE, "order": "endDate", "ascending": "true",
-            }
+            # A failed page may contain the earliest contract. Restart that
+            # series from its first page rather than resume past bad metadata.
+            if series in errors:
+                discovery.pop("in_progress", None)
             resumed = discovery.get("in_progress", {})
             earliest = (collector.utc_time(resumed["earliest_end_time"])
                         if resumed.get("series_slug") == series and resumed.get("earliest_end_time") else None)
-            if resumed.get("series_slug") == series and resumed.get("next_cursor"):
-                params["after_cursor"] = resumed["next_cursor"]
-            while True:
+            boundary_error = None
+            seen_cursors = set()
+            try:
+                rows = self.client.get(collector.GAMMA_SERIES, {"slug": series})
+                series_id = next(row["id"] for row in rows if row["slug"] == series)
+                params = {
+                    "series_id": series_id, "end_date_min": collector.midnight(lower).isoformat(),
+                    "end_date_max": collector.midnight(upper).isoformat(),
+                    "limit": collector.EVENT_PAGE_SIZE, "order": "endDate", "ascending": "true",
+                }
+                if resumed.get("series_slug") == series and resumed.get("next_cursor"):
+                    params["after_cursor"] = resumed["next_cursor"]
+                    seen_cursors.add(resumed["next_cursor"])
+            except core.RateLimitError:
+                raise
+            except (core.FetchError, KeyError, TypeError, ValueError, StopIteration) as exc:
+                boundary_error = exc
+            while boundary_error is None:
                 if self._should_yield():
                     raise core.CollectionPaused("Fresh UTC day is due")
-                page = self.client.get(collector.GAMMA_EVENTS_KEYSET, params)
                 try:
+                    page = self.client.get(collector.GAMMA_EVENTS_KEYSET, params)
                     for event in page["events"]:
                         for market in collector.iter_target_markets(event, series, lower, upper):
                             ended = collector.utc_time(market["endDate"])
                             earliest = min(earliest, ended) if earliest else ended
-                except collector.DiscoveryError as exc:
-                    discovery["error"] = {"series_slug": series, "message": str(exc)}
-                    self.save()
-                    raise DiscoveryBlocked(f"Historical boundary metadata needs repair: {exc}") from exc
-                discovery.pop("error", None)
-                cursor = page.get("next_cursor")
+                    cursor = page.get("next_cursor")
+                    if cursor:
+                        if cursor in seen_cursors:
+                            raise collector.DiscoveryError("Historical boundary pagination repeated a cursor")
+                        seen_cursors.add(cursor)
+                except core.RateLimitError:
+                    raise
+                except (core.FetchError, KeyError, TypeError, ValueError, StopIteration) as exc:
+                    boundary_error = exc
+                    break
                 discovery["in_progress"] = {
                     "series_slug": series, "next_cursor": cursor,
                     "earliest_end_time": earliest.isoformat() if earliest else None,
@@ -582,14 +604,30 @@ class Pipeline:
                 if not cursor:
                     break
                 params["after_cursor"] = cursor
-            if earliest is None:
-                raise ValueError(f"Could not establish historical boundary for {series}")
+            if boundary_error is None and earliest is None:
+                boundary_error = collector.DiscoveryError(f"Could not establish historical boundary for {series}")
+            if boundary_error is not None:
+                errors[series] = {"series_slug": series, "type": type(boundary_error).__name__,
+                                  "message": str(boundary_error)}
+                if isinstance(boundary_error, core.FetchError):
+                    errors[series]["http_status"] = boundary_error.status_code
+                discovery.pop("in_progress", None)
+                self.save()
+                print(f"Historical boundary {series} remains unresolved: {describe_exception(boundary_error)}. "
+                      "Continuing other series; this boundary will be retried next session.", flush=True)
+                continue
+            errors.pop(series, None)
             first_ends[series] = earliest.isoformat()
             discovery.pop("in_progress", None)
             print(f"Historical boundary {series}: {first_ends[series]}", flush=True)
             if self.clock() - self._last_checkpoint >= self.checkpoint_seconds:
                 self.save()
                 self._last_checkpoint = self.clock()
+        if any(series not in first_ends for series in collector.TARGET_SERIES):
+            # Do not claim a complete historical range from a partial catalog.
+            # Fresh dates remain available; missing boundaries retry next run.
+            self.save()
+            return
         start = min(collector.utc_time(value).date() for value in first_ends.values())
         self.state["history"] = {
             "frozen_at_utc": datetime.now(timezone.utc).isoformat(), "window_start_utc": str(lower),
@@ -639,6 +677,8 @@ class Pipeline:
             self.discover_history()
             if self._fresh_due():
                 continue
+            if not self.state.get("history"):
+                return
             history = self.state["history"]
             day = date.fromisoformat(history["next_date_utc"])
             end = date.fromisoformat(history["target_end_date_utc"])

@@ -406,6 +406,132 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([slug for slug, _, _ in self.store.published if slug.startswith("pm-updown-raw-")],
                          [f"pm-updown-raw-{TODAY}"])
 
+    def test_history_boundary_error_continues_other_series_and_restarts_failed_series_next_session(self):
+        other = 'eth-up-or-down-daily'
+        self.pipeline.state['raw_days'][str(YESTERDAY)] = {'status': 'complete'}
+        broken = [True]
+        calls = []
+
+        def event(series, ended, *, malformed=False):
+            market = {'slug': f'{series}-{ended}', 'conditionId': f'{series}-{ended}',
+                      'endDate': ended, 'outcomes': ['Up', 'Down']}
+            if malformed:
+                market.pop('conditionId')
+            return {'seriesSlug': series, 'markets': [market]}
+
+        def get(url, params):
+            if url == producer.collector.GAMMA_SERIES:
+                series = params['slug']
+                calls.append(('series', series))
+                return [{'slug': series, 'id': series}]
+            self.assertEqual(url, producer.collector.GAMMA_EVENTS_KEYSET)
+            series = params['series_id']
+            cursor = params.get('after_cursor')
+            calls.append((series, cursor))
+            if series == SERIES and cursor is None:
+                return {'events': [event(series, '2026-06-01T17:00:00Z')], 'next_cursor': 'second-page'}
+            if series == SERIES:
+                return {'events': [event(series, '2026-04-01T17:00:00Z', malformed=broken[0])], 'next_cursor': None}
+            return {'events': [event(series, '2026-05-01T17:00:00Z')], 'next_cursor': None}
+
+        self.client.get = get
+        with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True):
+            with self.quiet():
+                self.pipeline.run()
+            self.assertIsNone(self.pipeline.state['history'])
+            self.assertEqual(self.pipeline.processed, 0)
+            discovery = self.pipeline.state['history_discovery']
+            self.assertNotIn(SERIES, discovery['series_first_end'])
+            self.assertEqual(discovery['series_first_end'][other], '2026-05-01T17:00:00+00:00')
+            self.assertIn(SERIES, discovery['errors'])
+            self.assertNotIn('in_progress', discovery)
+            self.assertIn((other, None), calls)
+            saved = json.loads(self.latest_files('pm-updown-analysis-2026-11')['progress.json'])
+            self.assertEqual(saved['history_discovery'], discovery)
+            self.assertIsNone(saved['history'])
+
+            broken[0] = False
+            calls.clear()
+            resumed = producer.Pipeline(self.store, self.root / 'boundary-fixed',
+                                        today=lambda: TODAY, client=self.client)
+            resumed.attempted.add(str(YESTERDAY))
+            with self.quiet():
+                resumed.discover_history()
+            self.assertEqual(calls, [('series', SERIES), (SERIES, None), (SERIES, 'second-page')])
+            self.assertEqual(resumed.state['history']['start_date_utc'], '2026-04-01')
+            self.assertEqual(resumed.state['history']['series_first_end'], {
+                SERIES: '2026-04-01T17:00:00+00:00', other: '2026-05-01T17:00:00+00:00'})
+            self.assertEqual(resumed.state['history_discovery']['errors'], {})
+
+    def test_history_boundary_fetch_error_is_local_but_rate_limit_stops(self):
+        other = 'eth-up-or-down-daily'
+        self.pipeline.attempted.add(str(YESTERDAY))
+        calls = []
+
+        def get(url, params):
+            if url == producer.collector.GAMMA_SERIES:
+                calls.append(params['slug'])
+                if params['slug'] == SERIES:
+                    raise producer.core.FetchError('HTTP 404', status_code=404)
+                return [{'slug': other, 'id': other}]
+            return {'events': [{'seriesSlug': other, 'markets': [{
+                'slug': 'healthy-boundary', 'conditionId': 'healthy-boundary',
+                'endDate': '2026-04-01T17:00:00Z', 'outcomes': ['Up', 'Down']}]}], 'next_cursor': None}
+
+        self.client.get = get
+        with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True):
+            with self.quiet():
+                self.pipeline.discover_history()
+            self.assertEqual(calls, [SERIES, other])
+            self.assertEqual(self.pipeline.state['history_discovery']['errors'][SERIES]['http_status'], 404)
+            self.assertIsNone(self.pipeline.state['history'])
+            self.client.get = Mock(side_effect=producer.core.RateLimitError('HTTP 429'))
+            with self.quiet(), self.assertRaises(producer.core.RateLimitError):
+                self.pipeline.discover_history()
+            self.assertEqual(self.client.get.call_count, 1)
+
+    def test_history_boundary_error_save_failure_does_not_continue_other_series(self):
+        other = 'eth-up-or-down-daily'
+        self.pipeline.attempted.add(str(YESTERDAY))
+        self.client.get = Mock(side_effect=producer.core.FetchError('HTTP 404', status_code=404))
+        self.store.publish = Mock(side_effect=producer.KaggleError('Unconfirmed boundary error snapshot'))
+        with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True), \
+                self.quiet(), self.assertRaisesRegex(producer.KaggleError, 'Unconfirmed'):
+            self.pipeline.discover_history()
+        self.assertEqual(self.client.get.call_count, 1)
+        self.assertIsNone(self.pipeline.state['history'])
+
+    def test_history_boundary_repeated_resume_cursor_is_recorded_and_other_series_continues(self):
+        other = 'eth-up-or-down-daily'
+        self.pipeline.attempted.add(str(YESTERDAY))
+        self.pipeline.state['history_discovery'] = {
+            'window_start_utc': '2023-11-10', 'end_date_utc_exclusive': str(TODAY),
+            'series_first_end': {}, 'in_progress': {
+                'series_slug': SERIES, 'next_cursor': 'saved-page',
+                'earliest_end_time': '2026-05-01T17:00:00+00:00'}}
+        calls = []
+
+        def get(url, params):
+            if url == producer.collector.GAMMA_SERIES:
+                return [{'slug': params['slug'], 'id': params['slug']}]
+            series = params['series_id']
+            calls.append((series, params.get('after_cursor')))
+            return {'events': [{'seriesSlug': series, 'markets': [{
+                'slug': series, 'conditionId': series, 'endDate': '2026-04-01T17:00:00Z',
+                'outcomes': ['Up', 'Down']}]}],
+                'next_cursor': 'saved-page' if series == SERIES else None}
+
+        self.client.get = get
+        with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True), self.quiet():
+            self.pipeline.discover_history()
+        self.assertEqual(calls, [(SERIES, 'saved-page'), (other, None)])
+        discovery = self.pipeline.state['history_discovery']
+        self.assertIn('repeated a cursor', discovery['errors'][SERIES]['message'])
+        self.assertNotIn(SERIES, discovery['series_first_end'])
+        self.assertIn(other, discovery['series_first_end'])
+        self.assertNotIn('in_progress', discovery)
+        self.assertIsNone(self.pipeline.state['history'])
+
     def test_gap_retry_does_not_rewind_completed_history_range(self):
         gap = YESTERDAY - timedelta(days=3)
         self.seed_history(gap)

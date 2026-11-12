@@ -86,6 +86,10 @@ kaggle kernels status qiuqiuslowchillchill/polymarket-crypto-updown-markets-anal
 
 所有 Polymarket 请求顺序发送，每次尝试结束后至少间隔 0.5 秒。临时错误最多尝试三次，重试等待约 2 秒、4 秒，并遵守有效的 `Retry-After`。持续限流时保存进度并退出；某市场失败时，只补该市场未完成的钱包分页。游标失效只重置对应未完成市场及其组映射。不可取得的数据保留缺口，不填零。
 
+单个市场缺少真实标识、详情返回 404、系列目录异常或交易分页失败时，保存错误并继续处理其他市场和日期。历史日期的原始数据保持 `incomplete`，`collection_status.json` 和 `progress.json` 保留具体错误，`history.gaps` 保留待修复日期。确认发布原始数据和恢复进度后，扫描游标进入下一日；游标表示扫描位置，不表示之前所有日期都已完整。未完成日不产生正式日报，也不降低预期市场数来凑齐覆盖率。
+
+新日期始终优先。完成历史日期扫描后，每个缺口在同一会话最多重试一次；本轮已经尝试的日期不会立即再次循环。新会话可再次修复缺口，成功后清除对应错误。首次建立历史范围时，某个系列的目录异常不会阻止扫描其他系列；有错误的系列不确认为完整边界，全部系列处理后仍有边界缺口就保存状态并正常结束本轮，下次先采新日期，再重试未确认的系列。持续限流、会话截止、主动停止和未确认的 Kaggle 发布继续遵守原有停止与恢复保护。
+
 ### 有变化才发布的检查点
 
 采集每页仍先将明细、组映射和游标提交到同一个数据库事务。默认每 **30 分钟**检查一次是否有新的已提交状态；有变化才发布一致的 `incomplete` 日库检查点，不在每一页后上传。正常日期完成、日更抢占或可处理错误退出时，也保存需要发布的变化。
@@ -112,9 +116,11 @@ python3 tests/kaggle_publication_acceptance.py --work-dir /tmp/kaggle-publicatio
 
 验收先确认一次正常发布，再在第二次真实上传后模拟状态查询 403，检查诊断和 journal 保留，并通过固定版本标记只读核对结果。它不会将模拟的 403 当作线上故障根因，也不代替生产 Notebook 的 Secret 授权、单实例恢复和 Daily 验收。工作目录必须不存在，结果写入该目录的 `acceptance.json`。
 
-2026-11-12 的发布确认修复通过全部 437 项回归和独立代码审查。真实验收 Dataset 为 `qiuqiuslowchillchill/qa-publication-20261112-003858`：第 1 版正常确认，第 2 版上传后模拟查询 403，再通过相同发布标记只读确认；总共只有一次 create 和一次 version。另行下载的云端 metadata 确认 `info.isPrivate = true`。这次验收没有修改生产 Dataset。生产 Notebook 的 Secret 和 Daily 设置尚需网页验收，不能将这项 Dataset 验收视为生产调度已恢复。
+2026-11-12 的发布确认修复通过全部 437 项回归和独立代码审查。真实验收 Dataset 为 `qiuqiuslowchillchill/qa-publication-20261112-003858`：第 1 版正常确认，第 2 版上传后模拟查询 403，再通过相同发布标记只读确认；总共只有一次 create 和一次 version。另行下载的云端 metadata 确认 `info.isPrivate = true`。这次验收没有修改生产 Dataset，也不能单独证明生产 Notebook 的 Secret 和 Daily 设置有效；后续生产运行结果见下文。
 
-2026-11-12 01:24 UTC 的部署复核：按授权通过本机已认证 CLI 上传并启动生产 Notebook 第 17 版，拉回该版源码确认固定 `2b3941e2c1de44d1581004c3ec504c322ea4351f`，`RUN_ARGUMENTS = []`。运行曾进入 `RUNNING`，随后变为 `ERROR`；日志在 bootstrap 的 `UserSecretsClient().get_secret("KAGGLE_API_TOKEN")` 处记录 HTTP 400。错误发生在安装依赖和启动 producer 之前，未进入采集或 Dataset 发布。当前仍需在编辑页核对并勾选 Secret，再 Save & Run All；本机 CLI 上传认证成功不证明云端 Secret 可读。原生 Daily 的配置和新版本运行结果尚未重新验收。
+2026-11-12 01:24 UTC 的部署复核：按授权通过本机已认证 CLI 上传并启动生产 Notebook 第 17 版，拉回该版源码确认固定 `2b3941e2c1de44d1581004c3ec504c322ea4351f`，`RUN_ARGUMENTS = []`。运行曾进入 `RUNNING`，随后变为 `ERROR`；日志在 bootstrap 的 `UserSecretsClient().get_secret("KAGGLE_API_TOKEN")` 处记录 HTTP 400。错误发生在安装依赖和启动 producer 之前，未进入采集或 Dataset 发布。本机 CLI 上传认证成功不证明云端 Secret 可读。
+
+随后第 18 版使用同一源码，已成功读取 Secret 并运行约 92 分钟。2026-11-11 raw 第 3 版完成 3,295/3,295 个市场、4,843 页，正式日报已发布。历史补采推进到 2025-07-06，发现 XRP 日线条目 `xrp-up-or-down-on-july-6` 的 `conditionId` 为空；该日 raw 第 1 版保存 100/101 个市场，分析第 204 版保存缺口后，旧调度逻辑抛出 `DiscoveryBlocked`。官方详情显示该条目未激活、无交易代币标识、成交量为 0，但这些事实不足以直接把它排除并声称当天完整。本次后续修复按用户要求保留这种数据异常并继续采集其他日期。原生 Daily 的配置未在这次复核中重新验收。
 
 这个标记用于生产程序核对发布身份，不要求数据使用者读取整个数据库计算 SHA，也不改变报告的 `source_versions` 引用方式。
 
