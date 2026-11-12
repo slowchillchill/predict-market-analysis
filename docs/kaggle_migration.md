@@ -114,6 +114,8 @@ python3 tests/kaggle_publication_acceptance.py --work-dir /tmp/kaggle-publicatio
 
 2026-11-12 的发布确认修复通过全部 437 项回归和独立代码审查。真实验收 Dataset 为 `qiuqiuslowchillchill/qa-publication-20261112-003858`：第 1 版正常确认，第 2 版上传后模拟查询 403，再通过相同发布标记只读确认；总共只有一次 create 和一次 version。另行下载的云端 metadata 确认 `info.isPrivate = true`。这次验收没有修改生产 Dataset。生产 Notebook 的 Secret 和 Daily 设置尚需网页验收，不能将这项 Dataset 验收视为生产调度已恢复。
 
+2026-11-12 01:24 UTC 的部署复核：按授权通过本机已认证 CLI 上传并启动生产 Notebook 第 17 版，拉回该版源码确认固定 `2b3941e2c1de44d1581004c3ec504c322ea4351f`，`RUN_ARGUMENTS = []`。运行曾进入 `RUNNING`，随后变为 `ERROR`；日志在 bootstrap 的 `UserSecretsClient().get_secret("KAGGLE_API_TOKEN")` 处记录 HTTP 400。错误发生在安装依赖和启动 producer 之前，未进入采集或 Dataset 发布。当前仍需在编辑页核对并勾选 Secret，再 Save & Run All；本机 CLI 上传认证成功不证明云端 Secret 可读。原生 Daily 的配置和新版本运行结果尚未重新验收。
+
 这个标记用于生产程序核对发布身份，不要求数据使用者读取整个数据库计算 SHA，也不改变报告的 `source_versions` 引用方式。
 
 ### 手动运行与暂停
