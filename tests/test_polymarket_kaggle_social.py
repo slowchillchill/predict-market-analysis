@@ -1,4 +1,7 @@
 import json
+import base64
+import hashlib
+import io
 import shutil
 import sys
 import tempfile
@@ -186,9 +189,15 @@ class CloudSocialTests(unittest.TestCase):
         before = {p.relative_to(self.month_dir).as_posix(): p.read_bytes()
                   for p in (self.month_dir / "social").rglob("*") if p.is_file()}
         self.assertTrue(social.pack_cloud_social(self.month_dir))
-        archive = (self.month_dir / "social.zip").read_bytes()
+        archive = (self.month_dir / social.SOCIAL_ARCHIVE_FILENAME).read_bytes()
+        envelope = json.loads(archive)
+        self.assertEqual(envelope["encoding"], "base64+zip")
+        payload = base64.b64decode(envelope["payload"], validate=True)
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), envelope["sha256"])
+        self.assertTrue(zipfile.is_zipfile(io.BytesIO(payload)))
+        self.assertFalse(zipfile.is_zipfile(io.BytesIO(archive)))
         self.assertFalse(social.pack_cloud_social(self.month_dir))
-        self.assertEqual((self.month_dir / "social.zip").read_bytes(), archive)
+        self.assertEqual((self.month_dir / social.SOCIAL_ARCHIVE_FILENAME).read_bytes(), archive)
         shutil.rmtree(self.month_dir / "social")
         self.assertTrue(social.restore_cloud_social(self.month_dir))
         self.assertFalse(social.restore_cloud_social(self.month_dir))
@@ -201,25 +210,44 @@ class CloudSocialTests(unittest.TestCase):
         for name, link in [("../outside.txt", False), ("other/state.json", False),
                            ("social/../outside.txt", False), ("social/link", True)]:
             with self.subTest(name=name):
-                with zipfile.ZipFile(self.month_dir / "social.zip", "w") as archive:
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, "w") as archive:
                     archive.writestr("social/valid.txt", "valid")
                     info = zipfile.ZipInfo(name)
                     if link:
                         info.external_attr = 0o120777 << 16
                     archive.writestr(info, "bad")
+                (self.month_dir / social.SOCIAL_ARCHIVE_FILENAME).write_bytes(social._encode_archive(buffer.getvalue()))
                 with self.assertRaises(ValueError):
                     social.restore_cloud_social(self.month_dir)
                 self.assertFalse((self.month_dir / "social/valid.txt").exists())
         (self.month_dir / "social").mkdir()
         existing = self.month_dir / "social/existing.txt"
         existing.write_text("preserve")
-        with zipfile.ZipFile(self.month_dir / "social.zip", "w") as archive:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
             archive.writestr("social/new.txt", "new")
             archive.writestr("social/existing.txt", "different")
+        (self.month_dir / social.SOCIAL_ARCHIVE_FILENAME).write_bytes(social._encode_archive(buffer.getvalue()))
         with self.assertRaisesRegex(ValueError, "conflicts"):
             social.restore_cloud_social(self.month_dir)
         self.assertEqual(existing.read_text(), "preserve")
         self.assertFalse((self.month_dir / "social/new.txt").exists())
+
+    def test_archive_rejects_bad_container_and_checksum_before_restoring_files(self):
+        self.snapshot("daily:2026-11-10")
+        self.render()
+        social.pack_cloud_social(self.month_dir)
+        path = self.month_dir / social.SOCIAL_ARCHIVE_FILENAME
+        original = json.loads(path.read_text())
+        shutil.rmtree(self.month_dir / "social")
+        for field, value in [("schema_version", 2), ("encoding", "zip"),
+                             ("payload", "%%invalid%%"), ("sha256", "0" * 64)]:
+            with self.subTest(field=field):
+                path.write_text(json.dumps({**original, field: value}))
+                with self.assertRaises(ValueError):
+                    social.restore_cloud_social(self.month_dir)
+                self.assertFalse((self.month_dir / "social").exists())
 
     def test_seed_import_preserves_local_text_and_legacy_terminal_periods(self):
         local_output = self.root / "local-text"
@@ -235,7 +263,9 @@ class CloudSocialTests(unittest.TestCase):
         seed_dir = self.root / "seed"
         summary = social.build_cloud_text_seed(seed_dir, local_state_path=local_state,
                                                local_output_dir=local_output)
-        self.assertEqual(set(p.name for p in seed_dir.iterdir()), {"seed.json", "months.zip"})
+        self.assertEqual(set(p.name for p in seed_dir.iterdir()), {"seed.json", social.SEED_ARCHIVE_FILENAME})
+        self.assertEqual(summary["schema_version"], 2)
+        self.assertEqual(summary["archive_filename"], social.SEED_ARCHIVE_FILENAME)
         self.assertEqual(summary["months"], ["2026-11"])
         result = social.import_cloud_text_state(self.month_dir, seed_dir, month="2026-11")
         self.assertEqual(result["imported"], ["daily:2026-11-10"])

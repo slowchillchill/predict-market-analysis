@@ -283,7 +283,7 @@ For reproducible analysis, record the **raw and analysis dataset versions**, the
 
 Market discovery comes from the [Polymarket Gamma API](https://gamma-api.polymarket.com); trade records come from the [public trade API](https://docs.polymarket.com/api-reference/feeds/list-trades). Coverage can be affected by upstream availability and API changes. If you find an issue, [open an issue](https://github.com/slowchillchill/predict-market-analysis/issues) with the dataset/version, date, affected market or query, and expected versus observed result.
 
-The cloud producer generates English X threads and LinkedIn posts from confirmed Kaggle result JSON. Each monthly analysis Dataset saves the text and generation state in `social.zip`; a fresh session restores them before generating missing periods. Local generation under `outputs/social/` remains available for previews. LinkedIn uses vertical metric blocks. Existing assets and publication records remain preserved. Publishing is a separate user-authorized task. See the [publishing guide](docs/updown_publishing.md).
+The cloud producer generates English X threads and LinkedIn posts from confirmed Kaggle result JSON. Each monthly analysis Dataset saves the text and generation state in `social.archive.json`; a fresh session restores them before generating missing periods. Local generation under `outputs/social/` remains available for previews. LinkedIn uses vertical metric blocks. Existing assets and publication records remain preserved. Publishing is a separate user-authorized task. See the [publishing guide](docs/updown_publishing.md).
 
 ## License and further documentation
 

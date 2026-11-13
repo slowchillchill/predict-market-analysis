@@ -4,7 +4,7 @@
 
 ## 生成入口
 
-生产入口为 Kaggle Notebook。它先确认分析 Dataset 版本，再从该版本的完整结果生成文字，随后把文字与生成状态保存到月度分析 Dataset 的 `social.zip`。目录为 `social/<kind>/<target>/`，状态为 `social/state.json`。新会话自动解压并恢复；本地 Codex 关闭不会中断这个流程。
+生产入口为 Kaggle Notebook。它先确认分析 Dataset 版本，再从该版本的完整结果生成文字，随后把文字与生成状态保存到月度分析 Dataset 的 `social.archive.json`。目录为 `social/<kind>/<target>/`，状态为 `social/state.json`。新会话自动解压并恢复；本地 Codex 关闭不会中断这个流程。
 
 既有文字通过固定版本的私有迁移 Dataset 导入。正文和来源版本保持不变，清单路径改为相对路径。已有 `generated` / `preserved` 周期不重生成。文字生成成功不代表已经发布到社交平台。
 

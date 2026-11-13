@@ -11,8 +11,8 @@
 | 位置 | 内容 |
 | --- | --- |
 | `pm-updown-raw-YYYY-MM-DD` | 按 API 市场结束时间所属 UTC 日保存的 `data.sqlite3`、`collection_status.json` 和来源说明；本次工作格式为 v3，旧 v2 仍可读 |
-| `pm-updown-analysis-YYYY-MM` | `features.sqlite3`、完成的日周月结果、`index.json`、可恢复文字包 `social.zip`，以及当前月份的全局 `progress.json` |
-| 云端 `social.zip` | `social/state.json`、X 逐条文字、LinkedIn 正文、固定来源 JSON 和文字发布清单 |
+| `pm-updown-analysis-YYYY-MM` | `features.sqlite3`、完成的日周月结果、`index.json`、可恢复文字包 `social.archive.json`，以及当前月份的全局 `progress.json` |
+| 云端 `social.archive.json` | `social/state.json`、X 逐条文字、LinkedIn 正文、固定来源 JSON 和文字发布清单 |
 | 本地 `outputs/social` | 可选预览的 X 逐条文字、LinkedIn 正文、结果 JSON 和文字发布清单 |
 | 本地 `outputs/posters` | 切换前已生成的历史图片与发布产物，当前入口不再写入 |
 | 本地 `outputs/kaggle_reports/state.json` | 旧本地调度状态；迁移时保留原部署日期、固定目标周期及其待处理、已生成或已保留状态 |
@@ -162,7 +162,7 @@ python scripts/polymarket_kaggle_pipeline.py --max-days 2
 
 1. 暂停 Daily，确认没有生产实例，再完成代码和旧格式兼容回归。停止旧本地日、周、月和重试定时器，保留已有状态与产物。
 2. 用独立私有 QA Dataset 验收实际认证、create 确认恢复和两次独立云端会话续采。两个会话共享固定 QA 名称，但不共享本地工作目录；不得写生产数据集。
-3. 将旧文字稿和调度状态制作成固定版本的私有迁移 seed。`config/kaggle-social-seed.json` 固定其 Dataset 和版本；云端核对 archive 和文件摘要后导入，所有受影响月库确认成功后才记录采用完成。当前 seed 为 `qiuqiuslowchillchill/pm-updown-social-seed-20261113` 第 1 版。
+3. 将旧文字稿和调度状态制作成固定版本的私有迁移 seed。`config/kaggle-social-seed.json` 固定其 Dataset 和版本；云端核对 archive 和文件摘要后导入，所有受影响月库确认成功后才记录采用完成。当前 seed 为 `qiuqiuslowchillchill/pm-updown-social-seed-20261113` 第 2 版，使用 schema 2 和 JSON 归档。第 1 版的 ZIP 被 Kaggle 自动展开，未用于生产迁移。
 4. 固定最终源码提交，将发布清单指向该准确提交和已经验收的 `auth_mode`。首次部署新 bootstrap 时，使用 CLI `--no-run` 上传，核对准确源码和配置，再用临时 `--max-days 1` 启动一个有限生产验收实例。保留上次 Notebook、发布清单、源码和 Dataset 版本，供回退核对。
 5. 核对完整新日期、历史续采、raw 孤立版本恢复、月库准确引用和云端文字包。保留既有 v2 完整日库及统计缺口，不为统一格式强制重发。检查 `bootstrap.json`、`run-summary.json` 和发布 journal，不把进程启动视为验收完成。
 6. 有限验收结束后，以 CLI `--no-run` 保存 `RUN_ARGUMENTS = []` 的正式版本，核对完成后恢复原生 Daily，并等待一次真实计划触发的运行完成必要验收。本地四个定时器保持停用；需要预览时可手动运行本地读取工具。
@@ -171,9 +171,11 @@ python scripts/polymarket_kaggle_pipeline.py --max-days 2
 
 ## 云端文字稿与跨会话状态
 
+本次容器修复之后的代码才可作为云端文字状态的兼容回退基线。不能直接回退到使用 ZIP 的 `a1658d8` 或更早版本：它们不会恢复 JSON 容器内的逐周期状态，可能重新生成旧稿。原始 SQL 格式未改变；不含文字容器的既有月库仍可读取。
+
 每次保存先确认月度统计快照，再用它的固定 Dataset 版本生成文字稿。文字中的来源链接指向包含该报告的已确认版本；生成完成后再次发布含文字稿和状态的月库。例如，v1 已保存报告，文字稿引用 v1，v2 再保存这些文字稿。后续保存和重启不会仅因版本号变化重新生成旧稿。
 
-云端把 `social/` 打包为平面文件 `social.zip`，随月库完整上传。新会话下载后恢复相对路径清单、逐条 X `.txt`、LinkedIn `.txt`、固定来源 JSON 和 `social/state.json`。文字稿只读取已完成的报告 JSON，不需要把原始 raw Dataset 下载到本地。
+云端把 `social/` 压缩后编码到平面 JSON 文件 `social.archive.json`，随月库完整上传。JSON 容器包含格式版本、编码方式、SHA-256 和内容，避免 Kaggle 上传端自动展开 ZIP。新会话校验并恢复相对路径清单、逐条 X `.txt`、LinkedIn `.txt`、固定来源 JSON 和 `social/state.json`。文字稿只读取已完成的报告 JSON，不需要把原始 raw Dataset 下载到本地。
 
 目标周期沿用原部署日期和东京时区规则：日报为已到期的 UTC 昨天，周报为上一个完整 UTC 周，月报为上一个完整 UTC 自然月。到期但统计未完成的周期保持 `pending`，后续云端保存或新会话重试；跨日不会覆盖旧目标。Daily 不提供精确到分钟的文字稿生成时间。
 

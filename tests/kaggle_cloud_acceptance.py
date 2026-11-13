@@ -212,12 +212,13 @@ def phase_two(store, root: Path) -> dict:
     require(progress["raw_days"][str(DAY)]["version"] == 1, "Monthly progress references a different raw version")
     require(progress["raw_days"][str(DAY)]["status"] == "complete", "Complete raw did not produce a formal result")
     require(progress["history"]["next_date_utc"] == str(DAY + timedelta(days=1)), "History cursor did not recover")
-    # Download into a second empty folder. This also verifies that social.zip
-    # survives Kaggle's flat file upload/download and restores portable paths.
+    # Download into a second empty folder. This also verifies that the JSON
+    # archive survives Kaggle upload/download without server-side extraction.
     clean_client = PublicAPI([TODAY])
     reloaded = producer.Pipeline(store, root / "cloud-only-reload", today=lambda: TODAY, client=clean_client)
     folder = reloaded.month(MONTH)
-    require((folder / "social.zip").is_file(), "Cloud monthly snapshot has no social.zip")
+    require((folder / social.SOCIAL_ARCHIVE_FILENAME).is_file(),
+            "Cloud monthly snapshot has no portable social archive")
     state = json.loads((folder / "social/state.json").read_text())
     require(state["reports"][IDENTITY]["status"] == "generated", "Cloud text did not reach generated state")
     package = folder / "social" / "daily" / str(DAY)

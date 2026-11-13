@@ -320,4 +320,4 @@ v2 实现版本 [`c16edb8`](https://github.com/slowchillchill/predict-market-ana
 
 进一步阅读：[市场发现与日报](docs/updown_daily.md)、[BUY 分布方法](docs/updown_bot_price_poster.md)、[X 与 LinkedIn 文字稿生成](docs/updown_publishing.md)、[部署与维护](docs/kaggle_migration.md)。
 
-云端生产程序从已确认的 Kaggle 统计 JSON 生成英文 X 串联推文和 LinkedIn 动态。每个月度分析 Dataset 通过 `social.zip` 保存文字稿和生成状态，新会话先恢复已有内容，再生成缺少的周期。本地 `outputs/social/` 入口保留用于预览。LinkedIn 使用纵向指标块。旧图文和已发布记录保留；实际发布由用户另行签发给发布 AGENT。
+云端生产程序从已确认的 Kaggle 统计 JSON 生成英文 X 串联推文和 LinkedIn 动态。每个月度分析 Dataset 通过 `social.archive.json` 保存文字稿和生成状态，新会话先恢复已有内容，再生成缺少的周期。本地 `outputs/social/` 入口保留用于预览。LinkedIn 使用纵向指标块。旧图文和已发布记录保留；实际发布由用户另行签发给发布 AGENT。

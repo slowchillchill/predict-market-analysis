@@ -8,7 +8,10 @@ No function in this module uploads data or submits posts to a social platform.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -20,6 +23,36 @@ from pathlib import Path
 
 from polymarket_kaggle_reports import ReportPeriod, due_periods, render_bundle, validate_bundle
 from polymarket_publish_state import _validate_text_manifest, load_manifest
+
+
+SOCIAL_ARCHIVE_FILENAME = "social.archive.json"
+SEED_ARCHIVE_FILENAME = "months.archive.json"
+
+
+def _encode_archive(payload: bytes) -> bytes:
+    """Hide archive magic from Dataset extraction using an explicit JSON format."""
+    envelope = {"schema_version": 1, "encoding": "base64+zip",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "payload": base64.b64encode(payload).decode("ascii")}
+    return (json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _decode_archive(path: Path) -> bytes:
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(envelope, dict)
+            or set(envelope) != {"schema_version", "encoding", "sha256", "payload"}
+            or type(envelope["schema_version"]) is not int or envelope["schema_version"] != 1
+            or envelope["encoding"] != "base64+zip"
+            or not isinstance(envelope["payload"], str)
+            or not isinstance(envelope["sha256"], str)):
+        raise ValueError("Unsupported cloud text archive container")
+    try:
+        payload = base64.b64decode(envelope["payload"], validate=True)
+    except (ValueError, binascii.Error):
+        raise ValueError("Invalid cloud text archive encoding") from None
+    if hashlib.sha256(payload).hexdigest() != envelope["sha256"]:
+        raise ValueError("Cloud text archive checksum differs")
+    return payload
 
 
 def _write_json(path: Path, value: dict) -> None:
@@ -59,6 +92,9 @@ def _pack_directory(directory: Path, archive: Path) -> bool:
                 info.create_system = 3
                 info.external_attr = (stat.S_IFREG | 0o644) << 16
                 output.writestr(info, path.read_bytes())
+        # Kaggle extracts recognized archives on upload. JSON is stored as-is
+        # with --keep-tabular; its decoded ZIP never reaches that upload path.
+        staged.write_bytes(_encode_archive(staged.read_bytes()))
         if archive.exists() and archive.read_bytes() == staged.read_bytes():
             return False
         staged.replace(archive)
@@ -70,7 +106,7 @@ def _restore_archive(archive: Path, destination: Path, *, prefix: str) -> bool:
     pending = []
     names = set()
     destination = Path(destination)
-    with zipfile.ZipFile(archive) as source:
+    with zipfile.ZipFile(io.BytesIO(_decode_archive(Path(archive)))) as source:
         for info in source.infolist():
             relative = Path(info.filename)
             if (relative.is_absolute() or ".." in relative.parts or "\\" in info.filename
@@ -119,15 +155,15 @@ def _restore_archive(archive: Path, destination: Path, *, prefix: str) -> bool:
 
 
 def pack_cloud_social(month_dir: Path) -> bool:
-    """Create/update the flat social.zip file uploaded with a monthly Dataset."""
+    """Create/update the flat JSON archive uploaded with a monthly Dataset."""
     month_dir = Path(month_dir)
-    return _pack_directory(month_dir / "social", month_dir / "social.zip")
+    return _pack_directory(month_dir / "social", month_dir / SOCIAL_ARCHIVE_FILENAME)
 
 
 def restore_cloud_social(month_dir: Path) -> bool:
     """Restore portable text/state after downloading a monthly Dataset."""
     month_dir = Path(month_dir)
-    archive = month_dir / "social.zip"
+    archive = month_dir / SOCIAL_ARCHIVE_FILENAME
     return _restore_archive(archive, month_dir, prefix="social") if archive.exists() else False
 
 
@@ -214,7 +250,8 @@ def build_cloud_text_seed(destination: Path, *, local_state_path: Path,
     original = json.loads(Path(local_state_path).read_text(encoding="utf-8"))
     months = sorted({ReportPeriod.from_identity(identity).month for identity in original["reports"]})
     destination.mkdir(parents=True)
-    summary = {"schema_version": 1, "rollout_date": original["rollout_date"], "months": months,
+    summary = {"schema_version": 2, "archive_filename": SEED_ARCHIVE_FILENAME,
+               "rollout_date": original["rollout_date"], "months": months,
                "reports": {}, "files_sha256": {}}
     for month in months:
         summary["reports"][month] = seed_cloud_social_state(destination / "months" / month,
@@ -222,8 +259,8 @@ def build_cloud_text_seed(destination: Path, *, local_state_path: Path,
     for path in sorted(destination.rglob("*")):
         if path.is_file():
             summary["files_sha256"][path.relative_to(destination).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
-    _pack_directory(destination / "months", destination / "months.zip")
-    summary["archive_sha256"] = hashlib.sha256((destination / "months.zip").read_bytes()).hexdigest()
+    _pack_directory(destination / "months", destination / SEED_ARCHIVE_FILENAME)
+    summary["archive_sha256"] = hashlib.sha256((destination / SEED_ARCHIVE_FILENAME).read_bytes()).hexdigest()
     _write_json(destination / "seed.json", summary)
     shutil.rmtree(destination / "months")
     return summary
@@ -237,11 +274,12 @@ def import_cloud_text_state(month_dir: Path, seed_dir: Path, *, month: str) -> d
     """
     month_dir, seed_dir = Path(month_dir), Path(seed_dir)
     metadata = json.loads((seed_dir / "seed.json").read_text(encoding="utf-8"))
-    if metadata.get("schema_version") != 1:
+    if (metadata.get("schema_version") != 2
+            or metadata.get("archive_filename") != SEED_ARCHIVE_FILENAME):
         raise ValueError("Unsupported cloud social seed")
     if month not in metadata["months"]:
         return {"changed": False, "imported": [], "preserved": []}
-    archive = seed_dir / "months.zip"
+    archive = seed_dir / SEED_ARCHIVE_FILENAME
     if hashlib.sha256(archive.read_bytes()).hexdigest() != metadata.get("archive_sha256"):
         raise ValueError("Cloud social seed archive changed")
     with tempfile.TemporaryDirectory(prefix="social-seed-import-") as temporary:

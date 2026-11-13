@@ -167,16 +167,15 @@ class Pipeline:
         if stamp not in self.months:
             folder = self.work_dir / "analysis" / stamp
             self._month_versions[stamp] = self.store.restore(f"pm-updown-analysis-{stamp}", folder)
-            if (folder / "social.zip").exists():
-                from polymarket_kaggle_social import restore_cloud_social
-                restore_cloud_social(folder)
+            from polymarket_kaggle_social import restore_cloud_social
+            restore_cloud_social(folder)
             self.months[stamp] = folder
         return self.months[stamp]
 
     def prepare_cloud_text(self) -> None:
         """Import the fixed migration seed and restore all due text periods."""
         from polymarket_kaggle_reports import due_periods
-        from polymarket_kaggle_social import import_cloud_text_state
+        from polymarket_kaggle_social import SEED_ARCHIVE_FILENAME, import_cloud_text_state
         rollout = date.fromisoformat(self.state["rollout_date_utc"])
         for period in due_periods(rollout, datetime.now(timezone.utc)):
             self.month(period.month)
@@ -188,7 +187,7 @@ class Pipeline:
                     or type(source["version"]) is not int or source["version"] < 1):
                 raise ValueError("Invalid fixed cloud social migration source")
             folder = self.work_dir / "social-seed"
-            for filename in ("seed.json", "months.zip"):
+            for filename in ("seed.json", SEED_ARCHIVE_FILENAME):
                 self.store.download_file(source["dataset"], filename, source["version"], folder / filename)
             seed = json.loads((folder / "seed.json").read_text())
             for stamp in seed["months"]:
