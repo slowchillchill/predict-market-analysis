@@ -1,0 +1,44 @@
+{
+  "dataset": "qiuqiuslowchillchill/pm-updown-raw-2025-09-10",
+  "version": 1,
+  "collection_status": {
+    "date_utc": "2025-09-10",
+    "status": "incomplete",
+    "coverage": {
+      "date_utc": "2025-09-10",
+      "expected_markets": 101,
+      "discovered_markets": 100,
+      "completed_markets": 100,
+      "committed_pages": 186,
+      "is_complete": 0
+    },
+    "error": "dogecoin-up-or-down-on-september-10-2025: HTTP 404; dogecoin-up-or-down-on-september-10: HTTP 404; dogecoin-up-or-down-on-september-10-noon: HTTP 404",
+    "date_basis": "market_end_utc",
+    "schema_version": 3,
+    "group_key": [
+      "market_slug",
+      "group_id"
+    ],
+    "volume_method": "wallet_group_first_row_v1",
+    "coverage_policy": "official_series_all_conditions_v1",
+    "discovery_errors": [
+      {
+        "code": "missing_market",
+        "stage": "missing_market",
+        "series_slug": "dogecoin-up-or-down-daily",
+        "market_slug": "dogecoin-up-or-down-on-september-10-2025",
+        "date_utc": "2025-09-10",
+        "message": "dogecoin-up-or-down-on-september-10-2025: HTTP 404; dogecoin-up-or-down-on-september-10: HTTP 404; dogecoin-up-or-down-on-september-10-noon: HTTP 404",
+        "structural": false,
+        "slot_utc": "2025-09-10"
+      }
+    ],
+    "structural_errors": []
+  },
+  "publication": {
+    "schema_version": 1,
+    "dataset": "qiuqiuslowchillchill/pm-updown-raw-2025-09-10",
+    "publication_id": "bd974612ca634552a4ffed94823441a2"
+  },
+  "evidence_scope": "Fixed raw version read before the fresh production Notebook v24 recovery session. The current monthly progress v287 still had no reference to this date and history_next_date was 2025-09-10."
+}

@@ -1,8 +1,8 @@
 # 2026-11-13 Kaggle 云端运行修复与验收记录
 
-本次修复已通过 508 项回归、平台原生认证探针、真实发布确认验收和两次独立云端会话恢复验收。生产 Notebook 第 23 版已开始有限验收，正在采集真实市场。**有限生产验收和下一次原生 Daily 验收尚未完成。**
+本次修复已通过 508 项回归、平台原生认证探针、真实发布确认验收、两次独立 QA 云端会话和生产 Notebook 第 23、24 版验收。2026-11-12 的 3,295 个市场完整；此前失败的历史日期已从新会话恢复；文字稿与已有状态均通过固定版本回读。正式第 25 版已部署，原生 Daily 已恢复。**下一次真实 Daily 运行的验收仍待完成；调度保存成功不等于计划运行已成功。**
 
-本文记录截至已核对的生产分析 Dataset 第 282 版，更新时间为 **2026-11-13 03:25:50 UTC**。后续状态须追加准确版本和结果，不能将本记录中的 `running` 解释为成功结束。操作方案见 [Kaggle 部署说明](kaggle_migration.md)，代码变更见 [PR #5](https://github.com/slowchillchill/predict-market-analysis/pull/5)。
+本文已核对生产分析 Dataset 第 290 版，并在 **2026-11-13 04:56 UTC** 核对调度保存状态。操作方案见 [Kaggle 部署说明](kaggle_migration.md)，代码变更见 [PR #5](https://github.com/slowchillchill/predict-market-analysis/pull/5)。
 
 ## 修复前的失败基线
 
@@ -102,26 +102,40 @@ seed 第 2 版已 ready，并按固定版本下载回读。`seed.json` 为 schem
 | 项目 | 已观察状态 |
 | --- | --- |
 | Notebook v22 | CLI `--no-run` 保存的 Quick Save；已回读源码，不是一次执行成功 |
-| Notebook v23 | 有限生产验收正在运行，`RUN_ARGUMENTS = ["--max-days", "1"]` |
+| Notebook v23 | COMPLETE；有限生产验收通过，`RUN_ARGUMENTS = ["--max-days", "1"]` |
 | v23 准确页面 | [scriptVersionId=368996884](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=368996884) |
 | producer 开始时间 | 2026-11-13 03:24:40.818474 UTC |
 | run ID | `f0aba964b0cc48118646e9018a5bf49b` |
 | 运行源码与认证 | `dfdc11c6e5b0f4fffb38614e524c556a744a438a`，`platform` |
-| 历史恢复位置 | `2025-09-10` |
+| v23 启动时历史游标 | `2025-09-10`；v24 完成后为 `2025-09-11` |
 | 运行触发字段 | `Batch`，不能作为原生 Daily 已触发的证据 |
-| 最新日期 | 已发现 2026-11-12 的 3,295 个市场，真实交易采集中，尚未宣称完整日完成 |
-| 原生 Daily | 已暂停，防止与手动有限实例重叠 |
+| 最新日期 | 2026-11-12 的 3,295/3,295 个市场完整，4,605 个提交分页；raw v3 |
+| 新日期验收月库 | `pm-updown-analysis-2026-11` v287，固定版本回读通过 |
+| Notebook v24 | COMPLETE；新云端会话恢复历史 2025-09-10，固定月库 v290 回读通过 |
+| Notebook v25 | `--no-run` 保存，`RUN_ARGUMENTS=[]`；固定源码回读一致；Quick Save 不是业务执行 |
+| v25 准确页面 | [scriptVersionId=369020698](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=369020698) |
+| 原生 Daily | 第 23、24 版结束后恢复；开始日期 2026-11-13，频率 daily，重新加载页面后仍存在 |
 | 本地四个 timer | 已 disable；日、周、月和每 30 分钟重试任务不再驱动生产，已有状态与产物保留 |
 
 生产月库第 281 版已经保存迁移后的 JSON 容器。回读恢复的状态为：11 月 9 日 `preserved`，11 月 10、11 日 `generated`，11 月 12 日 `pending`。该版进度尚未设置 `cloud_social_seed`。
 
 第 282 版 `progress.json` 随后记录 `cloud_social_seed={dataset: qiuqiuslowchillchill/pm-updown-social-seed-20261113, version: 2}`，且 `last_run.status=running`。这一顺序符合“先确认受影响月库，再记录迁移采用完成”。证据：[v282 进度摘录](evidence/kaggle-cloud-20261113/production_v282_excerpt.json)、`outputs/cloud-autonomy/production-v281-migration/`。
 
-这些结果已经证明生产认证和文字状态迁移进入实际运行。它们尚未证明本次有限实例正常结束，也未证明下一次原生 Daily 成功。当前仍需等待新日期采集、统计和发布确认，随后核对最终运行摘要与准确 Dataset 版本。
+首个真实生产检查点也已确认：`pm-updown-raw-2026-11-12` v1 与月库 v283 均为 ready，月库准确引用该 raw v1。检查点保存了 728/3,295 个已完成市场和 1,717 个提交分页，状态保持 `incomplete`，无发现或结构错误。日志随后继续采集后续市场。[固定版本证据](evidence/kaggle-cloud-20261113/production_checkpoint_v1.json)。
+
+本地 Codex 服务随后重启。重连后，同一个生产 v23 仍为 RUNNING，市场进度由重启前最后观察的 1,657 增至 1,798；没有重新提交 Notebook。该观察验证了本地服务重启没有中断云端执行，但不等同于整台电脑断电测试。[重连记录](evidence/kaggle-cloud-20261113/daemon_recovery_observation.json)。
+
+第 23 版 producer 于 04:43:52 UTC 正常结束，平台于 04:45:04 UTC 返回 COMPLETE。[固定运行摘要](evidence/kaggle-cloud-20261113/production_v23_run.json)。固定月库 v287 的验收随后通过：raw v3 标记为 `6fd710a04826417e899e3ebd1fb5f436`，覆盖完整；11 月 12 日文字引用已确认的月库 v285；11 月 10、11 日文字摘要与迁移前完全一致，来源仍为 v100/v203；11 月 9 日保持 `preserved`。[完整验收摘要](evidence/kaggle-cloud-20261113/production_v23_verification.json)。验证只读下载了 8 个元数据或文字文件，没有下载 SQLite，也没有写入生产。
+
+第 24 版是另一次全新云端会话，仍使用 `--max-days 1`。其 run ID 为 `2fbc7c1ef50a4e12b9686d21e9da8122`，producer 于 04:48:04 UTC 开始、04:49:37 UTC 完成；平台于 04:51:19 UTC 返回 COMPLETE。[固定运行摘要](evidence/kaggle-cloud-20261113/production_v24_run.json)。它恢复了第 21 版留下的 2025-09-10 raw v1：发布标记仍为 `bd974612ca634552a4ffed94823441a2`，元数据与运行前完全一致；月库 v290 补齐 raw v1 引用，历史游标从 9 月 10 日推进至 9 月 11 日。100/101 个市场、186 页和 DOGE 404 缺口全部保留，没有伪造完整状态。[运行前基线](evidence/kaggle-cloud-20261113/production_history_before.json)、[恢复验收](evidence/kaggle-cloud-20261113/production_v24_verification.json)。
+
+该会话明确记录 `Reusing confirmed raw 2025-09-10: version 1; snapshot unchanged`。月库 v290 的 `social.archive.json` 与 v287 字节完全一致，SHA-256 为 `e13b53c6e1896720ae0e0218946855bf9008e99d5939d62eb72ecf34c42e02ae`。这些证据支持原 raw 版本复用和文字状态保留；生产日志没有逐个测量 HTTP 请求，因此不宣称该生产恢复会话为零请求。
+
+随后保存第 25 版正式 bootstrap，并通过固定版本下载确认源码与仓库 `kaggle/notebook.py` 完全一致，`RUN_ARGUMENTS=[]`。[源码回读证据](evidence/kaggle-cloud-20261113/production_v25_readback.json)。网页确认当前查看的是第 25 版后，保存从 2026-11-13 开始的 Daily；页面显示 `Notebook scheduled.`，重新加载后仍显示开始日期和 daily。活动面板显示 `Scheduled to re-run on November 13, 2026`。[调度证据](evidence/kaggle-cloud-20261113/daily_schedule.json)。该事件尚不代表新运行已触发。
 
 ## 剩余验收与回退约束
 
-有限生产实例完成后，先核对 `run-summary.json`、raw 状态、月库固定引用和文字来源版本。然后以 CLI `--no-run` 保存 `RUN_ARGUMENTS=[]` 的正式版本，确认没有活动生产实例，再恢复原生 Daily。必须实际观察下一次计划触发及云端恢复结果，才能把 Daily 验收记为完成。本地四个 timer 保持停用。
+代码修复、两次有限生产验收、正式 bootstrap 部署和 Daily 设置恢复均已完成。本地四个 timer 保持停用。剩余验收为实际观察下一次 Scheduled 运行：核对新运行使用正式参数、源码与平台认证，从云端历史游标 2025-09-11 恢复，继续保存检查点与文字状态，并确认本次运行摘要。不得把 Quick Save 的 COMPLETE、调度保存成功或手动运行成功记为原生 Daily 验收完成。
 
 Daily 表示每天重新启动一次云端任务，不表示同一进程持续运行 24 小时，也不保证精确启动时刻。默认在 bootstrap 开始后 11.5 小时停止采集，整次会话使用 12 小时截止时间，为发布预留余量；这些工程参数不保证每次上传都能在截止前完成。
 

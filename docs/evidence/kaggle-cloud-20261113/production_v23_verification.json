@@ -1,0 +1,107 @@
+{
+  "status": "passed",
+  "checked_at_utc": "2026-11-13T04:47:20.012033+00:00",
+  "analysis": {
+    "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+    "version": 287
+  },
+  "source_commit": "dfdc11c6e5b0f4fffb38614e524c556a744a438a",
+  "authentication_source": "platform",
+  "run_id": "f0aba964b0cc48118646e9018a5bf49b",
+  "bootstrap_checked": true,
+  "cloud_social_seed": {
+    "dataset": "qiuqiuslowchillchill/pm-updown-social-seed-20261113",
+    "version": 2
+  },
+  "raw": {
+    "dataset": "qiuqiuslowchillchill/pm-updown-raw-2026-11-12",
+    "version": 3,
+    "publication_id": "6fd710a04826417e899e3ebd1fb5f436",
+    "coverage": {
+      "date_utc": "2026-11-12",
+      "expected_markets": 3295,
+      "discovered_markets": 3295,
+      "completed_markets": 3295,
+      "committed_pages": 4605,
+      "is_complete": 1
+    }
+  },
+  "new_social_source": {
+    "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+    "version": 285,
+    "filename": "daily_2026-11-12.json"
+  },
+  "preserved": [
+    "daily:2026-11-09"
+  ],
+  "historical_social_sources": {
+    "2026-11-10": {
+      "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+      "version": 100,
+      "filename": "daily_2026-11-10.json"
+    },
+    "2026-11-11": {
+      "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+      "version": 203,
+      "filename": "daily_2026-11-11.json"
+    }
+  },
+  "text_sha256": {
+    "social/daily/2026-11-10/updown_2026-11-10_x_01.txt": "17ad98746421aafbb8ffa1d6634d2510ecd5607f2661e71ce3ce1f55207f4dfd",
+    "social/daily/2026-11-10/updown_2026-11-10_x_02.txt": "cb111725da97e87def031c08977aef34611b719a508e0e3ea582136976ad33fd",
+    "social/daily/2026-11-10/updown_2026-11-10_x_03.txt": "bf3f71d56dab3816e96606a93d0597aad17759343f2a21e49bea80ee030d2e3b",
+    "social/daily/2026-11-10/updown_2026-11-10_linkedin.txt": "dc31da05d46663f1e25fb1566a8b44203c129329d4730cba3e914af21a29511a",
+    "social/daily/2026-11-11/updown_2026-11-11_x_01.txt": "021366a7c5c64d6cc77fc67a3a30e8bad706bf1014818618142f2bf9407b3e3f",
+    "social/daily/2026-11-11/updown_2026-11-11_x_02.txt": "a193cb44cde3ee5a5fc4d2a3388514fb20ba40a82e775932041785485bb37606",
+    "social/daily/2026-11-11/updown_2026-11-11_x_03.txt": "80148dad7932ee6acacdc4309f789ae8545f815266a9bc1ee3c55dbbe6a9aa7c",
+    "social/daily/2026-11-11/updown_2026-11-11_linkedin.txt": "4bb21118a65661eadd2a1b6b8fcf763e6256a52f66e0f75ed9f93a408daa3c76",
+    "social/daily/2026-11-12/updown_2026-11-12_x_01.txt": "22c4bd16f030b82c6f0a0d11c7d986b57fa605b82819992ae844686eb52e3cd8",
+    "social/daily/2026-11-12/updown_2026-11-12_x_02.txt": "d181dfee686e374f7cea5e7ad3ec615753c5047494a596eee86d95bb4abcecac",
+    "social/daily/2026-11-12/updown_2026-11-12_x_03.txt": "41e21a5fffaf2dd3680fb21c7c834913df635691bf139384bd66f6f6c0ee112a",
+    "social/daily/2026-11-12/updown_2026-11-12_linkedin.txt": "f35966c81c1851f834a439c3d614a8c722035c83afaed76b731bcd6bff5b1474"
+  },
+  "downloads": [
+    {
+      "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+      "version": 287,
+      "filename": "progress.json"
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+      "version": 287,
+      "filename": "index.json"
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+      "version": 287,
+      "filename": "social.archive.json"
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+      "version": 287,
+      "filename": "daily_2026-11-12.json"
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/pm-updown-raw-2026-11-12",
+      "version": 3,
+      "filename": "collection_status.json"
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/pm-updown-raw-2026-11-12",
+      "version": 3,
+      "filename": "publication.json"
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+      "version": 285,
+      "filename": "index.json"
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+      "version": 285,
+      "filename": "daily_2026-11-12.json"
+    }
+  ],
+  "production_writes": 0,
+  "raw_sqlite_downloaded": false
+}

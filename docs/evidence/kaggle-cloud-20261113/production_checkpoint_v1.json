@@ -1,0 +1,68 @@
+{
+  "raw": {
+    "dataset": "qiuqiuslowchillchill/pm-updown-raw-2026-11-12",
+    "version": 1,
+    "publication": {
+      "schema_version": 1,
+      "dataset": "qiuqiuslowchillchill/pm-updown-raw-2026-11-12",
+      "publication_id": "0ae325494cc840eba54aaa4fac227043"
+    },
+    "collection_status": {
+      "date_utc": "2026-11-12",
+      "status": "incomplete",
+      "coverage": {
+        "date_utc": "2026-11-12",
+        "expected_markets": 3295,
+        "discovered_markets": 3295,
+        "completed_markets": 728,
+        "committed_pages": 1717,
+        "is_complete": 0
+      },
+      "error": null,
+      "date_basis": "market_end_utc",
+      "schema_version": 3,
+      "group_key": [
+        "market_slug",
+        "group_id"
+      ],
+      "volume_method": "wallet_group_first_row_v1",
+      "coverage_policy": "official_series_all_conditions_v1",
+      "discovery_errors": [],
+      "structural_errors": []
+    }
+  },
+  "analysis": {
+    "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+    "version": 283,
+    "raw_reference": {
+      "slug": "pm-updown-raw-2026-11-12",
+      "version": 1,
+      "status": "incomplete",
+      "coverage": {
+        "date_utc": "2026-11-12",
+        "expected_markets": 3295,
+        "discovered_markets": 3295,
+        "completed_markets": 728,
+        "committed_pages": 1717,
+        "is_complete": 0
+      },
+      "raw_schema_version": 3,
+      "volume_method": "wallet_group_first_row_v1",
+      "coverage_policy": "official_series_all_conditions_v1",
+      "error": null,
+      "discovery_errors": [],
+      "structural_errors": []
+    },
+    "last_run": {
+      "schema_version": 1,
+      "run_id": "f0aba964b0cc48118646e9018a5bf49b",
+      "started_at_utc": "2026-11-13T03:24:40.818474+00:00",
+      "status": "running",
+      "source_commit": "dfdc11c6e5b0f4fffb38614e524c556a744a438a",
+      "authentication_source": "platform",
+      "trigger": "Batch",
+      "resume_history_date": "2025-09-10"
+    }
+  },
+  "confirmation": "Both fixed versions are ready; producer resumed collection after the checkpoint."
+}

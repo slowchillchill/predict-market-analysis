@@ -2,7 +2,7 @@
 
 生产流程将原始数据采集、SQL 统计、历史补采，以及日、周、月 X 串联推文和 LinkedIn 文字稿生成放在 Kaggle。进度、文字稿和生成状态随云端 Dataset 保存；关闭本地 Codex 会话不会中断已启动的云端任务，也不影响后续原生 Daily 调度。当前不再生成图片、抖音或 TikTok 内容，详见[文字发布说明](updown_publishing.md)。本地入口保留为可选预览工具，生产不依赖本地定时器。
 
-项目名称为 **Polymarket Crypto Updown Markets Analysis**。公开入口使用 `qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis`。部署版本和实际运行结果以部署记录为准。
+项目名称为 **Polymarket Crypto Updown Markets Analysis**。公开入口使用 `qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis`。2026-11-13 已完成生产第 23、24 版验收，并部署第 25 版正式参数；Daily 已恢复，本地四个定时器已停用。首次恢复后的计划运行尚待验收，准确版本与证据见[本次修复记录](kaggle_cloud_autonomy_20261113.md)。
 
 本文前半部分说明当前云端方案；后半部分保留 v3 迁移与旧部署的实际验收记录。旧记录中的 Secret 绑定和本地四个报表定时器属于当时部署，不是当前方案的必要条件。已发布的 2026-11-09 v2 日库与原报告仍可读取；历史范围尚未补齐。新方案的生产发布和 Daily 验收状态以准确版本的部署记录为准。
 

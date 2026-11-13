@@ -1,0 +1,11 @@
+{
+  "event": "Local Codex daemon restarted during the running Kaggle acceptance",
+  "observed_at_utc": "2026-11-13T04:17:29Z",
+  "notebook": "qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis",
+  "version": 23,
+  "status_after_reconnect": "RUNNING",
+  "last_observed_completed_markets_before_restart": 1657,
+  "completed_markets_after_reconnect": 1798,
+  "new_notebook_run_submitted": false,
+  "scope": "Continuity across a local Codex service restart; not a machine power-off test."
+}
