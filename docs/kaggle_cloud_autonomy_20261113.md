@@ -1,8 +1,8 @@
 # 2026-11-13 Kaggle 云端运行修复与验收记录
 
-本次修复已通过 508 项回归、平台原生认证探针、真实发布确认验收、两次独立 QA 云端会话和生产 Notebook 第 23、24 版验收。2026-11-12 的 3,295 个市场完整；此前失败的历史日期已从新会话恢复；文字稿与已有状态均通过固定版本回读。正式第 25 版已部署，原生 Daily 已恢复。**下一次真实 Daily 运行的验收仍待完成；调度保存成功不等于计划运行已成功。**
+本次修复已通过 508 项回归、平台原生认证探针、真实发布确认验收、两次独立 QA 云端会话和生产 Notebook 第 23、24 版验收。2026-11-12 的 3,295 个市场完整；此前失败的历史日期已从新会话恢复；文字稿与已有状态均通过固定版本回读。正式第 25 版已部署，原生 Daily 已恢复。**首次恢复后的 Daily 已实际触发 v26，正式参数、平台认证与云端恢复均已核对；整次运行仍未结束。**
 
-本文已核对生产分析 Dataset 第 290 版，并在 **2026-11-13 04:56 UTC** 核对调度保存状态。操作方案见 [Kaggle 部署说明](kaggle_migration.md)，代码变更见 [PR #5](https://github.com/slowchillchill/predict-market-analysis/pull/5)。
+本文已核对生产分析 Dataset 第 290 版、04:56 UTC 的调度保存状态，以及约 **2026-11-13 05:39 UTC** 的 v26 Scheduled 启动证据。操作方案见 [Kaggle 部署说明](kaggle_migration.md)，代码变更见 [PR #5](https://github.com/slowchillchill/predict-market-analysis/pull/5)。
 
 ## 修复前的失败基线
 
@@ -114,7 +114,7 @@ seed 第 2 版已 ready，并按固定版本下载回读。`seed.json` 为 schem
 | Notebook v24 | COMPLETE；新云端会话恢复历史 2025-09-10，固定月库 v290 回读通过 |
 | Notebook v25 | `--no-run` 保存，`RUN_ARGUMENTS=[]`；固定源码回读一致；Quick Save 不是业务执行 |
 | v25 准确页面 | [scriptVersionId=369020698](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=369020698) |
-| 原生 Daily | 第 23、24 版结束后恢复；开始日期 2026-11-13，频率 daily，重新加载页面后仍存在 |
+| 原生 Daily | 已恢复并实际触发 v26；正式参数与从 2025-09-11 恢复已核对，整次运行仍在进行 |
 | 本地四个 timer | 已 disable；日、周、月和每 30 分钟重试任务不再驱动生产，已有状态与产物保留 |
 
 生产月库第 281 版已经保存迁移后的 JSON 容器。回读恢复的状态为：11 月 9 日 `preserved`，11 月 10、11 日 `generated`，11 月 12 日 `pending`。该版进度尚未设置 `cloud_social_seed`。
@@ -135,10 +135,16 @@ seed 第 2 版已 ready，并按固定版本下载回读。`seed.json` 为 schem
 
 ## 剩余验收与回退约束
 
-代码修复、两次有限生产验收、正式 bootstrap 部署和 Daily 设置恢复均已完成。本地四个 timer 保持停用。剩余验收为实际观察下一次 Scheduled 运行：核对新运行使用正式参数、源码与平台认证，从云端历史游标 2025-09-11 恢复，继续保存检查点与文字状态，并确认本次运行摘要。不得把 Quick Save 的 COMPLETE、调度保存成功或手动运行成功记为原生 Daily 验收完成。
+代码修复、两次有限生产验收、正式 bootstrap 部署和 Daily 设置恢复均已完成。本地四个 timer 保持停用。第 26 版已实际由 Scheduled 触发：网页版本历史明确显示 `Running... · Scheduled`，固定版本源码确认 `RUN_ARGUMENTS=[]`，日志确认源码 `dfdc11c6e5b0f4fffb38614e524c556a744a438a`、平台身份校验成功，并从 `2025-09-11` 恢复历史采集。[启动证据](evidence/kaggle-cloud-20261113/production_v26_startup.json)、[版本历史截图](evidence/kaggle-cloud-20261113/production-v26-scheduled.png)。剩余验收为该次运行后续检查点、最终文字状态及运行摘要；启动成功不代表整次运行已完成。
 
 Daily 表示每天重新启动一次云端任务，不表示同一进程持续运行 24 小时，也不保证精确启动时刻。默认在 bootstrap 开始后 11.5 小时停止采集，整次会话使用 12 小时截止时间，为发布预留余量；这些工程参数不保证每次上传都能在截止前完成。
 
 回退必须保留 `social.archive.json` 和 schema 2 seed 的读取能力。生产已写入 JSON 文字状态，不能直接把发布清单退回 `a1658d8` 或更早的 ZIP 实现；旧代码无法恢复这些状态，可能重新生成旧周期。原始 SQL 格式没有因此改变，不含文字容器的旧生产月库仍可读取。若没有兼容回退提交，应暂停后续写入并保留现有快照，不能删除历史版本或伪造完成状态。
 
 真实 QA 使用合成市场。它验证了平台认证、真实 Dataset 上传、跨会话恢复和文字容器保存；不能据此断言每个真实历史市场都能采全，也不替代生产的统计覆盖与缺口检查。所有已知统计缺口继续保留，程序不会向社交平台自动发帖。
+
+## 合并前审查补修
+
+PR #4 的旧审查指出：首次历史边界发现时，重试较早报错的系列会删除或覆盖后一个系列的分页游标。合并前已复现并修复，源码提交为 `7b14c7a2fbaab2ac24211001071bcefe066593a7`。修复只调整恢复顺序，优先完成已保存游标所属的系列，不改变状态格式、截止时间或错误处理。新增回归覆盖连续三至四个新会话，以及早期错误持续和恢复健康两种情况；旧代码下均失败，修复后 pipeline 专项 24 项及全套 **509 项测试**通过，独立内容审查通过。[审查与测试摘要](evidence/kaggle-cloud-20261113/merge_review_followup.json)。
+
+当前生产已有冻结的 `state.history`，不会进入上述首次边界发现路径。此次合并保留现行发布清单固定的 `dfdc11c6e5b0f4fffb38614e524c556a744a438a`；新增边界修复进入主线，尚未提升为生产发布版本。远端 `kaggle-release` 是生产 bootstrap 的必要配置分支，清理临时开发工作树时必须保留。

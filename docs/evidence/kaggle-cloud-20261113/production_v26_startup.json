@@ -1,0 +1,43 @@
+{
+  "checked_at_utc": "2026-11-13T05:38:37.529338+00:00",
+  "kernel": "qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis/26",
+  "latest_version_number": 26,
+  "platform_status": "RUNNING",
+  "platform_status_checked_at_utc": "2026-11-13T05:36:32.150724+00:00",
+  "RUN_ARGUMENTS": [],
+  "bootstrap_source_sha256": "d10dcfc9c9a71804109978bcd71ad5afc0fd4d62ad79670d626c8427e8bbdecd",
+  "bootstrap_matches_approved_v25": true,
+  "observed_release": {
+    "auth_mode": "platform",
+    "schema_version": 1,
+    "source_commit": "dfdc11c6e5b0f4fffb38614e524c556a744a438a"
+  },
+  "observed_authentication": {
+    "mode": "platform",
+    "sdk_source": "KAGGLE_API_V1_TOKEN",
+    "source": "platform"
+  },
+  "identity_verified": true,
+  "initial_collection_log": "Collecting 2025-09-11 (historical)",
+  "startup_verified": true,
+  "scheduled_trigger_verified": true,
+  "run_completion_verified": false,
+  "read_scope": "One current metadata/source read, fixed v26 status, persisted log read, and a live log snapshot limited to 20 seconds or 1000 events. Snapshot reached 1000 events and closed.",
+  "production_writes": 0,
+  "raw_sqlite_downloaded": false,
+  "evidence_files": [
+    "latest-metadata.json",
+    "latest-source.ipynb",
+    "v26-status.json",
+    "v26-logs.json",
+    "v26-live-snapshot.json",
+    "v26-live-events.jsonl",
+    "v26-live.log",
+    "version-history-dom.txt",
+    "version-history.png"
+  ],
+  "script_version_id": 369021634,
+  "scheduled_ui_evidence": "Version 26 Save & Run All \u2022 Diff: +0 -0 Running... \u00b7 Scheduled",
+  "scheduled_ui_screenshot_sha256": "4845009c085ecf7d2d708214c8d9cc439a72b22c13d38cafaed59dae4359338a",
+  "evidence_scope": "Fixed Notebook v26 source and live startup log plus browser Version History Scheduled label. Run completion is not yet verified."
+}
