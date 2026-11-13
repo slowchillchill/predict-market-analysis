@@ -1,0 +1,21 @@
+{
+  "evidence_kind": "selected_fields_from_fixed_dataset_version",
+  "dataset": "qiuqiuslowchillchill/pm-updown-analysis-2026-11",
+  "version": 282,
+  "updated_at_utc": "2026-11-13T03:25:50.673597+00:00",
+  "cloud_social_seed": {
+    "dataset": "qiuqiuslowchillchill/pm-updown-social-seed-20261113",
+    "version": 2
+  },
+  "last_run": {
+    "schema_version": 1,
+    "run_id": "f0aba964b0cc48118646e9018a5bf49b",
+    "started_at_utc": "2026-11-13T03:24:40.818474+00:00",
+    "status": "running",
+    "source_commit": "dfdc11c6e5b0f4fffb38614e524c556a744a438a",
+    "authentication_source": "platform",
+    "trigger": "Batch",
+    "resume_history_date": "2025-09-10"
+  },
+  "history_next_date_utc": "2025-09-10"
+}

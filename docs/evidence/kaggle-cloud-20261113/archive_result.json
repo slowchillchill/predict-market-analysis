@@ -1,0 +1,22 @@
+{
+  "status": "passed",
+  "dataset": "qiuqiuslowchillchill/qa-archive-20261113-031742",
+  "version": 1,
+  "private_requested": true,
+  "mutations": [
+    {
+      "operation": "create",
+      "dataset": "qiuqiuslowchillchill/qa-archive-20261113-031742",
+      "private_requested": true
+    }
+  ],
+  "files_sha256": {
+    "social.archive.json": "6dbb7a53085756f11ae16e55621699f500c3b64f43a69c6303d6aa41b27a4687",
+    "months.archive.json": "5e8829cfd5dc54eadc8ce291d5bf837de9f6c8f008fe6143761805e32087a434",
+    "seed.json": "f41557175e3a5ecb3c85c8e278a08a0e118d363fb4267ac28a89130553cb438f"
+  },
+  "social_files": 7,
+  "downloaded_archive_bytes_identical": true,
+  "cloud_social_restore": true,
+  "cloud_seed_import": true
+}
