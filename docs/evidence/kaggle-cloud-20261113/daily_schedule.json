@@ -1,0 +1,42 @@
+{
+  "kernel": "qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis",
+  "configured_from_notebook_version": 25,
+  "configured_from_script_version_id": 369020698,
+  "schedule": {
+    "trigger": "Frequency",
+    "frequency": "daily",
+    "start_date": "2026-11-13"
+  },
+  "saved_to_server": true,
+  "success_toast": "Notebook scheduled.",
+  "persisted_after_browser_reload": true,
+  "activity_text": "Scheduled to re-run on November 13, 2026",
+  "observed_at_utc": "2026-11-13T04:56:00+00:00",
+  "scheduled_execution_observed": false,
+  "scheduled_execution_result": "pending",
+  "screenshot": "daily-restored.png",
+  "screenshot_sha256": "cc0065f77a3f541b3e811f65cc60ca0cd4f5f8f8dd682fe0369f43b454d4e52c",
+  "local_report_timers": [
+    {
+      "unit": "polymarket-updown-yesterday.timer",
+      "active_state": "inactive",
+      "unit_file_state": "disabled"
+    },
+    {
+      "unit": "polymarket-updown-weekly.timer",
+      "active_state": "inactive",
+      "unit_file_state": "disabled"
+    },
+    {
+      "unit": "polymarket-updown-monthly.timer",
+      "active_state": "inactive",
+      "unit_file_state": "disabled"
+    },
+    {
+      "unit": "polymarket-kaggle-reports-retry.timer",
+      "active_state": "inactive",
+      "unit_file_state": "disabled"
+    }
+  ],
+  "evidence_scope": "Saved native Daily configuration and upcoming schedule event. This is not evidence of a Scheduled execution or its success."
+}

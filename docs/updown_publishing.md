@@ -1,85 +1,86 @@
-# 四平台海报发布
+# X 与 LinkedIn 文字稿生成和发布
 
-## 生成与时间
+当前日、周、月生产入口只生成两个平台的英文文字稿：X 串联短帖和 LinkedIn 动态。抖音、TikTok 已退出当前流程。图片、分布图、中文卡片和配乐不再属于当前生成包。
 
-日、周、月现有 systemd 时间和启动命令保持不变。日报自动入口与周/月默认入口生成总览、全系列买入分布 PNG/JSON、英文推文、中文正文和发布清单；总览 JSON 的 `trade_distribution` 保存同周期分布引用与哈希。
-周/月提供 `--without-distribution` 保留旧包；新版默认同步两组 BUY 的正文和分布图，整套校验后再写入最终目录，清单最后更新。
-X、LinkedIn、TikTok 新版图片数组依次为英文总览、买入分布页。抖音日报4卡依次为总览、全部 BUY、机器人 BUY、方法；周/月6卡依次为总览、每日趋势、高频地址解释、全部 BUY、机器人 BUY、方法。
-未附分布的旧日报及周/月包继续使用原内容和附件规则。按清单版本与数组选择图片，不凭文件名猜测张数。
-分布 JSON 不符合总览发布侧文件的输入结构，不能直接传给 `polymarket_updown_captions.py`。
+## 生成入口
 
-桌面线程任务到点按顺序处理 X、LinkedIn、抖音、TikTok：每天 11:00、每周一 12:00、每月 1 日 12:45，均 Asia/Tokyo。以运行开始的 UTC 时间固定昨日/上一完整周/上一完整自然月，等待和重试不改变目标。不叠加平台内预约，不自动补发历史周期。
+生产入口为 Kaggle Notebook。它先确认分析 Dataset 版本，再从该版本的完整结果生成文字，随后把文字与生成状态保存到月度分析 Dataset 的 `social.archive.json`。目录为 `social/<kind>/<target>/`，状态为 `social/state.json`。新会话自动解压并恢复；本地 Codex 关闭不会中断这个流程。
 
-先核对 systemctl --user show/status 和 journalctl --user：对应目标、实际运行时间、Result=success、ExecMainStatus=0。oneshot inactive/dead 正常。运行中每次最多等待 60 秒；明确失败或产物错期则停止该批。禁止在发布流程启动、重启或重复执行采集/海报生成。
+既有文字通过固定版本的私有迁移 Dataset 导入。正文和来源版本保持不变，清单路径改为相对路径。已有 `generated` / `preserved` 周期不重生成。文字生成成功不代表已经发布到社交平台。
 
-已有源文件需要新增抖音文案及卡片时，可执行旁路转换：仅读取已有 JSON，不重画原英文图、不读数据库、不采集。预览使用独立目录，保留已发布版本的文案、清单和状态：
+日报每天 09:30 JST、周报周一 11:30 JST、月报每月 1 日 12:30 JST 是周期到期时间。Kaggle 只在会话运行且相应统计完成后生成，因此 Daily 调度不保证在这些时刻立即出稿。云端接管后停用旧本地定时器；下面的命令保留为手动生成与预览入口：
 
 ```bash
-.venv-btc5m/bin/python scripts/polymarket_updown_captions.py --source outputs/posters/updown_weekly_2026-10-05_2026-10-11.json --output-dir outputs/previews/douyin_weekly_2026-10-05_2026-10-11_v1
+.venv-btc5m/bin/python scripts/polymarket_kaggle_reports.py --kind all
 ```
 
-每次对照 `_publish.json` 的目标日期及 source/image/english SHA256。图片必须可读取。PNG、JSON、英文正文变化后不得继续使用旧清单。
+脚本固定同一个已处理完成的 Kaggle 分析 Dataset 版本，从中读取索引和结果 JSON。它不下载原始日库，不查询本地 SQLite，也不调用图片生成模块。采集、统计口径和云端发布保持原流程。
 
-## 内容与账号
+未就绪结果保留待处理状态，后续云端保存或新会话会重新检查，目标日期不会因跨日而替换。更换文字格式不会把过去所有周期重新加入队列。
 
-账号和背景音乐配置位于 `config/polymarket_publish.json`。
+本地预览的默认输出目录为 `outputs/social/`。云端归档中的日报文件相同，例如：
 
-- X @slowchillchill，LinkedIn 邱秋：英文 `_tweet.md` 加清单中的平台图片数组；没有数组时用原 PNG。
-- 抖音 slowchillchill / 抖音号 1350887770：清单 `platforms.douyin.title/body` 加 `platforms.douyin.image_paths`，日报新版4张、周/月新版6张，按数组顺序上传；逐张核对 `image_sha256s`。旧清单没有图片数组时代表旧单图版本，不能混用新文案。标题最多20、正文最多1000，以页面计数再次检查。
-- TikTok @slowchillchill：清单 `platforms.tiktok.title/body` 加平台图片数组；没有数组时用原 PNG。标题90、正文4000，以页面计数再次检查。
-- 中文来自原始统计值；金额 Decimal 四舍五入到分，环比不使用浮点；保留 UTC、去重钱包、疑似机器人、零基数/缺失、范围变更及可用时段调整。
-- 含分布的日/周/月正文列出两组重建 BUY 事件的 Trades、Shares 和 Up 等价金额。Trade % 各除以本图总笔数，Notional % 均除以全部 BUY 事件 Up 等价金额。机器人比例是买方参与覆盖率，不是钱包自身资金贡献率。总览机器人模块与分布页必须共用同一 buy_event_summary，并显示对应 BUY 分母；钱包侧原价金额仅累计 BUY。标签从首次命中当日持续生效，不使用未来标签回算。
-- 不截断、改写或补充营销承诺；不自动添加位置、热点、活动或商业推广标记。
+```text
+updown_2026-11-10.json
+updown_2026-11-10_x_01.txt
+updown_2026-11-10_x_02.txt
+updown_2026-11-10_x_03.txt
+updown_2026-11-10_linkedin.txt
+updown_2026-11-10_publish.json
+```
 
-## 浏览器执行
+X 通常为三条；较长数字或周期标题可能需要更多条。发布者按清单中的 `posts` / `text_paths` 顺序使用全部短帖，不凭示例张数推断。周报文件名包含周一至周日，月报文件名包含 `YYYY-MM`。
 
-使用应用内浏览器现有会话和可用 CUA 工具。每次发现当前标签或打开新标签，不固定 tab ID，不提取登录 cookie、不调用网页私有接口。上传前读取工具 `file-uploads` 文档。
+已有 `outputs/posters/` 图片与旧发布记录保留。新文字包使用独立目录，避免与旧图包同名冲突；同一文字包已存在时不覆盖。文字生成成功不代表已经发布。
 
-抖音入口：https://creator.douyin.com/ → 发布图文；TikTok：https://www.tiktok.com/tiktokstudio/upload → 照片。两平台支持单张 PNG。
+## 文案格式
 
-1. 核对登录身份和近期作品，结合本地记录去重。
-2. 通过 filechooser 按平台 `image_paths` 顺序上传，逐项核对 `image_sha256s`。新版英文平台为总览和分布2张，抖音日报4张、周/月6张；无分布旧包的抖音仍为4张，英文仍为原 PNG。第一张为封面，等待每张完整预览，核对数据无裁切。
-3. 填写清单标题/正文，核对页面实际文字及计数。新版抖音正文先解释本期真实变化，再列数字与方法；零基数、缺失数据时不推断变化或补造趋势。话题推荐弹层不得擅自选取无关话题。
-4. 打开曲库，按配置顺序匹配曲名、作者和时长，主选不可用才用备用。抖音同作者同长度有重复时选择页面显示使用人数最多的版本。曲库可能变化，每次必须重查。
-5. 主选：两平台均 Aesthetic / Tollan Kim / 01:00。候选均来自 2026-10-01 可见曲库。抖音全部指定候选不可用时，从曲库任选一首当前可用音乐继续发布，无需再次确认；记录实际曲名、作者、时长及 `selection_reason=configured_candidates_unavailable`。TikTok 全部候选不可用仍阻止发布。不静默改成无声。
-6. 编辑页确认音乐已选中、公开/所有人、立即发布/现在。保存发布前截图。
-7. 先写 submitting 再点击一次发布。确认管理页及作品详情，不把跳转、上传成功或审核中当公开成功。
-8. TikTok 管理页在审查期间可能显示“仅自己”；先等待审核，不能未经核实重复上传或盲目改隐私。
+- X：按顺序发布英文串联帖，每条按普通 280 个加权字符限制生成。首条提供日期、市场范围、市场单边金额、钱包数和固定来源链接。后续列重建 BUY 事件、疑似机器人买方参与及筛选说明。
+- LinkedIn：英文纵向指标块，使用真实换行和空行；不使用多列竖线表格、Markdown 表格或 Mermaid。正文包含总览、两组 BUY 汇总、三种参与覆盖率、十档价格分布、规则及来源，限制为 3,000 个 UTF-16 单位。
+- 两个平台使用同一份完成结果。金额与份数使用 Decimal 四舍五入到两位小数；X 必要时用 K/M/B/T 紧凑数值。
+- 日期按 UTC 市场结束日归属，包含这些市场更早发生的交易；钱包地址数不等于人数。
+- 疑似机器人比例是买方参与事件的覆盖率，不是钱包自身支出占比。Up 等价金额与市场单边成交额分别命名，分母不混用。价格分布的两列金额占比均以全部 BUY 的 Up 等价金额为分母，总计按未舍入值计算。
+- 历史覆盖不完整时保留说明；不声称已观察到全部历史。当前文字模板不输出环比，避免把覆盖范围变化表述为同范围增长。
 
-## 发布状态与恢复
+依据：[X 字符规则](https://docs.x.com/fundamentals/counting-characters)、[LinkedIn 动态](https://www.linkedin.com/help/linkedin/answer/a528176)、[LinkedIn 文章也不支持原生表格](https://www.linkedin.com/help/linkedin/answer/a521719/)。
 
-使用 `outputs/publish_state/{kind}_{target}_{platform}.json`；周目标为 S_E，月目标为 YYYY-MM。
+## 离线生成与审查
 
-推荐通过 `scripts/polymarket_publish_state.py` 写状态；它校验源文件哈希、加文件锁、原子写入并保留历史。`--verified-absent` 表示操作者已经在平台核对没有该目标作品，不是代替平台核验。
-新版日/周/月还校验分布 JSON/PNG 的周期引用、统计口径、数值加总、平台图片顺序及内容哈希。周/月分布必须覆盖完整日集合，并与总览的市场数、钱包数及机器人规则一致。独立预览不覆盖已发布版本，也不写入发布状态。
-每日批准文案版还记录 `copy_version=buy_activity_approved_v1`，校验总览六项汇总与分布数据一致，尤其是笔数、Shares、Up 等价金额的三项覆盖率，以及当天频率达标钱包数。份数比例不能改用机器人组自身份数作为分母。正文、图片和引用必须来自同一套产物。
-每日全系列图表版另外记录 `trade_distribution.layout_version=buy_price_distribution_chart_v1`；英文平台资产版本为 `daily_buy_distribution_chart_v1`，抖音四卡为 `research_cards_daily_buy_distribution_chart_v1`。清单生成与状态检查共用同一个版本选择函数，避免新图引用旧版清单。旧包无版式标记时仍按自身版本读取核对；周/月沿用原版式和版本。
+已下载的完整结果可直接生成文字，不进行网络请求：
+
+```bash
+.venv-btc5m/bin/python scripts/polymarket_kaggle_reports.py \
+  --result-json /path/to/daily_2026-11-10.json \
+  --source-dataset qiuqiuslowchillchill/pm-updown-analysis-2026-11 \
+  --source-version 100 \
+  --output-dir outputs/previews/text_2026-11-10
+```
+
+`--source-dataset` 和 `--source-version` 成对使用，必须填写该结果真正来自的分析 Dataset 版本。日报未提供分析版本时，可以使用目标日自带的固定原始日库引用；周报、月报需要完整周期的分析版本引用，不能把整周期指标指向某一个原始日库。若输入本身保存了 `source_reference`，可直接复用。
+
+清单为 `schema_version: 2`、`format: text`，只包含 `x`、`linkedin`。原始日库格式和云端报告格式没有随本地清单改变。`source_path` 保存原结果及来源引用；平台项保存正文、逐条文本路径及内容摘要，不包含图片或配乐字段。
+
+## 发布交接
+
+发布由用户签发给专门的发布 AGENT，生成脚本不向平台提交内容。账号与当前启用平台见 `config/polymarket_publish.json`。
+
+1. 固定目标周期，核对实际登录账号、清单和既有作品。
+2. X 按 `platforms.x.posts` 顺序形成串联帖；LinkedIn 使用 `platforms.linkedin.body`，选择公开可见。
+3. 提交前先记 `submitting`。结果不确定时核实既有作品，不盲目重发；审核中记 `pending_review`。
+4. 明确发布成功后保存作品链接和页面证据。X 保存全部串联帖链接。
+
+旧图包状态与新文字包沿用同一周期、同一平台的状态路径，因此旧已发布记录不会因改格式而失去去重作用。历史图包读取仅为核对既有记录，不代表重新启用旧平台。
+
+文字包状态示例（只有核实平台尚未存在该稿后才使用 `--verified-absent`）：
 
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_publish_state.py \
-  --manifest outputs/posters/updown_monthly_2026-09_publish.json \
-  --platform douyin --status submitting --verified-absent \
-  --music-json '{"title":"Aesthetic","artist":"Tollan Kim","duration":"01:00"}'
+  --manifest outputs/social/updown_2026-11-10_publish.json \
+  --platform linkedin --status submitting --verified-absent
 ```
 
-状态含义：
+X 记录公开成功时，通过 `--post-urls-json` 提供按串联顺序排列的全部作品链接，并提供 `--evidence`；LinkedIn 使用 `--post-url` 与 `--evidence`。图片、配乐及 PNG 校验不适用于文字包。
 
-- `submitting`：已记录即将提交；不能盲目重试。
-- `pending_review`：平台已接收但审核未结束；保留作品链接。
-- `published`：页面明确发布成功并核对作品链接，保存截图和页面文字证据。
-- `unknown`：结果不确定；先查平台。
-- `blocked` / `failed`：未能提交或明确失败，附具体原因。审核拒绝不得自动重发。
+## 本次验证（2026-11-11）
 
-更新为 published 时必须提供 `--post-url` 和 `--evidence`，另提供 `--screenshot`。任何一个平台成功，其他平台失败也不覆盖成功记录。每次定时运行先核对已有 pending_review/unknown/submitting 的作品链接并更新状态，不能自动补发旧周期；仅对本次目标中尚未成功且经平台确认无作品的项操作。
-
-登录失效、验证码、账号不符、无法确认音乐/图片/正文时停止该平台，继续独立平台并如实汇报。
-
-## 首次验收（2026-10-01）
-
-2026-09 月报已使用原英文 PNG：
-
-- 抖音中文图文：https://www.douyin.com/note/7691551239418514729 ，管理页已发布、状态正常，公开作品可读取。
-- TikTok 英文照片：https://www.tiktok.com/@slowchillchill/photo/7691551161123441926 ，经过内容审查后显示所有人可见，作品页确认 Aesthetic - Tollan Kim。
-- 两平台主选配乐均 Aesthetic / Tollan Kim / 01:00；首发证据及提交历史保存在 outputs/publish_state/。
-- 三个现有桌面发布任务已原位更新为四平台，时间不变。原采集/生成服务与定时器未更改或重启。
-- 全部 61 项 Polymarket 测试通过，包括新增文案及状态恢复测试。
+完整回归 438 项通过，独立代码审查通过。使用分析 Dataset 第 100 版的真实 `daily_2026-11-10.json` 离线生成了 `outputs/social/` 示例：X 三条分别为 227、245、271 个加权字符，LinkedIn 为 1,898 个 UTF-16 单位。文字包与发布状态入口兼容，无需图片或原始数据库。本次只生成本地稿件，没有提交平台发布。

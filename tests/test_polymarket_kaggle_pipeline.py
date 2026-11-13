@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -405,6 +406,233 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([slug for slug, _, _ in self.store.published if slug.startswith("pm-updown-raw-")],
                          [f"pm-updown-raw-{TODAY}"])
 
+    def test_history_boundary_error_continues_other_series_and_restarts_failed_series_next_session(self):
+        other = 'eth-up-or-down-daily'
+        self.pipeline.state['raw_days'][str(YESTERDAY)] = {'status': 'complete'}
+        broken = [True]
+        calls = []
+
+        def event(series, ended, *, malformed=False):
+            market = {'slug': f'{series}-{ended}', 'conditionId': f'{series}-{ended}',
+                      'endDate': ended, 'outcomes': ['Up', 'Down']}
+            if malformed:
+                market.pop('conditionId')
+            return {'seriesSlug': series, 'markets': [market]}
+
+        def get(url, params):
+            if url == producer.collector.GAMMA_SERIES:
+                series = params['slug']
+                calls.append(('series', series))
+                return [{'slug': series, 'id': series}]
+            self.assertEqual(url, producer.collector.GAMMA_EVENTS_KEYSET)
+            series = params['series_id']
+            cursor = params.get('after_cursor')
+            calls.append((series, cursor))
+            if series == SERIES and cursor is None:
+                return {'events': [event(series, '2026-06-01T17:00:00Z')], 'next_cursor': 'second-page'}
+            if series == SERIES:
+                return {'events': [event(series, '2026-04-01T17:00:00Z', malformed=broken[0])], 'next_cursor': None}
+            return {'events': [event(series, '2026-05-01T17:00:00Z')], 'next_cursor': None}
+
+        self.client.get = get
+        with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True):
+            with self.quiet():
+                self.pipeline.run()
+            self.assertIsNone(self.pipeline.state['history'])
+            self.assertEqual(self.pipeline.processed, 0)
+            discovery = self.pipeline.state['history_discovery']
+            self.assertNotIn(SERIES, discovery['series_first_end'])
+            self.assertEqual(discovery['series_first_end'][other], '2026-05-01T17:00:00+00:00')
+            self.assertIn(SERIES, discovery['errors'])
+            self.assertNotIn('in_progress', discovery)
+            self.assertIn((other, None), calls)
+            saved = json.loads(self.latest_files('pm-updown-analysis-2026-11')['progress.json'])
+            self.assertEqual(saved['history_discovery'], discovery)
+            self.assertIsNone(saved['history'])
+
+            broken[0] = False
+            calls.clear()
+            resumed = producer.Pipeline(self.store, self.root / 'boundary-fixed',
+                                        today=lambda: TODAY, client=self.client)
+            resumed.attempted.add(str(YESTERDAY))
+            with self.quiet():
+                resumed.discover_history()
+            self.assertEqual(calls, [('series', SERIES), (SERIES, None), (SERIES, 'second-page')])
+            self.assertEqual(resumed.state['history']['start_date_utc'], '2026-04-01')
+            self.assertEqual(resumed.state['history']['series_first_end'], {
+                SERIES: '2026-04-01T17:00:00+00:00', other: '2026-05-01T17:00:00+00:00'})
+            self.assertEqual(resumed.state['history_discovery']['errors'], {})
+
+    def test_history_boundary_resumes_later_series_before_retrying_earlier_error(self):
+        other = 'eth-up-or-down-daily'
+        for recovery_session in (2, 4):
+            with self.subTest(earlier_series_recovers_in_session=recovery_session):
+                store = MemoryStore()
+                client = PublicAPI(self.clock)
+                session = [1]
+                active = [None]
+                calls = []
+
+                def event(series, ended):
+                    return {'seriesSlug': series, 'markets': [{
+                        'slug': f'{series}-{ended}', 'conditionId': f'{series}-{ended}',
+                        'endDate': ended, 'outcomes': ['Up', 'Down']}]}
+
+                def get(url, params):
+                    if url == producer.collector.GAMMA_SERIES:
+                        series = params['slug']
+                        calls.append(('series', series))
+                        if series == SERIES and session[0] < recovery_session:
+                            raise producer.core.FetchError('HTTP 404', status_code=404)
+                        return [{'slug': series, 'id': series}]
+                    self.assertEqual(url, producer.collector.GAMMA_EVENTS_KEYSET)
+                    series, cursor = params['series_id'], params.get('after_cursor')
+                    calls.append((series, cursor))
+                    if series == other:
+                        ended, next_cursor = {
+                            None: ('2026-04-01T17:00:00Z', 'page-2'),
+                            'page-2': ('2026-06-01T17:00:00Z', 'page-3'),
+                            'page-3': ('2026-05-01T17:00:00Z', None),
+                        }[cursor]
+                        if next_cursor:
+                            # End the session after one committed catalog page.
+                            active[0].stopping = True
+                    else:
+                        ended, next_cursor = (
+                            ('2026-06-01T17:00:00Z', 'earlier-second-page') if cursor is None
+                            else ('2026-03-01T17:00:00Z', None))
+                    return {'events': [event(series, ended)], 'next_cursor': next_cursor}
+
+                client.get = get
+
+                def fresh_session(number):
+                    session[0] = number
+                    calls.clear()
+                    active[0] = producer.Pipeline(store,
+                        self.root / f'boundary-resume-{recovery_session}-{number}',
+                        today=lambda: TODAY, client=client)
+                    active[0].state['raw_days'][str(YESTERDAY)] = {'status': 'complete'}
+                    active[0].attempted.add(str(YESTERDAY))
+                    return active[0]
+
+                def saved_discovery():
+                    slug = 'pm-updown-analysis-2026-11'
+                    files = store.datasets[slug][store.version(slug)]
+                    return json.loads(files['progress.json'])['history_discovery']
+
+                with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True):
+                    first = fresh_session(1)
+                    with self.quiet():
+                        first.run()
+                    self.assertEqual(calls, [('series', SERIES), ('series', other), (other, None)])
+                    discovery = saved_discovery()
+                    self.assertEqual(discovery['errors'][SERIES]['http_status'], 404)
+                    self.assertEqual(discovery['in_progress'], {
+                        'series_slug': other, 'next_cursor': 'page-2',
+                        'earliest_end_time': '2026-04-01T17:00:00+00:00'})
+
+                    second = fresh_session(2)
+                    with self.quiet():
+                        second.run()
+                    self.assertEqual(calls, [('series', other), (other, 'page-2')])
+                    discovery = saved_discovery()
+                    self.assertEqual(discovery['in_progress']['next_cursor'], 'page-3')
+                    self.assertEqual(discovery['in_progress']['earliest_end_time'],
+                                     '2026-04-01T17:00:00+00:00')
+                    self.assertIn(SERIES, discovery['errors'])
+                    self.assertIsNone(second.state['history'])
+
+                    third = fresh_session(3)
+                    with self.quiet():
+                        third.discover_history()
+                    self.assertEqual(calls[:3], [('series', other), (other, 'page-3'), ('series', SERIES)])
+                    self.assertEqual(third.state['history_discovery']['series_first_end'][other],
+                                     '2026-04-01T17:00:00+00:00')
+                    if recovery_session == 4:
+                        self.assertIsNone(third.state['history'])
+                        self.assertEqual(saved_discovery()['errors'][SERIES]['http_status'], 404)
+                        final = fresh_session(4)
+                        with self.quiet():
+                            final.discover_history()
+                        self.assertEqual(calls, [('series', SERIES), (SERIES, None),
+                                                 (SERIES, 'earlier-second-page')])
+                    else:
+                        final = third
+                    self.assertEqual(final.state['history']['start_date_utc'], '2026-03-01')
+                    self.assertEqual(final.state['history']['series_first_end'], {
+                        SERIES: '2026-03-01T17:00:00+00:00', other: '2026-04-01T17:00:00+00:00'})
+                    self.assertEqual(final.state['history_discovery']['errors'], {})
+                    self.assertNotIn('in_progress', final.state['history_discovery'])
+
+    def test_history_boundary_fetch_error_is_local_but_rate_limit_stops(self):
+        other = 'eth-up-or-down-daily'
+        self.pipeline.attempted.add(str(YESTERDAY))
+        calls = []
+
+        def get(url, params):
+            if url == producer.collector.GAMMA_SERIES:
+                calls.append(params['slug'])
+                if params['slug'] == SERIES:
+                    raise producer.core.FetchError('HTTP 404', status_code=404)
+                return [{'slug': other, 'id': other}]
+            return {'events': [{'seriesSlug': other, 'markets': [{
+                'slug': 'healthy-boundary', 'conditionId': 'healthy-boundary',
+                'endDate': '2026-04-01T17:00:00Z', 'outcomes': ['Up', 'Down']}]}], 'next_cursor': None}
+
+        self.client.get = get
+        with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True):
+            with self.quiet():
+                self.pipeline.discover_history()
+            self.assertEqual(calls, [SERIES, other])
+            self.assertEqual(self.pipeline.state['history_discovery']['errors'][SERIES]['http_status'], 404)
+            self.assertIsNone(self.pipeline.state['history'])
+            self.client.get = Mock(side_effect=producer.core.RateLimitError('HTTP 429'))
+            with self.quiet(), self.assertRaises(producer.core.RateLimitError):
+                self.pipeline.discover_history()
+            self.assertEqual(self.client.get.call_count, 1)
+
+    def test_history_boundary_error_save_failure_does_not_continue_other_series(self):
+        other = 'eth-up-or-down-daily'
+        self.pipeline.attempted.add(str(YESTERDAY))
+        self.client.get = Mock(side_effect=producer.core.FetchError('HTTP 404', status_code=404))
+        self.store.publish = Mock(side_effect=producer.KaggleError('Unconfirmed boundary error snapshot'))
+        with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True), \
+                self.quiet(), self.assertRaisesRegex(producer.KaggleError, 'Unconfirmed'):
+            self.pipeline.discover_history()
+        self.assertEqual(self.client.get.call_count, 1)
+        self.assertIsNone(self.pipeline.state['history'])
+
+    def test_history_boundary_repeated_resume_cursor_is_recorded_and_other_series_continues(self):
+        other = 'eth-up-or-down-daily'
+        self.pipeline.attempted.add(str(YESTERDAY))
+        self.pipeline.state['history_discovery'] = {
+            'window_start_utc': '2023-11-10', 'end_date_utc_exclusive': str(TODAY),
+            'series_first_end': {}, 'in_progress': {
+                'series_slug': SERIES, 'next_cursor': 'saved-page',
+                'earliest_end_time': '2026-05-01T17:00:00+00:00'}}
+        calls = []
+
+        def get(url, params):
+            if url == producer.collector.GAMMA_SERIES:
+                return [{'slug': params['slug'], 'id': params['slug']}]
+            series = params['series_id']
+            calls.append((series, params.get('after_cursor')))
+            return {'events': [{'seriesSlug': series, 'markets': [{
+                'slug': series, 'conditionId': series, 'endDate': '2026-04-01T17:00:00Z',
+                'outcomes': ['Up', 'Down']}]}],
+                'next_cursor': 'saved-page' if series == SERIES else None}
+
+        self.client.get = get
+        with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True), self.quiet():
+            self.pipeline.discover_history()
+        self.assertEqual(calls, [(SERIES, 'saved-page'), (other, None)])
+        discovery = self.pipeline.state['history_discovery']
+        self.assertIn('repeated a cursor', discovery['errors'][SERIES]['message'])
+        self.assertNotIn(SERIES, discovery['series_first_end'])
+        self.assertIn(other, discovery['series_first_end'])
+        self.assertNotIn('in_progress', discovery)
+        self.assertIsNone(self.pipeline.state['history'])
+
     def test_gap_retry_does_not_rewind_completed_history_range(self):
         gap = YESTERDAY - timedelta(days=3)
         self.seed_history(gap)
@@ -415,6 +643,66 @@ class PipelineTests(unittest.TestCase):
             self.pipeline.run(max_days=1)
         self.assertEqual(self.pipeline.state["history"]["next_date_utc"], str(YESTERDAY))
         self.assertEqual(self.pipeline.state["history"]["gaps"], {})
+
+
+class ProducerMainTests(unittest.TestCase):
+    def invoke(self, pipeline, *, initialization_error=None):
+        client = Mock()
+        pipeline.state = {}
+        stream = io.StringIO()
+        with patch.object(producer.Path, 'is_dir', return_value=True), \
+                patch.object(producer.core, 'Client', return_value=client), \
+                patch.object(producer, 'KaggleStore') as store, \
+                patch.object(producer, 'Pipeline', return_value=pipeline,
+                             side_effect=initialization_error) as constructor, \
+                patch.object(producer.signal, 'signal'), \
+                patch.object(producer, 'write_json'), \
+                patch('polymarket_kaggle_migration.migrate_existing'), \
+                contextlib.redirect_stdout(stream):
+            result = producer.main([])
+        return result, stream.getvalue(), client, constructor, store
+
+    def test_default_work_directory_retains_failure_evidence_in_notebook_output(self):
+        pipeline = Mock()
+        result, _, client, constructor, store = self.invoke(pipeline)
+        self.assertEqual(result, 0)
+        self.assertEqual(constructor.call_args.args[1], Path('/kaggle/working/polymarket-pipeline'))
+        self.assertEqual(store.call_args.args[1], Path('/kaggle/working/polymarket-pipeline/downloads'))
+        self.assertIs(constructor.call_args.kwargs['client'], client)
+        client.close.assert_called_once_with()
+
+    def test_publication_failure_logs_redacted_underlying_cause(self):
+        cause = producer.KaggleError('HTTP 403 Forbidden Authorization: Bearer secret-test-token')
+        failure = producer.KaggleError('Cannot determine Dataset publication result; keep working files')
+        failure.__cause__ = cause
+        pipeline = Mock()
+        pipeline.run.side_effect = failure
+        with patch.dict(os.environ, {'KAGGLE_API_TOKEN': 'secret-test-token'}):
+            result, output, client, _, _ = self.invoke(pipeline)
+        self.assertEqual(result, 1)
+        self.assertIn('Producer stopped without advancing unconfirmed work:', output)
+        self.assertIn('Cannot determine Dataset publication result', output)
+        self.assertIn('403', output)
+        self.assertNotIn('secret-test-token', output)
+        pipeline.save.assert_not_called()
+        client.close.assert_called_once_with()
+
+    def test_restore_failure_reports_cause_and_closes_client_before_pipeline_exists(self):
+        result, output, client, _, _ = self.invoke(Mock(),
+            initialization_error=producer.KaggleError('HTTP 503 during restore'))
+        self.assertEqual(result, 1)
+        self.assertIn('503 during restore', output)
+        client.close.assert_called_once_with()
+
+    def test_paused_collection_save_failure_uses_publication_error_handler(self):
+        pipeline = Mock()
+        pipeline.run.side_effect = producer.core.CollectionPaused('Stopping')
+        pipeline.save.side_effect = producer.KaggleError('Pending publication failed')
+        result, output, client, _, _ = self.invoke(pipeline)
+        self.assertEqual(result, 1)
+        self.assertIn('Pending publication failed', output)
+        pipeline.save.assert_called_once_with()
+        client.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

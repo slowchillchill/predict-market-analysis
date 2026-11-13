@@ -1,0 +1,128 @@
+{
+  "status": "passed",
+  "phase": 1,
+  "date_utc": "2026-11-09",
+  "raw": {
+    "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-raw-2026-11-09",
+    "version": 1,
+    "publication": {
+      "schema_version": 1,
+      "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-raw-2026-11-09",
+      "publication_id": "f58a6b6afd7e4caabb6ca232ffb1f8e2"
+    },
+    "collection_status": {
+      "date_utc": "2026-11-09",
+      "status": "complete",
+      "coverage": {
+        "date_utc": "2026-11-09",
+        "expected_markets": 1,
+        "discovered_markets": 1,
+        "completed_markets": 1,
+        "committed_pages": 1,
+        "is_complete": 1
+      },
+      "error": null,
+      "date_basis": "market_end_utc",
+      "schema_version": 3,
+      "group_key": [
+        "market_slug",
+        "group_id"
+      ],
+      "volume_method": "wallet_group_first_row_v1",
+      "coverage_policy": "official_series_all_conditions_v1",
+      "discovery_errors": [],
+      "structural_errors": []
+    },
+    "summary": {
+      "schema_version": 3,
+      "trade_columns": [
+        "market_slug",
+        "page_number",
+        "row_number",
+        "wallet",
+        "group_id",
+        "timestamp",
+        "side",
+        "outcome",
+        "outcome_index",
+        "token_id",
+        "raw_price",
+        "raw_size",
+        "amount_micro_usdc"
+      ],
+      "tables": [
+        "collection_progress",
+        "markets",
+        "trades"
+      ],
+      "trades": [
+        [
+          "bitcoin-up-or-down-on-november-9-2026",
+          1,
+          0,
+          "buyer",
+          1,
+          1794182400,
+          "BUY",
+          "Up",
+          0,
+          "up",
+          "0.2",
+          "10",
+          2000000
+        ],
+        [
+          "bitcoin-up-or-down-on-november-9-2026",
+          1,
+          1,
+          "seller",
+          1,
+          1794182400,
+          "SELL",
+          "Up",
+          0,
+          "up",
+          "0.2",
+          "10",
+          2000000
+        ]
+      ],
+      "database_digest": "77bc29f3107db67b69f1033533553bc10fad611e9346f92e3ce5e4d8a5c8f5e1"
+    }
+  },
+  "monthly_seed_version": 1,
+  "monthly_publication_failure_injected": true,
+  "trade_requests": [
+    [
+      "2026-11-09",
+      "false",
+      null
+    ]
+  ],
+  "production_writes": 0,
+  "mutations": [
+    {
+      "operation": "create",
+      "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-analysis-2026-11",
+      "publication_id": "855ba05ad4d94a2ea4762591c354c466"
+    },
+    {
+      "operation": "create",
+      "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-raw-2026-11-09",
+      "publication_id": "f58a6b6afd7e4caabb6ca232ffb1f8e2"
+    }
+  ],
+  "authentication": {
+    "mode": "platform",
+    "source": "platform",
+    "sdk_source": "KAGGLE_API_V1_TOKEN"
+  },
+  "dataset_prefix": "qa-cloud-20261113-autonomy",
+  "source_commit": "a1658d817a3ba26415a495c34590f4c0eed316c2",
+  "completed_at_utc": "2026-11-13T03:18:09.162037+00:00",
+  "private_requested": true,
+  "evidence": {
+    "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-acceptance",
+    "version": 1
+  }
+}

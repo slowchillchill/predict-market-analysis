@@ -1,0 +1,48 @@
+{
+  "source": "KAGGLE_API_V1_TOKEN",
+  "production_writes": 0,
+  "operations": [
+    {
+      "operation": [
+        "datasets",
+        "create"
+      ],
+      "returncode": 0,
+      "output": "Your private Dataset is being created. Please check progress at https://www.kaggle.com/datasets/qiuqiuslowchillchill/qa-cloud-auth-20261113-1794538912\n"
+    },
+    {
+      "operation": [
+        "datasets",
+        "status"
+      ],
+      "returncode": 0,
+      "output": "{\"status\": \"ready\", \"current_version_number\": 1}"
+    },
+    {
+      "operation": [
+        "datasets",
+        "version"
+      ],
+      "returncode": 0,
+      "output": "Dataset version is being created. Please check progress at https://www.kaggle.com/datasets/qiuqiuslowchillchill/qa-cloud-auth-20261113-1794538912\n"
+    },
+    {
+      "operation": [
+        "datasets",
+        "status"
+      ],
+      "returncode": 0,
+      "output": "{\"status\": \"ready\", \"current_version_number\": 2}"
+    },
+    {
+      "operation": [
+        "datasets",
+        "download"
+      ],
+      "returncode": 0,
+      "output": "Dataset URL: https://www.kaggle.com/datasets/qiuqiuslowchillchill/qa-cloud-auth-20261113-1794538912/versions/2\nLicense(s): CC0-1.0\n"
+    }
+  ],
+  "dataset": "qiuqiuslowchillchill/qa-cloud-auth-20261113-1794538912",
+  "status": "probe_finished"
+}

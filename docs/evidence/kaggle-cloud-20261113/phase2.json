@@ -1,0 +1,58 @@
+{
+  "status": "passed",
+  "phase": 2,
+  "date_utc": "2026-11-09",
+  "raw": {
+    "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-raw-2026-11-09",
+    "version": 1,
+    "publication": {
+      "schema_version": 1,
+      "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-raw-2026-11-09",
+      "publication_id": "f58a6b6afd7e4caabb6ca232ffb1f8e2"
+    }
+  },
+  "monthly": {
+    "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-analysis-2026-11",
+    "version": 3
+  },
+  "cloud_only_recovery": true,
+  "raw_version_reused": true,
+  "trade_requests": [],
+  "social_archive_restored": true,
+  "social_state_idempotent": true,
+  "social_files_sha256": {
+    "social/state.json": "e83ac14d42734fb5eb06624f70b12e6e97a7100bebffe2201b8ba683469ca634",
+    "social/daily/2026-11-09/updown_2026-11-09.json": "74bf37fc48a6d4aee127baf2703eec56222cd9c7f7d0c87e6f3de0b594c59eac",
+    "social/daily/2026-11-09/updown_2026-11-09_publish.json": "879f5df758fccd8fefac0ce706d80ce85f1573dbdf532bf87e7bac57c51c66c8",
+    "social/daily/2026-11-09/updown_2026-11-09_x_03.txt": "2cf9cf205d043cda25824c89146b2e94a2744d0ca2d8f1271c1633dd9b0f8257",
+    "social/daily/2026-11-09/updown_2026-11-09_x_02.txt": "f247c5bab01ba3a35b6ed081b3caf231caf6e8aebb14b4cbad6f745acf5697ec",
+    "social/daily/2026-11-09/updown_2026-11-09_linkedin.txt": "01c1706279dd5397c5c532d3dde2b2fa460c06c8f96937829e9197a807160ff7",
+    "social/daily/2026-11-09/updown_2026-11-09_x_01.txt": "64b505a47c5186059f88e67e929311621dd11bd60dcc01a8a43fa05e064f9b96"
+  },
+  "production_writes": 0,
+  "mutations": [
+    {
+      "operation": "version",
+      "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-analysis-2026-11",
+      "publication_id": "46f9f24d6a8041d0aa663f05294a4185"
+    },
+    {
+      "operation": "version",
+      "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-analysis-2026-11",
+      "publication_id": "340874d04aeb49049e944064f8fd6a1a"
+    }
+  ],
+  "authentication": {
+    "mode": "platform",
+    "source": "platform",
+    "sdk_source": "KAGGLE_API_V1_TOKEN"
+  },
+  "dataset_prefix": "qa-cloud-20261113-autonomy",
+  "source_commit": "dfdc11c6e5b0f4fffb38614e524c556a744a438a",
+  "completed_at_utc": "2026-11-13T03:20:38.512828+00:00",
+  "private_requested": true,
+  "evidence": {
+    "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-acceptance",
+    "version": 2
+  }
+}

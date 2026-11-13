@@ -1,0 +1,39 @@
+{
+  "evidence_kind": "independent_validation_of_fixed_version_download",
+  "dataset": "qiuqiuslowchillchill/pm-updown-social-seed-20261113",
+  "version": 2,
+  "seed_schema_version": 2,
+  "archive_filename": "months.archive.json",
+  "archive_file_sha256": "e66653e61697c1ab06f49787bc42c88f740f7ce6f7fec4c586c75b0c9a37d6ab",
+  "decoded_zip_sha256": "f18f8e4260989dd88dcfb74e7579d734eeebe5f96d3fcf4c00a7c0e8553f1927",
+  "archive_hash_matches": true,
+  "decoded_zip_hash_matches": true,
+  "all_file_hashes_match": true,
+  "files_sha256": {
+    "months/2026-11/social/daily/2026-11-10/updown_2026-11-10.json": "086746c7420e11521805a5ce5851388fcc217a114ba26b23a095571b336fe17f",
+    "months/2026-11/social/daily/2026-11-10/updown_2026-11-10_linkedin.txt": "dc31da05d46663f1e25fb1566a8b44203c129329d4730cba3e914af21a29511a",
+    "months/2026-11/social/daily/2026-11-10/updown_2026-11-10_publish.json": "5bd674cef898ad8032e0f3e3499a0257279c9797c0cf26cd74eccd1303af5d93",
+    "months/2026-11/social/daily/2026-11-10/updown_2026-11-10_x_01.txt": "17ad98746421aafbb8ffa1d6634d2510ecd5607f2661e71ce3ce1f55207f4dfd",
+    "months/2026-11/social/daily/2026-11-10/updown_2026-11-10_x_02.txt": "cb111725da97e87def031c08977aef34611b719a508e0e3ea582136976ad33fd",
+    "months/2026-11/social/daily/2026-11-10/updown_2026-11-10_x_03.txt": "bf3f71d56dab3816e96606a93d0597aad17759343f2a21e49bea80ee030d2e3b",
+    "months/2026-11/social/daily/2026-11-11/updown_2026-11-11.json": "17d05b28ad06435dcec4d563f1f734a17192d5a563885a45245a4efc0f30db4c",
+    "months/2026-11/social/daily/2026-11-11/updown_2026-11-11_linkedin.txt": "4bb21118a65661eadd2a1b6b8fcf763e6256a52f66e0f75ed9f93a408daa3c76",
+    "months/2026-11/social/daily/2026-11-11/updown_2026-11-11_publish.json": "87502786470a9ce3405a4c9eef1b2a948b7fd02e3256e295f27151a59f63027f",
+    "months/2026-11/social/daily/2026-11-11/updown_2026-11-11_x_01.txt": "021366a7c5c64d6cc77fc67a3a30e8bad706bf1014818618142f2bf9407b3e3f",
+    "months/2026-11/social/daily/2026-11-11/updown_2026-11-11_x_02.txt": "a193cb44cde3ee5a5fc4d2a3388514fb20ba40a82e775932041785485bb37606",
+    "months/2026-11/social/daily/2026-11-11/updown_2026-11-11_x_03.txt": "80148dad7932ee6acacdc4309f789ae8545f815266a9bc1ee3c55dbbe6a9aa7c",
+    "months/2026-11/social/state.json": "563f4df7facbe75a9825ed8b098d15da37115fd705671b398c77fa8de41d2da3"
+  },
+  "reports": {
+    "2026-11": {
+      "changed": true,
+      "imported": [
+        "daily:2026-11-10",
+        "daily:2026-11-11"
+      ],
+      "preserved": [
+        "daily:2026-11-09"
+      ]
+    }
+  }
+}

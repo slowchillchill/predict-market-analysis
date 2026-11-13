@@ -1,0 +1,37 @@
+{
+  "kernel": "qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis/24",
+  "script_version_id": 369019147,
+  "platform_status": {
+    "checked_at_utc": "2026-11-13T04:51:19.733403+00:00",
+    "kernel": "qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis/24",
+    "returncode": 0,
+    "stdout": "qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis/24 has status \"KernelWorkerStatus.COMPLETE\"\n",
+    "stderr": ""
+  },
+  "bootstrap": {
+    "schema_version": 1,
+    "release": {
+      "schema_version": 1,
+      "source_commit": "dfdc11c6e5b0f4fffb38614e524c556a744a438a",
+      "auth_mode": "platform"
+    },
+    "authentication": {
+      "mode": "platform",
+      "source": "platform",
+      "sdk_source": "KAGGLE_API_V1_TOKEN"
+    },
+    "started_at_utc": "2026-11-13T04:48:03.900435+00:00"
+  },
+  "run_summary": {
+    "schema_version": 1,
+    "run_id": "2fbc7c1ef50a4e12b9686d21e9da8122",
+    "started_at_utc": "2026-11-13T04:48:04.115186+00:00",
+    "status": "complete",
+    "source_commit": "dfdc11c6e5b0f4fffb38614e524c556a744a438a",
+    "authentication_source": "platform",
+    "trigger": "Batch",
+    "resume_history_date": "2025-09-10",
+    "history_next_date": "2025-09-11",
+    "ended_at_utc": "2026-11-13T04:49:37.037761+00:00"
+  }
+}

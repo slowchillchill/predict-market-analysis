@@ -1,0 +1,12 @@
+{
+  "checked_at_utc": "2026-11-13T05:41:50.408954+00:00",
+  "source_commit": "7b14c7a2fbaab2ac24211001071bcefe066593a7",
+  "review_finding": "PR #4: retrying an earlier failed history series could erase or overwrite the saved pagination cursor for a later series.",
+  "fix": "Resume the saved unfinished series first, then preserve the original order for the remaining series.",
+  "regression": "Multiple fresh sessions with an earlier series that either keeps failing or becomes healthy; saved page-2 and page-3 resume without restarting and earliest end is retained.",
+  "old_code_fails_new_regression": true,
+  "targeted_pipeline_tests_passed": 24,
+  "full_tests_passed": 509,
+  "independent_content_review": "passed",
+  "production_impact": "Current v26 has frozen state.history and does not enter initial boundary discovery. Production release remains pinned to the previously cloud-validated dfdc11c6e5b0f4fffb38614e524c556a744a438a."
+}

@@ -1,10 +1,12 @@
 """Recovery scenarios: cloud snapshots survive a new process, local work does not."""
 
 import contextlib
+import copy
 import io
 import json
 import shutil
 import sqlite3
+import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -26,6 +28,100 @@ class RecoveryTests(unittest.TestCase):
     latest_files = fixtures.PipelineTests.latest_files
     inspect_raw = fixtures.PipelineTests.inspect_raw
     assert_complete_raw_shape = fixtures.PipelineTests.assert_complete_raw_shape
+
+    def _recover_orphan_raw(self, statistics_fail=False):
+        day = fixtures.YESTERDAY - timedelta(days=1)
+        slug = f'pm-updown-raw-{day}'
+        self.seed_history(day)
+        self.pipeline.save()
+        self.pipeline.attempted.add(str(fixtures.YESTERDAY))
+        publish = self.store.publish
+
+        def fail_month(name, folder, **kwargs):
+            if name.startswith('pm-updown-analysis-'):
+                raise producer.KaggleError('month publication unavailable')
+            producer.write_json(folder / 'publication.json', {
+                'schema_version': 1, 'dataset': self.store.ref(name), 'publication_id': 'orphan-raw'})
+            return publish(name, folder, **kwargs)
+
+        self.store.publish = fail_month
+        with contextlib.ExitStack() as stack:
+            if statistics_fail:
+                stack.enter_context(patch.object(producer.analysis, 'extract_day_features',
+                                                side_effect=ValueError('retained statistics gap')))
+            with self.quiet(), self.assertRaisesRegex(producer.KaggleError, 'month'):
+                self.pipeline.process_day(day, historical=True)
+            self.assertEqual(self.store.version(slug), 1)
+            # A new session has no local journal, SQLite file, or in-memory state.
+            shutil.rmtree(self.root / 'work')
+            self.store.publish = publish
+            self.client.trades.clear()
+            resumed = producer.Pipeline(self.store, self.root / 'clean-session',
+                                        today=lambda: fixtures.TODAY, client=self.client)
+            resumed.attempted.add(str(fixtures.YESTERDAY))
+            self.assertNotIn(str(day), resumed.state['raw_days'])
+            with self.quiet():
+                resumed.process_day(day, historical=True)
+        self.assertEqual(self.client.trades, [])
+        self.assertEqual(self.store.version(slug), 1, 'Identical restored snapshot must not be uploaded again')
+        saved = json.loads(self.latest_files('pm-updown-analysis-2026-11')['progress.json'])
+        self.assertEqual(saved['raw_days'][str(day)]['version'], 1)
+        self.assertEqual(saved['raw_days'][str(day)]['status'], 'incomplete' if statistics_fail else 'complete')
+        self.assertEqual(saved['history']['next_date_utc'], str(day + timedelta(days=1)))
+        if statistics_fail:
+            self.assertIn(str(day), saved['history']['gaps'])
+
+    def test_orphan_complete_raw_is_reused_without_local_files(self):
+        self._recover_orphan_raw()
+
+    def test_orphan_statistics_gap_remains_incomplete_and_reuses_raw(self):
+        self._recover_orphan_raw(statistics_fail=True)
+
+    def test_new_restore_without_valid_marker_clears_older_reusable_snapshot(self):
+        day = fixtures.YESTERDAY
+        slug = f"pm-updown-raw-{day}"
+        with self.quiet():
+            self.pipeline.process_day(day)
+        files = self.store.datasets[slug][1]
+        files["publication.json"] = json.dumps({
+            "schema_version": 1, "dataset": self.store.ref(slug), "publication_id": "first-snapshot",
+        }).encode()
+        resumed = producer.Pipeline(self.store, self.root / "repeated-restore",
+                                    today=lambda: fixtures.TODAY, client=self.client)
+        path = resumed._raw_path(day, {"version": 1}, latest=True)
+        self.assertEqual(resumed._restored_snapshots[str(day)][0], 1)
+        shutil.rmtree(path.parent)
+        self.store.datasets[slug][2] = dict(files)
+        self.store.datasets[slug][2].pop("publication.json")
+        resumed.state["raw_days"][str(day)]["version"] = 2
+        resumed._raw_path(day, {"version": 2}, latest=True)
+        self.assertEqual(resumed._restored_versions[str(day)], 2)
+        self.assertNotIn(str(day), resumed._restored_snapshots)
+        with self.quiet():
+            resumed.process_day(day)
+        self.assertEqual(resumed.state["raw_days"][str(day)]["version"], 3)
+
+    def test_database_digest_detects_same_count_value_and_coverage_view_changes(self):
+        path = self.root / "digest.sqlite3"
+        with sqlite3.connect(path) as db:
+            db.executescript("""
+                PRAGMA user_version=3;
+                CREATE TABLE records (market TEXT, page INTEGER, raw_size TEXT,
+                                      PRIMARY KEY(market,page)) WITHOUT ROWID;
+                INSERT INTO records VALUES ('market',1,'10'),('market',2,'20');
+                CREATE VIEW updown_discovery_status AS SELECT 1 AS listing_complete;
+            """)
+        original = producer.Pipeline._database_digest(path)
+        with sqlite3.connect(path) as db:
+            db.execute("UPDATE records SET raw_size='11' WHERE page=1")
+        self.assertNotEqual(original, producer.Pipeline._database_digest(path))
+        with sqlite3.connect(path) as db:
+            db.execute("UPDATE records SET raw_size='10' WHERE page=1")
+        self.assertEqual(original, producer.Pipeline._database_digest(path))
+        with sqlite3.connect(path) as db:
+            db.executescript("DROP VIEW updown_discovery_status; "
+                             "CREATE VIEW updown_discovery_status AS SELECT 0 AS listing_complete;")
+        self.assertNotEqual(original, producer.Pipeline._database_digest(path))
 
     def test_collection_deadline_leaves_publication_time(self):
         self.assertEqual(self.pipeline.client.deadline, self.pipeline.stop_at)
@@ -158,6 +254,7 @@ class RecoveryTests(unittest.TestCase):
             self.assertFalse(self.pipeline._checkpoint_active())
             producer.collector.discover_series(db, self.client, fixtures.SERIES, day, fixtures.TODAY)
             self.assertTrue(self.pipeline._checkpoint_active())
+            self.assertEqual(list((self.root / 'work/checkpoints').iterdir()), [])
             publications = len(self.store.published)
             self.assertFalse(self.pipeline._checkpoint_active())
             self.assertEqual(len(self.store.published), publications)
@@ -265,7 +362,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.pipeline.state['history']['next_date_utc'], str(cursor))
         self.assertEqual(self.pipeline.state['repair_queue'], [])
 
-    def test_structural_metadata_error_is_saved_and_does_not_advance_history(self):
+    def test_structural_metadata_error_is_saved_as_gap_and_advances_history(self):
         day = fixtures.YESTERDAY - timedelta(days=1)
         self.seed_history(day)
         self.pipeline.attempted.add(str(fixtures.YESTERDAY))
@@ -280,33 +377,206 @@ class RecoveryTests(unittest.TestCase):
             return payload
 
         self.client.get = bad
-        with self.quiet(), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(producer.DiscoveryBlocked):
+        with self.quiet(), contextlib.redirect_stderr(io.StringIO()):
             self.pipeline.process_day(day, historical=True)
-        self.assertEqual(self.pipeline.state['history']['next_date_utc'], str(day))
+        self.assertEqual(self.pipeline.state['history']['next_date_utc'], str(day + timedelta(days=1)))
+        self.assertIn(str(day), self.pipeline.state['history']['gaps'])
         raw = json.loads(self.latest_files(f'pm-updown-raw-{day}')['collection_status.json'])
         self.assertEqual(raw['status'], 'incomplete')
         self.assertTrue(raw['structural_errors'])
         self.assertIsNotNone(raw['error'])
         self.assertNotIn('index.json', self.latest_files('pm-updown-analysis-2026-11'))
 
+    def install_bad_market(self, day):
+        """One malformed trade among 101 real collector inputs, switchable on retry."""
+        original = self.client.get
+        control = {'broken': True, 'calls': []}
+
+        def get(url, params):
+            if url == producer.core.TRADES_URL and '#' in params['condition']:
+                condition = params['condition']
+                control['calls'].append(condition)
+                payload = original(url, {**params, 'condition': condition.split('#')[0]})
+                if control['broken'] and condition.endswith('#050'):
+                    payload['data'][0]['size'] = 'invalid-size'
+                return payload
+            payload = original(url, params)
+            if url == producer.collector.GAMMA_EVENTS_KEYSET and params['end_date_min'].startswith(str(day)):
+                event = payload['events'][0]
+                base = event['markets'][0]
+                event['markets'] = [dict(copy.deepcopy(base), slug=f"{base['slug']}-contract-{index:03}",
+                                         conditionId=f'{day}#{index:03}') for index in range(101)]
+            return payload
+
+        self.client.get = get
+        return control
+
+    def test_bad_historical_market_preserves_100_of_101_then_collects_next_day(self):
+        bad_day = fixtures.YESTERDAY - timedelta(days=2)
+        good_day = bad_day + timedelta(days=1)
+        self.seed_history(bad_day)
+        self.pipeline.state['history']['target_end_date_utc'] = str(good_day)
+        self.pipeline.state['raw_days'][str(fixtures.YESTERDAY)] = {'status': 'complete'}
+        self.pipeline.state['repair_queue'] = [str(bad_day)]
+        control = self.install_bad_market(bad_day)
+        with self.quiet(), contextlib.redirect_stderr(io.StringIO()):
+            self.pipeline.run()
+        raw = json.loads(self.latest_files(f'pm-updown-raw-{bad_day}')['collection_status.json'])
+        self.assertEqual(raw['status'], 'incomplete')
+        self.assertEqual(raw['coverage']['discovered_markets'], 101)
+        self.assertEqual(raw['coverage']['completed_markets'], 100)
+        self.assertEqual(raw['coverage']['is_complete'], 0)
+        self.assertTrue(raw['discovery_errors'])
+        self.assertTrue(raw['structural_errors'])
+        self.assertEqual(len(control['calls']), 101)
+        self.assertEqual(self.pipeline.processed, 2)
+        self.assertEqual(self.pipeline.state['repair_queue'], [])
+        month = self.latest_files('pm-updown-analysis-2026-11')
+        self.assertNotIn(f'daily_{bad_day}.json', month)
+        self.assertEqual(json.loads(month[f'daily_{good_day}.json'])['status'], 'complete')
+        saved = json.loads(month['progress.json'])
+        self.assertEqual(saved['history']['next_date_utc'], str(good_day + timedelta(days=1)))
+        self.assertIn(str(bad_day), saved['history']['gaps'])
+
+        # A new session retries only the failed market once and stops despite
+        # the permanent gap. Previously completed markets retain their pages.
+        control['calls'].clear()
+        resumed = producer.Pipeline(self.store, self.root / 'still-broken',
+                                    today=lambda: fixtures.TODAY, client=self.client)
+        with self.quiet(), contextlib.redirect_stderr(io.StringIO()):
+            resumed.run()
+        self.assertEqual(control['calls'], [f'{bad_day}#050'])
+        self.assertEqual(resumed.processed, 1)
+        self.assertIn(str(bad_day), resumed.state['history']['gaps'])
+
+        # Correcting the upstream record resolves the persisted gap without
+        # rewinding the scan or collecting the other 100 markets again.
+        control.update(broken=False, calls=[])
+        healed = producer.Pipeline(self.store, self.root / 'fixed-market',
+                                   today=lambda: fixtures.TODAY, client=self.client)
+        with self.quiet():
+            healed.run()
+        self.assertEqual(control['calls'], [f'{bad_day}#050'])
+        self.assertNotIn(str(bad_day), healed.state['history']['gaps'])
+        self.assertEqual(healed.state['history']['next_date_utc'], str(good_day + timedelta(days=1)))
+        raw = json.loads(self.latest_files(f'pm-updown-raw-{bad_day}')['collection_status.json'])
+        self.assertEqual(raw['status'], 'complete')
+        self.assertEqual(raw['structural_errors'], [])
+        self.assertEqual(raw['discovery_errors'], [])
+        self.assertEqual(raw['coverage']['completed_markets'], 101)
+        self.assertIn(f'daily_{bad_day}.json', self.latest_files('pm-updown-analysis-2026-11'))
+
+    def test_bad_historical_day_publication_failure_stops_before_next_date(self):
+        for failing_stage in ('raw', 'analysis'):
+            with self.subTest(failing_stage=failing_stage):
+                # Each subcase needs independent cloud and local state.
+                self.setUp()
+                bad_day = fixtures.YESTERDAY - timedelta(days=2)
+                good_day = bad_day + timedelta(days=1)
+                self.seed_history(bad_day)
+                self.pipeline.state['history']['target_end_date_utc'] = str(good_day)
+                self.pipeline.state['raw_days'][str(fixtures.YESTERDAY)] = {'status': 'complete'}
+                self.pipeline.state['repair_queue'] = [str(bad_day)]
+                self.pipeline.save()
+                self.install_bad_market(bad_day)
+                original = self.store.publish
+
+                def publish(slug, directory, **kwargs):
+                    if slug.startswith(f'pm-updown-{failing_stage}-'):
+                        raise producer.KaggleError('Cannot confirm publication')
+                    return original(slug, directory, **kwargs)
+
+                self.store.publish = publish
+                with self.quiet(), contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaisesRegex(producer.KaggleError, 'Cannot confirm'):
+                    self.pipeline.run()
+                self.assertNotIn(str(good_day), self.pipeline.attempted)
+                self.assertNotIn(f'pm-updown-raw-{good_day}', self.store.datasets)
+                self.assertTrue((self.root / 'work/raw' / str(bad_day) / 'data.sqlite3').is_file())
+                saved = json.loads(self.latest_files('pm-updown-analysis-2026-11')['progress.json'])
+                self.assertEqual(saved['history']['next_date_utc'], str(bad_day))
+                self.assertEqual(saved['repair_queue'], [str(bad_day)])
+                if failing_stage == 'raw':
+                    self.assertEqual(self.pipeline.state['history']['next_date_utc'], str(bad_day))
+                    self.assertNotIn(str(bad_day), self.pipeline.state['raw_days'])
+
     def test_uncertain_checkpoint_failure_does_not_blindly_publish_again(self):
+        day = fixtures.YESTERDAY - timedelta(days=1)
+        self.seed_history(day)
+        self.pipeline.attempted.add(str(fixtures.YESTERDAY))
         elapsed = self.elapsed_clock()
         self.client.after_wallet = lambda _: elapsed.__setitem__(0, 11)
         original = self.store.publish
         calls = []
+        marker = {'schema_version': 1, 'dataset': self.store.ref(f'pm-updown-raw-{day}'),
+                  'publication_id': 'unknown-checkpoint'}
 
         def publish(slug, directory, **kwargs):
             if slug.startswith('pm-updown-raw-'):
-                calls.append(slug)
+                calls.append(directory)
+                producer.write_json(directory / 'publication.json', marker)
                 raise producer.KaggleError('Publication outcome remains unknown')
             return original(slug, directory, **kwargs)
 
         self.store.publish = publish
         with self.quiet(), self.assertRaises(producer.KaggleError):
-            self.pipeline.process_day(fixtures.YESTERDAY)
+            self.pipeline.process_day(day, historical=True)
         self.assertEqual(len(calls), 1)
-        self.assertTrue((self.root / 'work/raw' / str(fixtures.YESTERDAY) / 'data.sqlite3').exists())
-        self.assertNotIn(str(fixtures.YESTERDAY), self.pipeline.state['raw_days'])
+        active = self.root / 'work/raw' / str(day) / 'data.sqlite3'
+        self.assertTrue(active.exists())
+        self.assertNotIn(str(day), self.pipeline.state['raw_days'])
+        self.assertEqual(self.pipeline.state['history']['next_date_utc'], str(day))
+        folder = calls[0]
+        self.assertEqual(list((self.root / 'work/checkpoints').iterdir()), [folder])
+        self.assertEqual(json.loads((folder / 'publication.json').read_text()), marker)
+        self.assertEqual(json.loads((folder / 'collection_status.json').read_text())['status'], 'incomplete')
+        with contextlib.closing(sqlite3.connect(active)) as work, \
+                contextlib.closing(sqlite3.connect(folder / 'data.sqlite3')) as snapshot:
+            self.assertEqual(list(snapshot.iterdump()), list(work.iterdump()))
+
+    def test_confirmed_checkpoint_survives_monthly_failure_and_new_session_resumes_raw(self):
+        day = fixtures.YESTERDAY - timedelta(days=1)
+        slug = f'pm-updown-raw-{day}'
+        self.seed_history(day)
+        self.pipeline.save()
+        self.pipeline.attempted.add(str(fixtures.YESTERDAY))
+        elapsed = self.elapsed_clock()
+        self.client.after_wallet = lambda _: elapsed.__setitem__(0, 11)
+        original = self.store.publish
+        checkpoints = []
+
+        def publish(name, directory, **kwargs):
+            if name.startswith('pm-updown-analysis-'):
+                raise producer.KaggleError('Monthly publication confirmation failed')
+            producer.write_json(directory / 'publication.json', {
+                'schema_version': 1, 'dataset': self.store.ref(name), 'publication_id': 'confirmed-raw'})
+            checkpoints.append(directory)
+            return original(name, directory, **kwargs)
+
+        self.store.publish = publish
+        with self.quiet(), self.assertRaisesRegex(producer.KaggleError, 'Monthly'):
+            self.pipeline.process_day(day, historical=True)
+        self.assertEqual(self.store.version(slug), 1)
+        self.assertEqual(len(checkpoints), 1)
+        self.assertTrue((checkpoints[0] / 'publication.json').is_file())
+        self.assertTrue((checkpoints[0] / 'data.sqlite3').is_file())
+        self.assertEqual(self.pipeline.state['history']['next_date_utc'], str(day))
+        saved = json.loads(self.latest_files('pm-updown-analysis-2026-11')['progress.json'])
+        self.assertNotIn(str(day), saved['raw_days'])
+
+        self.store.publish = original
+        self.client.after_wallet = None
+        self.client.trades.clear()
+        resumed = producer.Pipeline(self.store, self.root / 'resumed-after-month-failure',
+                                    today=lambda: fixtures.TODAY, client=self.client)
+        resumed.attempted.add(str(fixtures.YESTERDAY))
+        self.assertNotIn(str(day), resumed.state['raw_days'])
+        with self.quiet():
+            resumed.process_day(day, historical=True)
+        self.assertIn((slug, 1), self.store.restores)
+        self.assertEqual(self.client.trades, [])
+        self.assertEqual(resumed.state['raw_days'][str(day)]['status'], 'complete')
+        self.assertEqual(resumed.state['history']['next_date_utc'], str(day + timedelta(days=1)))
 
     def test_setup_elapsed_time_is_included_before_collection(self):
         pipeline = producer.Pipeline(self.store, self.root / 'late-start', today=lambda: fixtures.TODAY,
@@ -334,6 +604,90 @@ class RecoveryTests(unittest.TestCase):
         again = producer.Pipeline(self.store, self.root / 'again', today=lambda: fixtures.TODAY,
                                   client=self.client)
         self.assertEqual(again.state['repair_queue'], [])
+
+
+class ProducerEntrypointTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.work_dir = Path(self.temp.name) / 'work'
+        self.client = Mock()
+        self.pipeline = Mock()
+        self.pipeline.state = {'history': {'next_date_utc': '2025-07-07'}}
+        patches = contextlib.ExitStack()
+        self.addCleanup(patches.close)
+        for target, value in ((producer.core, 'Client'), (producer, 'KaggleStore'),
+                              (producer, 'Pipeline')):
+            mocked = patches.enter_context(patch.object(target, value))
+            if value == 'Client':
+                mocked.return_value = self.client
+            elif value == 'Pipeline':
+                mocked.return_value = self.pipeline
+                self.pipeline_factory = mocked
+        original_is_dir = Path.is_dir
+        patches.enter_context(patch.object(Path, 'is_dir',
+            lambda path: str(path) == '/kaggle/working' or original_is_dir(path)))
+        patches.enter_context(patch.object(producer.signal, 'signal'))
+        patches.enter_context(patch('polymarket_kaggle_migration.migrate_existing'))
+
+    def run_main(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return producer.main(['--work-dir', str(self.work_dir)])
+
+    def summary(self):
+        return json.loads((self.work_dir / 'run-summary.json').read_text())
+
+    def test_publication_failure_preserves_redacted_summary_without_retry(self):
+        self.pipeline.prepare_cloud_text.side_effect = producer.KaggleError(
+            'HTTP 403 https://example.test/status?token=private-value')
+        self.assertEqual(self.run_main(), 1)
+        summary = self.summary()
+        self.assertEqual(summary['status'], 'failed')
+        self.assertEqual(summary['resume_history_date'], '2025-07-07')
+        self.assertIn('HTTP 403', summary['error'])
+        self.assertNotIn('private-value', summary['error'])
+        self.assertIn('ended_at_utc', summary)
+        self.pipeline.prepare_cloud_text.assert_called_once_with()
+        self.pipeline.run.assert_not_called()
+        self.pipeline.save.assert_not_called()
+        self.client.close.assert_called_once_with()
+
+    def test_initial_restore_failure_still_retains_failure_summary(self):
+        self.pipeline_factory.side_effect = producer.KaggleError('Initial restore unavailable')
+        self.assertEqual(self.run_main(), 1)
+        self.assertEqual(self.summary()['status'], 'failed')
+        self.assertIn('Initial restore unavailable', self.summary()['error'])
+        self.assertNotIn('resume_history_date', self.summary())
+        self.client.close.assert_called_once_with()
+
+    def test_rate_limit_is_a_recorded_pause_without_extra_publication(self):
+        self.pipeline.run.side_effect = producer.core.RateLimitError('Sustained HTTP 429')
+        self.assertEqual(self.run_main(), 0)
+        summary = self.summary()
+        self.assertEqual(summary['status'], 'rate_limited')
+        self.assertIn('RateLimitError', summary['error'])
+        self.assertIn('ended_at_utc', summary)
+        self.pipeline.save.assert_not_called()
+        self.client.close.assert_called_once_with()
+
+    def test_unexpected_failure_is_reraised_after_retaining_summary(self):
+        failure = RuntimeError('Unexpected statistics failure')
+        self.pipeline.run.side_effect = failure
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_main()
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(self.summary()['status'], 'failed')
+        self.assertIn('Unexpected statistics failure', self.summary()['error'])
+        self.pipeline.save.assert_not_called()
+        self.client.close.assert_called_once_with()
+
+    def test_final_publication_failure_is_not_reported_as_complete(self):
+        self.pipeline.save.side_effect = producer.KaggleError('Final month confirmation failed')
+        self.assertEqual(self.run_main(), 1)
+        self.assertEqual(self.summary()['status'], 'failed')
+        self.assertIn('Final month confirmation failed', self.summary()['error'])
+        self.pipeline.save.assert_called_once_with()
+        self.client.close.assert_called_once_with()
 
 
 if __name__ == '__main__':

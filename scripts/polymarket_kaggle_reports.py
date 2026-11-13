@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Read completed Kaggle statistics and render local publication assets without raw data."""
+"""Read completed Kaggle statistics and generate X and LinkedIn text without raw data."""
 
 from __future__ import annotations
 
 import argparse
-import copy
 import fcntl
 import hashlib
 import json
@@ -127,94 +126,70 @@ def validate_bundle(bundle: dict, expected: ReportPeriod | None = None) -> Repor
     return period
 
 
-def _existing_artifacts(output_dir: Path, period: ReportPeriod, distribution: dict) -> list[Path]:
-    from polymarket_updown_price_distribution import statistics_stem
+def _existing_artifacts(output_dir: Path, period: ReportPeriod) -> list[Path]:
     paths = list(output_dir.glob(period.stem + ".*"))
     paths += list(output_dir.glob(period.stem + "_*"))
-    paths += list(output_dir.glob(statistics_stem(distribution) + ".*"))
     return sorted(set(paths))
 
 
-def _write_daily(output_dir: Path, period: ReportPeriod, payload: dict, distribution: dict) -> dict:
-    import polymarket_updown_poster as daily
-    from polymarket_updown_bot_price_poster import write_outputs
-    from polymarket_updown_buy_metrics import BASIS, event_summary
-    from polymarket_updown_captions import write_sidecars
-    from polymarket_updown_distribution_assets import DAILY_CHART_LAYOUT_VERSION, validate_distribution
-
-    validate_distribution(distribution)
-    data = daily.PosterData(period.start, payload["current"], payload.get("previous"))
-    values = daily.display_values(data, distribution)
-    tweet = daily.render_tweet(data, distribution)
-    if not tweet.isascii() or len(tweet) > 280:
-        raise ValueError("Daily tweet exceeds the existing X text budget")
-    image, _ = daily.render_poster(values)
-    payload.update(display=values, copy_version=values["copy_version"],
-                   buy_event_summary=event_summary(distribution), bot_panel_basis=BASIS)
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="." + period.stem + ".", dir=output_dir.parent) as temporary:
-        stage = Path(temporary)
-        paths = write_outputs(distribution, stage)
-        payload["trade_distribution"] = {
-            key: distribution[key] for key in ("date_utc", "market_scope", "series_count", "count_unit",
-                                               "price_basis", "notional_basis")
-        }
-        payload["trade_distribution"].update(
-            json_file=paths["json"].name,
-            json_sha256=hashlib.sha256(paths["json"].read_bytes()).hexdigest(),
-            image_file=paths["png"].name,
-            image_sha256=hashlib.sha256(paths["png"].read_bytes()).hexdigest(),
-            layout_version=DAILY_CHART_LAYOUT_VERSION,
-        )
-        source = stage / (period.stem + ".json")
-        source.write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-        image.save(stage / (period.stem + ".png"), format="PNG")
-        (stage / (period.stem + "_tweet.md")).write_text(tweet, encoding="utf-8")
-        manifest = write_sidecars(source)
-        for key in ("source_path", "image_path", "english_path"):
-            manifest[key] = str(output_dir / Path(manifest[key]).name)
-        for item in manifest["platforms"].values():
-            item["image_paths"] = [str(output_dir / Path(path).name) for path in item["image_paths"]]
-        manifest_path = stage / (period.stem + "_publish.json")
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for path in sorted(stage.iterdir(), key=lambda path: (path == manifest_path, path.name)):
-            path.replace(output_dir / path.name)
-    return {"source": output_dir / (period.stem + ".json"),
-            "image": output_dir / (period.stem + ".png"),
-            "tweet": output_dir / (period.stem + "_tweet.md"),
-            "manifest": output_dir / (period.stem + "_publish.json")}
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def render_bundle(bundle: dict, output_dir: Path, *, source_reference: dict | None = None) -> dict:
-    """Render the existing assets from cloud statistics; never open any raw SQLite database."""
+    """Write a text-only package from one completed cloud result; never open SQLite."""
+    from polymarket_social_text import render_text
+
     period = validate_bundle(bundle)
     output_dir = Path(output_dir).resolve()
-    distribution = bundle["distribution"]
-    existing = _existing_artifacts(output_dir, period, distribution)
-    if existing:
+    if _existing_artifacts(output_dir, period):
         raise ExistingArtifacts("Preserved existing local assets for " + period.identity)
-    payload = copy.deepcopy(bundle["payload"])
-    payload["kaggle_source"] = {"source_versions": bundle["source_versions"], **(source_reference or {})}
-    if period.kind == "daily":
-        return _write_daily(output_dir, period, payload, distribution)
-
-    from polymarket_updown_captions import write_sidecars
-    from polymarket_updown_period_package import write_package
-    current, previous = payload["current"], payload.get("previous")
-    if period.kind == "weekly":
-        import polymarket_updown_weekly_poster as poster
-        payload["display"] = poster.display_values(current, previous, distribution)
-        image, _ = poster.render(current, previous, distribution)
-        tweet = poster.render_tweet(current, previous, distribution)
-    else:
-        import polymarket_updown_monthly_poster as poster
-        scope = payload.get("scope_changes", [])
-        payload["display"] = poster.display_values(current, previous, distribution)
-        image, _ = poster.render(current, previous, scope, distribution)
-        tweet = poster.render_tweet(current, previous, scope, distribution)
-    return write_package(output_dir, period.stem, payload, image, tweet, distribution,
-                         sidecars_writer=write_sidecars)
+    reference = source_reference or bundle.get("source_reference") or {}
+    rendered = render_text(bundle, reference)
+    source_name = period.stem + ".json"
+    manifest_name = period.stem + "_publish.json"
+    display_target = (f"{period.start}_{period.end - timedelta(days=1)}"
+                      if period.kind == "weekly" else period.target)
+    manifest = {
+        "schema_version": 2, "format": "text", "kind": period.kind,
+        "target_utc": display_target, "start_date_utc": str(period.start),
+        "end_date_utc_exclusive": str(period.end), "date_basis": "market_end_utc",
+        "source_path": str(output_dir / source_name), "source_reference": reference,
+        "source_versions": bundle["source_versions"], "platforms": {},
+    }
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="." + period.stem + ".", dir=output_dir.parent) as temporary:
+        stage = Path(temporary)
+        (stage / source_name).write_text(
+            json.dumps({**bundle, "source_reference": reference}, ensure_ascii=False,
+                       indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        manifest["source_sha256"] = _sha256(stage / source_name)
+        for platform in ("x", "linkedin"):
+            content = rendered[platform]
+            posts = content["posts"] if platform == "x" else [content["body"]]
+            names = ([f"{period.stem}_x_{number:02}.txt" for number in range(1, len(posts) + 1)]
+                     if platform == "x" else [period.stem + "_linkedin.txt"])
+            for name, body in zip(names, posts):
+                (stage / name).write_text(body, encoding="utf-8")
+            item = {"language": "en", "title": "", "body": posts[0],
+                    "text_paths": [str(output_dir / name) for name in names],
+                    "text_sha256s": [_sha256(stage / name) for name in names]}
+            if platform == "x":
+                item["posts"] = posts
+            identity = {"title": "", "posts": posts} if platform == "x" else {"title": "", "body": posts[0]}
+            item["content_sha256"] = hashlib.sha256(json.dumps(
+                identity, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            manifest["platforms"][platform] = item
+        manifest_path = stage / manifest_name
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Publish the manifest last so consumers only see complete text packages.
+        for path in sorted(stage.iterdir(), key=lambda path: (path == manifest_path, path.name)):
+            path.replace(output_dir / path.name)
+    return {"source": output_dir / source_name,
+            "x": [Path(path) for path in manifest["platforms"]["x"]["text_paths"]],
+            "linkedin": Path(manifest["platforms"]["linkedin"]["text_paths"][0]),
+            "manifest": output_dir / manifest_name}
 
 
 def fetch_result(store, period: ReportPeriod, download_dir: Path) -> tuple[dict, dict]:
@@ -269,7 +244,7 @@ def run_pending(store, state_path: Path, output_dir: Path, *, kind: str = "all",
                 with tempfile.TemporaryDirectory(prefix="kaggle-report-") as temporary:
                     bundle, reference = fetch_result(store, period, Path(temporary))
                     paths = render_bundle(bundle, output_dir, source_reference=reference)
-                item.update(status="generated", source=reference,
+                item.update(status="generated", format="text", source=reference,
                             manifest=str(paths["manifest"]), generated_at=now.isoformat())
                 item.pop("last_error", None)
                 print("Generated " + identity, flush=True)
@@ -290,15 +265,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kind", choices=("all", *KINDS), default="all")
     parser.add_argument("--owner", default=DEFAULT_OWNER)
     parser.add_argument("--state-file", type=Path, default=ROOT / "outputs/kaggle_reports/state.json")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "outputs/posters")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "outputs/social")
     parser.add_argument("--rollout-date", type=date.fromisoformat,
                         help="Initial JST deployment date; existing state retains its original date")
     parser.add_argument("--result-json", type=Path, help="Render a downloaded completed result without network access")
+    parser.add_argument("--source-dataset", help="Analysis dataset owner/slug for an offline result")
+    parser.add_argument("--source-version", type=int, help="Fixed analysis Dataset version for an offline result")
     args = parser.parse_args(argv)
+    if bool(args.source_dataset) != (args.source_version is not None):
+        parser.error("--source-dataset and --source-version must be supplied together")
+    if args.source_dataset and not args.result_json:
+        parser.error("--source-dataset and --source-version apply only to --result-json")
+    if args.source_version is not None and args.source_version < 1:
+        parser.error("--source-version must be positive")
     if args.result_json:
         try:
             bundle = json.loads(args.result_json.read_text(encoding="utf-8"))
-            paths = render_bundle(bundle, args.output_dir)
+            reference = ({"dataset": args.source_dataset, "version": args.source_version,
+                          "filename": args.result_json.name} if args.source_dataset else None)
+            paths = render_bundle(bundle, args.output_dir, source_reference=reference)
             print("Generated " + str(paths["manifest"]))
         except (ValueError, KeyError, TypeError, OSError) as exc:
             print(str(exc), file=sys.stderr)

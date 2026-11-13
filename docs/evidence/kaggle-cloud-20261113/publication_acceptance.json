@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "dataset": "qiuqiuslowchillchill/qa-publication-20261113-031558",
+  "private": true,
+  "first_version": 1,
+  "reconciled_version": 2,
+  "publication_id": "ee0bf1407a994843adc55d9cc4cb01ad",
+  "mutations": [
+    "create",
+    "version"
+  ],
+  "create_403_recovery": true,
+  "version_403_stops_without_retry": true,
+  "injected_status_failures": 2,
+  "diagnostic": "KaggleError: Cannot determine Dataset publication result; keep working files; dataset=qiuqiuslowchillchill/qa-publication-20261113-031558 expected_version=2 publication_id=ee0bf1407a994843adc55d9cc4cb01ad submitted=True consecutive_read_failures=1; dataset=qiuqiuslowchillchill/qa-publication-20261113-031558 expected_version=2 publication_id=ee0bf1407a994843adc55d9cc4cb01ad phase=accepted submitted=True journal=[Kaggle output path omitted] <- KaggleError: Cannot determine Dataset publication result; keep working files; dataset=qiuqiuslowchillchill/qa-publication-20261113-031558 expected_version=2 publication_id=ee0bf1407a994843adc55d9cc4cb01ad submitted=True consecutive_read_failures=1 <- KaggleError: Kaggle datasets status exited 1: HTTP 403 Forbidden (injected QA read failure)",
+  "journal_retained_for_audit": "Retained in the Kaggle run output; absolute working path omitted.",
+  "production_writes": 0,
+  "evidence_redactions": [
+    "Absolute journal path only; publication identity and diagnostic cause preserved."
+  ]
+}

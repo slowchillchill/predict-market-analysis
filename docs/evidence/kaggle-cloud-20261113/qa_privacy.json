@@ -1,0 +1,24 @@
+{
+  "evidence_kind": "independent_read_only_sdk_metadata_observation",
+  "checked_date_utc": "2026-11-13",
+  "operation": "GetDatasetMetadata",
+  "datasets": [
+    {
+      "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-raw-2026-11-09",
+      "isPrivate": true
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-analysis-2026-11",
+      "isPrivate": true
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/qa-cloud-20261113-autonomy-acceptance",
+      "isPrivate": true
+    },
+    {
+      "dataset": "qiuqiuslowchillchill/qa-publication-20261113-031558",
+      "isPrivate": true
+    }
+  ],
+  "production_writes": 0
+}

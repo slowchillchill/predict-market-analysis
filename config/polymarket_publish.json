@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "active_platforms": ["x", "linkedin"],
   "accounts": {
     "x": {
       "handle": "slowchillchill",
@@ -8,18 +9,9 @@
     "linkedin": {
       "name": "邱秋",
       "url": "https://www.linkedin.com/in/qiuqiuchillchill/"
-    },
-    "douyin": {
-      "name": "slowchillchill",
-      "douyin_id": "1350887770",
-      "creator_url": "https://creator.douyin.com/"
-    },
-    "tiktok": {
-      "handle": "slowchillchill",
-      "url": "https://www.tiktok.com/@slowchillchill"
     }
   },
-  "music": {
+  "legacy_image_music": {
     "douyin": {
       "required": true,
       "on_unavailable": "select_available",

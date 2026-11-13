@@ -129,7 +129,7 @@ print(Decimal(current['volume_micro_usdc']) / Decimal(1_000_000))
 
 采集按日运行，先处理新日期，再从较早日期补采历史。**历史范围尚未补齐。**某日或某月的数据集存在，不表示整段历史已经完整；月度分析库名称也不表示当月所有日期或完整月报已就绪。采集安排不保证每天在某个精确时刻发布。
 
-本轮恢复先处理新日期，再重新处理 **2025-03-15 至 2025-04-02 已有的 19 个未完成日期**。其中 18 日已完成全部交易分页：6 日生成正式报告，12 日保留重建错误；3 月 31 日仍无法取得官方市场目录。历史游标已保存为 **2025-04-03**，后续每日运行优先采集新日期，再从这里继续补采。未解决的日期保留为缺口，不标为完成，也不填零。
+11 月 11 日的生产恢复任务（Notebook v13）先处理新日期，再重新处理 **2025-03-15 至 2025-04-02 已有的 19 个未完成日期**。当时其中 18 日已完成全部交易分页：6 日生成正式报告，12 日保留重建错误；3 月 31 日仍无法取得官方市场目录，历史游标保存为 **2025-04-03**。11 月 13 日生产 v24 验收后，游标已推进至 **2025-09-11**，见[当前验收记录](docs/kaggle_cloud_autonomy_20261113.md)。后续每日运行优先采集新日期，再从云端最新已确认的游标继续。未解决的日期保留为缺口，不标为完成，也不填零。
 
 恢复机制默认每 **30 分钟**检查是否有新的已提交采集状态，仅在有变化时发布 `incomplete` 检查点；采集运行 **11 小时 30 分钟**后停止，给 12 小时会话上限预留发布时间。这些是可调整的工程参数，不是 Kaggle 使用规则或防封阈值。它不在每页后上传；中断后从最后**确认成功**的数据集版本恢复，上传失败或强制终止可能丢失超过 30 分钟的未发布进度。没有变化的月度快照也不反复发布。详情见 [恢复操作说明](docs/kaggle_migration.md)。
 
@@ -304,11 +304,11 @@ v2 实现版本 [`c16edb8`](https://github.com/slowchillchill/predict-market-ana
 
 ## v3 恢复验收与当前部署
 
-本次恢复修复通过 **420 项回归测试**。Kaggle 跨进程续采保留了前两个已保存分页的原始十进制值、页序和组号，持久映射保持连续。真实上传后模拟客户端 HTTP 499，分别验证了新建和更新发布的结果核对。已验证的现代样本共 **3,209 行、1,200 组**，实际从 v2 升级为 v3 后，通过正式统计导出和最终三表检查。
+此前 v3 恢复修复通过 **420 项回归测试**。Kaggle 跨进程续采保留了前两个已保存分页的原始十进制值、页序和组号，持久映射保持连续。真实上传后模拟客户端 HTTP 499，分别验证了新建和更新发布的结果核对。已验证的现代样本共 **3,209 行、1,200 组**，实际从 v2 升级为 v3 后，通过正式统计导出和最终三表检查。
 
 历史样本完成 **500 页、4,996 行**，但其中一个交易组未满足原有 BUY 重建条件，因此没有生成正式报告。将相同记录的分组列一一替换为旧键后，仍出现相同错误，其他交易字段未变。这本身不能证明上游数据错误。原始快照继续保留 `incomplete` 和错误说明；恢复验收通过不表示每个历史日期都能成功出报。
 
-已完成的[生产恢复版本 13](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=368303307)使用 [`9c7578b`](https://github.com/slowchillchill/predict-market-analysis/tree/9c7578b09a788ed0542ffe5ea9c3b78c17f2c04a)。11 月 10 日已完成：[原始数据集第 3 版](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-10/versions/3)包含 3,298 个完成市场和 4,741 页；[分析数据集第 100 版](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/100)的正式日报已用于生成本地海报。原有 19 个历史日期中，6 日正式完成、12 日保留重建缺口、1 日无法取得市场目录。Notebook 版本 15 保持相同源码，已移除临时日期数量上限；原生 Daily 已安排从 11 月 12 日起运行，本地报表定时器也已恢复。版本和剩余缺口详见[部署记录](docs/kaggle_migration.md)。
+11 月 13 日的云端修复及合并前审查补修通过 **509 项测试**。生产 Notebook 第 23 版完成 11 月 12 日的 **3,295/3,295 个市场、4,605 页**，并基于已确认的月库 v285 生成文字稿。全新第 24 版会话复用此前未确认的 9 月 10 日 raw v1，在月库 v290 补齐引用，将历史游标推进至 9 月 11 日，并保留 100/101 的覆盖缺口；已有文字稿未改变。正式第 25 版使用 `RUN_ARGUMENTS=[]` 和 Kaggle 平台凭据。Daily 已恢复，开始日期为 11 月 13 日；本地四个报表定时器已停用。首次恢复后的 Scheduled v26 已核对启动与云端恢复，整次运行结果尚待验收。准确版本与证据见[本次修复记录](docs/kaggle_cloud_autonomy_20261113.md)。
 
 为了复现结果，请同时记录**数据集名称与版本、日期范围、原始库格式版本、金额方法和所用代码提交**。分析结果中的 `source_versions` 可用于定位输入；固定版本后再比较研究结果，避免混用历史修订前后的统计。
 
@@ -318,4 +318,6 @@ v2 实现版本 [`c16edb8`](https://github.com/slowchillchill/predict-market-ana
 - 整理数据采用 CC0 1.0，声明仅适用于贡献者拥有的权利。数据来自 [Polymarket Gamma API](https://gamma-api.polymarket.com) 和 [Data API](https://data-api.polymarket.com)，仍应查看 [上游来源条款](https://polymarket.com/tos)。软件许可不授予额外的第三方数据或服务权利。
 - 发现缺口、字段问题或口径差异时，请提交 Issue，并提供数据集版本、日期、市场标识、最小 SQL 或复现步骤及预期结果。请勿提交访问凭据。
 
-进一步阅读：[市场发现与日报](docs/updown_daily.md)、[BUY 分布方法](docs/updown_bot_price_poster.md)、[海报指标](docs/updown_poster.md)、[部署与维护](docs/kaggle_migration.md)。
+进一步阅读：[市场发现与日报](docs/updown_daily.md)、[BUY 分布方法](docs/updown_bot_price_poster.md)、[X 与 LinkedIn 文字稿生成](docs/updown_publishing.md)、[部署与维护](docs/kaggle_migration.md)。
+
+云端生产程序从已确认的 Kaggle 统计 JSON 生成英文 X 串联推文和 LinkedIn 动态。每个月度分析 Dataset 通过 `social.archive.json` 保存文字稿和生成状态，新会话先恢复已有内容，再生成缺少的周期。本地 `outputs/social/` 入口保留用于预览。LinkedIn 使用纵向指标块。旧图文和已发布记录保留；实际发布由用户另行签发给发布 AGENT。
