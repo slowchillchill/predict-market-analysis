@@ -639,7 +639,14 @@ class Pipeline:
         legacy_error = discovery.pop("error", None)
         if legacy_error:
             errors[legacy_error["series_slug"]] = legacy_error
-        for series in collector.TARGET_SERIES:
+        series_order = list(collector.TARGET_SERIES)
+        resumed_series = discovery.get("in_progress", {}).get("series_slug")
+        if resumed_series in series_order and resumed_series not in first_ends:
+            # Finish the saved series before another series can overwrite the
+            # single pagination cursor, including when retrying prior errors.
+            series_order.remove(resumed_series)
+            series_order.insert(0, resumed_series)
+        for series in series_order:
             if series in first_ends:
                 errors.pop(series, None)
                 continue

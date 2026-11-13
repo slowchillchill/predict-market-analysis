@@ -463,6 +463,107 @@ class PipelineTests(unittest.TestCase):
                 SERIES: '2026-04-01T17:00:00+00:00', other: '2026-05-01T17:00:00+00:00'})
             self.assertEqual(resumed.state['history_discovery']['errors'], {})
 
+    def test_history_boundary_resumes_later_series_before_retrying_earlier_error(self):
+        other = 'eth-up-or-down-daily'
+        for recovery_session in (2, 4):
+            with self.subTest(earlier_series_recovers_in_session=recovery_session):
+                store = MemoryStore()
+                client = PublicAPI(self.clock)
+                session = [1]
+                active = [None]
+                calls = []
+
+                def event(series, ended):
+                    return {'seriesSlug': series, 'markets': [{
+                        'slug': f'{series}-{ended}', 'conditionId': f'{series}-{ended}',
+                        'endDate': ended, 'outcomes': ['Up', 'Down']}]}
+
+                def get(url, params):
+                    if url == producer.collector.GAMMA_SERIES:
+                        series = params['slug']
+                        calls.append(('series', series))
+                        if series == SERIES and session[0] < recovery_session:
+                            raise producer.core.FetchError('HTTP 404', status_code=404)
+                        return [{'slug': series, 'id': series}]
+                    self.assertEqual(url, producer.collector.GAMMA_EVENTS_KEYSET)
+                    series, cursor = params['series_id'], params.get('after_cursor')
+                    calls.append((series, cursor))
+                    if series == other:
+                        ended, next_cursor = {
+                            None: ('2026-04-01T17:00:00Z', 'page-2'),
+                            'page-2': ('2026-06-01T17:00:00Z', 'page-3'),
+                            'page-3': ('2026-05-01T17:00:00Z', None),
+                        }[cursor]
+                        if next_cursor:
+                            # End the session after one committed catalog page.
+                            active[0].stopping = True
+                    else:
+                        ended, next_cursor = (
+                            ('2026-06-01T17:00:00Z', 'earlier-second-page') if cursor is None
+                            else ('2026-03-01T17:00:00Z', None))
+                    return {'events': [event(series, ended)], 'next_cursor': next_cursor}
+
+                client.get = get
+
+                def fresh_session(number):
+                    session[0] = number
+                    calls.clear()
+                    active[0] = producer.Pipeline(store,
+                        self.root / f'boundary-resume-{recovery_session}-{number}',
+                        today=lambda: TODAY, client=client)
+                    active[0].state['raw_days'][str(YESTERDAY)] = {'status': 'complete'}
+                    active[0].attempted.add(str(YESTERDAY))
+                    return active[0]
+
+                def saved_discovery():
+                    slug = 'pm-updown-analysis-2026-11'
+                    files = store.datasets[slug][store.version(slug)]
+                    return json.loads(files['progress.json'])['history_discovery']
+
+                with patch.dict(producer.collector.TARGET_SERIES, {SERIES: 1, other: 2}, clear=True):
+                    first = fresh_session(1)
+                    with self.quiet():
+                        first.run()
+                    self.assertEqual(calls, [('series', SERIES), ('series', other), (other, None)])
+                    discovery = saved_discovery()
+                    self.assertEqual(discovery['errors'][SERIES]['http_status'], 404)
+                    self.assertEqual(discovery['in_progress'], {
+                        'series_slug': other, 'next_cursor': 'page-2',
+                        'earliest_end_time': '2026-04-01T17:00:00+00:00'})
+
+                    second = fresh_session(2)
+                    with self.quiet():
+                        second.run()
+                    self.assertEqual(calls, [('series', other), (other, 'page-2')])
+                    discovery = saved_discovery()
+                    self.assertEqual(discovery['in_progress']['next_cursor'], 'page-3')
+                    self.assertEqual(discovery['in_progress']['earliest_end_time'],
+                                     '2026-04-01T17:00:00+00:00')
+                    self.assertIn(SERIES, discovery['errors'])
+                    self.assertIsNone(second.state['history'])
+
+                    third = fresh_session(3)
+                    with self.quiet():
+                        third.discover_history()
+                    self.assertEqual(calls[:3], [('series', other), (other, 'page-3'), ('series', SERIES)])
+                    self.assertEqual(third.state['history_discovery']['series_first_end'][other],
+                                     '2026-04-01T17:00:00+00:00')
+                    if recovery_session == 4:
+                        self.assertIsNone(third.state['history'])
+                        self.assertEqual(saved_discovery()['errors'][SERIES]['http_status'], 404)
+                        final = fresh_session(4)
+                        with self.quiet():
+                            final.discover_history()
+                        self.assertEqual(calls, [('series', SERIES), (SERIES, None),
+                                                 (SERIES, 'earlier-second-page')])
+                    else:
+                        final = third
+                    self.assertEqual(final.state['history']['start_date_utc'], '2026-03-01')
+                    self.assertEqual(final.state['history']['series_first_end'], {
+                        SERIES: '2026-03-01T17:00:00+00:00', other: '2026-04-01T17:00:00+00:00'})
+                    self.assertEqual(final.state['history_discovery']['errors'], {})
+                    self.assertNotIn('in_progress', final.state['history_discovery'])
+
     def test_history_boundary_fetch_error_is_local_but_rate_limit_stops(self):
         other = 'eth-up-or-down-daily'
         self.pipeline.attempted.add(str(YESTERDAY))
