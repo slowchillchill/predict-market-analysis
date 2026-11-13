@@ -596,6 +596,156 @@ class KaggleStoreTests(unittest.TestCase):
                     self.store._confirm_publication("research", {"publication_id": "id"}, 1, submitted=True)
                 self.assertEqual(self.store.status.call_count, 1)
 
+    def test_accepted_create_403_then_processing_and_ready_uploads_only_once(self):
+        folder = self.publication_folder()
+        commands = []
+        clock = [100.0]
+        responses = iter(["403 Client Error: Forbidden", "403 Client Error: Forbidden",
+                          status("processing", 1), status("ready", 1)])
+        created = False
+
+        def runner(command, **kwargs):
+            nonlocal created
+            commands.append((command[2], kwargs["timeout"]))
+            if command[2] == "create":
+                self.assertFalse(created, "create must never repeat during confirmation")
+                created = True
+                return subprocess.CompletedProcess(command, 0, "Created", "")
+            if command[2] == "list":
+                value = "ref,title\nowner/research,Research\n" if created else "No datasets found"
+                return subprocess.CompletedProcess(command, 0, value, "")
+            self.assertEqual(command[2], "status")
+            response = next(responses)
+            if isinstance(response, str):
+                return subprocess.CompletedProcess(command, 1, "", response)
+            return subprocess.CompletedProcess(command, 0, json.dumps(response), "")
+
+        self.store.runner = runner
+        self.matching_marker(folder)
+        with patch.object(cloud.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(cloud.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            self.assertEqual(self.publish(folder), 1)
+        self.assertEqual([operation for operation, _ in commands],
+                         ["status", "list", "create", "status", "list", "status", "status"])
+        self.assertEqual(commands[5][1], 105, "403 retry read must fit inside the remaining grace window")
+        self.assertEqual(self.store.download_file.call_args.args[2], 1)
+        self.assertFalse(list((self.store.work_dir / "pending-publications").glob("*.json")))
+
+    @staticmethod
+    def forbidden_status(message="HTTP 403 Forbidden"):
+        return cloud.KaggleError(message, http_status=403, operation="datasets status")
+
+    def test_persistent_create_403_is_bounded_and_keeps_accepted_journal(self):
+        folder = self.publication_folder()
+        clock = [100.0]
+        self.store.status = Mock(side_effect=[None] + [self.forbidden_status()] * 9)
+        self.store._run = Mock(return_value="Created")
+        with patch.object(cloud.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(cloud.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            with self.assertRaisesRegex(cloud.KaggleError, "confirmation grace expired") as failure:
+                self.publish(folder)
+        self.assertEqual(clock[0], 220)
+        self.assertEqual(self.store.status.call_count, 9)
+        self.assertEqual(self.store._run.call_count, 1)
+        self.assertIn("HTTP 403 Forbidden", cloud.describe_exception(failure.exception))
+        journal = json.loads(next((self.store.work_dir / "pending-publications").glob("*.json")).read_text())
+        self.assertEqual(journal["phase"], "accepted")
+        self.assertEqual(journal["attempt"], 1)
+        self.assertEqual(journal["publication"], json.loads((folder / cloud.PUBLICATION_FILE).read_text()))
+
+    def test_create_403_grace_does_not_extend_session_deadline(self):
+        folder = self.publication_folder()
+        clock = [100.0]
+        self.store.deadline = 110
+        self.store.status = Mock(side_effect=[None, self.forbidden_status()])
+        self.store._run = Mock(return_value="Created")
+        with patch.object(cloud.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(cloud.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            with self.assertRaises(cloud.KaggleDeadlineError):
+                self.publish(folder)
+        self.assertEqual(clock[0], 110)
+        self.assertEqual(self.store._run.call_count, 1)
+        self.assertEqual(len(list((self.store.work_dir / "pending-publications").glob("*.json"))), 1)
+
+    def test_version_upload_does_not_receive_create_403_grace(self):
+        folder = self.publication_folder()
+        self.store.status = Mock(side_effect=[status(version=1), self.forbidden_status(), status(version=2)])
+        self.store._run = Mock(return_value="Uploaded")
+        with patch.object(cloud.time, "sleep") as sleep, self.assertRaisesRegex(cloud.KaggleError, "Cannot determine"):
+            self.publish(folder)
+        sleep.assert_not_called()
+        self.assertEqual(self.store.status.call_count, 2)
+        self.assertEqual(self.store._run.call_count, 1)
+
+    def test_unknown_create_does_not_receive_403_grace(self):
+        folder = self.publication_folder()
+        self.store.status = Mock(side_effect=[None, self.forbidden_status()])
+        self.store._run = Mock(side_effect=cloud.KaggleError("HTTP 499 Client Error"))
+        with patch.object(cloud.time, "sleep") as sleep, self.assertRaisesRegex(cloud.KaggleError, "Cannot determine"):
+            self.publish(folder)
+        sleep.assert_not_called()
+        self.assertEqual(self.store._run.call_count, 1)
+
+    def test_create_grace_rejects_other_owners_and_non_status_auth_errors(self):
+        cases = [
+            ("other/research", self.forbidden_status()),
+            ("research", cloud.KaggleError("HTTP 403 Forbidden", http_status=403, operation="datasets list")),
+            ("research", cloud.KaggleError("HTTP 401 Unauthorized", http_status=401, operation="datasets status")),
+            ("research", self.forbidden_status("HTTP 403 Forbidden: quota exceeded")),
+            ("research", cloud.KaggleError("403 mentioned without HTTP evidence")),
+        ]
+        for slug, error in cases:
+            with self.subTest(slug=slug, error=str(error)):
+                self.store.status = Mock(side_effect=error)
+                with patch.object(cloud.time, "sleep") as sleep, self.assertRaisesRegex(cloud.KaggleError, "Cannot determine"):
+                    self.store._confirm_publication(slug, {"publication_id": "id"}, 1,
+                                                    submitted=True, accepted_create_at=cloud.time.monotonic())
+                sleep.assert_not_called()
+                self.assertEqual(self.store.status.call_count, 1)
+
+    def test_status_list_403_does_not_enter_create_grace(self):
+        folder = self.publication_folder()
+        created = False
+
+        def runner(command, **kwargs):
+            nonlocal created
+            if command[2] == "create":
+                created = True
+                return subprocess.CompletedProcess(command, 0, "Created", "")
+            if command[2] == "list" and not created:
+                return subprocess.CompletedProcess(command, 0, "No datasets found", "")
+            return subprocess.CompletedProcess(command, 1, "", "HTTP 403 Forbidden")
+
+        self.store.runner = Mock(side_effect=runner)
+        with patch.object(cloud.time, "sleep") as sleep, self.assertRaisesRegex(cloud.KaggleError, "Cannot determine") as failure:
+            self.publish(folder)
+        sleep.assert_not_called()
+        self.assertIn("datasets list", cloud.describe_exception(failure.exception))
+        self.assertEqual(self.store.runner.call_count, 5)
+
+    def test_matching_state_after_create_403_still_requires_own_marker(self):
+        folder = self.publication_folder()
+        self.store.status = Mock(side_effect=[None, self.forbidden_status(), status(version=1)])
+        self.store._run = Mock(return_value="Created")
+        self.store.download_file = Mock(side_effect=lambda slug, filename, version, destination:
+            destination.write_text('{"publication_id":"other"}'))
+        with patch.object(cloud.time, "sleep"), self.assertRaisesRegex(cloud.KaggleError, "different publication marker"):
+            self.publish(folder)
+        self.assertEqual(self.store._run.call_count, 1)
+
+    def test_successful_processing_read_does_not_restart_create_grace(self):
+        folder = self.publication_folder()
+        clock = [100.0]
+        self.store.status = Mock(side_effect=[None, self.forbidden_status(), status("processing", 1), self.forbidden_status()])
+        self.store._run = Mock(return_value="Created")
+        def sleep(seconds):
+            clock[0] += seconds if clock[0] == 100 else 120
+        with patch.object(cloud.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(cloud.time, "sleep", side_effect=sleep), self.assertRaisesRegex(cloud.KaggleError, "Cannot determine"):
+            self.publish(folder)
+        self.assertEqual(self.store.status.call_count, 4)
+        self.assertEqual(self.store._run.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

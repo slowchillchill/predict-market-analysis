@@ -21,14 +21,18 @@ TITLE = "Polymarket Crypto Updown Markets Analysis"
 OPERATION_TIMEOUT_SECONDS = 30 * 60
 COMMAND_TIMEOUT_SECONDS = 15 * 60
 POLL_SECONDS = 15
+CREATE_CONFIRMATION_GRACE_SECONDS = 120
 PUBLICATION_FILE = "publication.json"
 FAILED_STATES = {"error", "failed", "processing_error", "deleted"}
 
 
 class KaggleError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool = False):
+    def __init__(self, message: str, *, retryable: bool = False,
+                 http_status: int | None = None, operation: str | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.http_status = http_status
+        self.operation = operation
 
 
 class KaggleDeadlineError(KaggleError):
@@ -157,8 +161,15 @@ class KaggleStore:
                 printed_error = "Dataset creation error:" in output or "Dataset version creation error:" in output
                 if result.returncode == 0 and not printed_error:
                     return result.stdout.strip()
+                # Only recognize explicit HTTP diagnostics, not arbitrary
+                # three-digit numbers in Dataset names or upload progress.
+                matches = re.finditer(r"\bHTTP(?:Error)?:?\s+(\d{3})\b|\b(\d{3})\s+(?:Client|Server) Error\b",
+                                      output, re.IGNORECASE)
+                codes = {int(next(value for value in match.groups() if value)) for match in matches}
+                http_status = codes.pop() if len(codes) == 1 else None
                 error = KaggleError(redact_diagnostic(
-                    f"Kaggle {operation} exited {result.returncode}: {output.strip() or 'no output'}"))
+                    f"Kaggle {operation} exited {result.returncode}: {output.strip() or 'no output'}"),
+                    http_status=http_status, operation=operation)
             if not mutation and self._retryable(error) and attempt < 2:
                 limited = "429" in str(error) or "too many requests" in str(error).lower()
                 delay = 60 * (attempt + 1) if limited else 2 ** (attempt + 1)
@@ -333,28 +344,62 @@ class KaggleStore:
                         raise KaggleError("Dataset publication was not accepted after three attempts") from exc
                     self._sleep(60 * (attempt + 1) if "429" in str(exc) else 2 ** (attempt + 1))
                     continue
+                accepted_create_at = time.monotonic() if previous is None else None
                 record("accepted", True)
-                version = self._confirm_publication(slug, publication, expected, submitted=True)
+                version = self._confirm_publication(
+                    slug, publication, expected, submitted=True,
+                    accepted_create_at=accepted_create_at)
                 return confirmed(version)
         except KaggleError as exc:
             context = (f"dataset={self.ref(slug)} expected_version={expected} "
                        f"publication_id={publication['publication_id']} phase={journal.get('phase')} "
                        f"submitted={journal.get('submitted')} journal={journal_path}")
-            raise type(exc)(f"{exc}; {context}", retryable=exc.retryable) from exc
+            raise type(exc)(f"{exc}; {context}", retryable=exc.retryable,
+                            http_status=exc.http_status, operation=exc.operation) from exc
         raise AssertionError("unreachable")
 
-    def _confirm_publication(self, slug: str, publication: dict, expected: int, *, submitted: bool) -> int | None:
+    def _confirm_publication(self, slug: str, publication: dict, expected: int, *, submitted: bool,
+                             accepted_create_at: float | None = None) -> int | None:
         """Only a pinned version with this operation's marker proves acceptance."""
+        # This exception is restricted to a successful create by this owner.
+        # It does not apply to version uploads, unknown writes or list/auth
+        # failures. Once accepted, this method can only read; it cannot upload.
+        grace_until = (accepted_create_at + CREATE_CONFIRMATION_GRACE_SECONDS
+                       if accepted_create_at is not None and submitted and expected == 1
+                       and self.ref(slug).split("/", 1)[0] == self.owner else None)
+        last_forbidden = None
         unchanged = 0
         read_failures = 0
         while True:
             self._remaining()
+            if last_forbidden is not None and time.monotonic() >= grace_until:
+                raise KaggleError("Cannot determine Dataset publication result; new Dataset confirmation "
+                                  f"grace expired; keep working files; dataset={self.ref(slug)} "
+                                  f"expected_version={expected} publication_id={publication['publication_id']}") from last_forbidden
+            previous_deadline = self._operation_deadline
             try:
-                status = self.status(slug)
+                if last_forbidden is not None:
+                    # Bound subsequent CLI calls as well as polling sleeps.
+                    self._operation_deadline = min(
+                        previous_deadline if previous_deadline is not None else float("inf"), grace_until)
+                try:
+                    self._remaining()
+                    status = self.status(slug)
+                finally:
+                    self._operation_deadline = previous_deadline
             except KaggleDeadlineError:
                 raise
             except KaggleError as exc:
                 read_failures += 1
+                grace_remaining = grace_until - time.monotonic() if grace_until is not None else 0
+                if (grace_remaining > 0 and exc.http_status == 403 and exc.operation == "datasets status"
+                        and not any(word in str(exc).lower() for word in ("quota", "unauthorized", "permission denied"))):
+                    last_forbidden = exc
+                    print(f"Accepted Dataset create is not readable yet; dataset={self.ref(slug)} "
+                          f"read_only_confirmation_remaining={grace_remaining:.1f}s; "
+                          f"{describe_exception(exc)}", flush=True)
+                    self._sleep(min(POLL_SECONDS, grace_remaining))
+                    continue
                 if not self._retryable(exc) or read_failures >= 3:
                     raise KaggleError("Cannot determine Dataset publication result; keep working files; "
                                       f"dataset={self.ref(slug)} expected_version={expected} "
@@ -364,6 +409,7 @@ class KaggleStore:
                       f"dataset={self.ref(slug)} retrying in {POLL_SECONDS}s; {describe_exception(exc)}", flush=True)
                 self._sleep(POLL_SECONDS)
                 continue
+            last_forbidden = None
             read_failures = 0
             if status:
                 state = status["status"].lower()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import hashlib
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ import signal
 import sqlite3
 import tempfile
 import time
+import uuid
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -102,11 +104,13 @@ class Pipeline:
         self._last_checkpoint = self.clock()
         self._active_day = None
         self._restored_versions: dict[str, int | None] = {}
+        self._restored_snapshots: dict[str, tuple] = {}
         self.store.deadline = self.deadline
         self.client = client or core.Client(None)
         self.client.deadline = self.stop_at
         self.current_month = month_of(today())
         self.months: dict[str, Path] = {}
+        self._month_versions: dict[str, int | None] = {}
         self.changed_months: set[str] = set()
         self.attempted: set[str] = set()
         self.stopping = False
@@ -162,9 +166,39 @@ class Pipeline:
     def month(self, stamp: str) -> Path:
         if stamp not in self.months:
             folder = self.work_dir / "analysis" / stamp
-            self.store.restore(f"pm-updown-analysis-{stamp}", folder)
+            self._month_versions[stamp] = self.store.restore(f"pm-updown-analysis-{stamp}", folder)
+            if (folder / "social.zip").exists():
+                from polymarket_kaggle_social import restore_cloud_social
+                restore_cloud_social(folder)
             self.months[stamp] = folder
         return self.months[stamp]
+
+    def prepare_cloud_text(self) -> None:
+        """Import the fixed migration seed and restore all due text periods."""
+        from polymarket_kaggle_reports import due_periods
+        from polymarket_kaggle_social import import_cloud_text_state
+        rollout = date.fromisoformat(self.state["rollout_date_utc"])
+        for period in due_periods(rollout, datetime.now(timezone.utc)):
+            self.month(period.month)
+        config = Path(__file__).resolve().parents[1] / "config/kaggle-social-seed.json"
+        if config.exists() and not self.state.get("cloud_social_seed"):
+            source = json.loads(config.read_text())
+            if (set(source) != {"dataset", "version"} or not isinstance(source["dataset"], str)
+                    or source["dataset"].split("/")[0] != self.store.owner
+                    or type(source["version"]) is not int or source["version"] < 1):
+                raise ValueError("Invalid fixed cloud social migration source")
+            folder = self.work_dir / "social-seed"
+            for filename in ("seed.json", "months.zip"):
+                self.store.download_file(source["dataset"], filename, source["version"], folder / filename)
+            seed = json.loads((folder / "seed.json").read_text())
+            for stamp in seed["months"]:
+                result = import_cloud_text_state(self.month(stamp), folder, month=stamp)
+                if result["changed"]:
+                    self.changed_months.add(stamp)
+            # Publish every affected month before recording adoption globally.
+            self.save()
+            self.state["cloud_social_seed"] = source
+        self.save()
 
     def sources_for(self, start: date, end: date) -> list[Path]:
         paths = []
@@ -190,6 +224,7 @@ class Pipeline:
         }
 
     def save(self) -> None:
+        from polymarket_kaggle_social import pack_cloud_social, render_cloud_month
         self.current_month = month_of(self.today())
         current = self.month(self.current_month)
         signature = self._state_signature()
@@ -198,10 +233,26 @@ class Pipeline:
             write_json(current / "progress.json", self.state)
             self.changed_months.add(self.current_month)
         for stamp in sorted(self.changed_months, key=lambda s: (s == self.current_month, s)):
-            self.store.publish(f"pm-updown-analysis-{stamp}", self.month(stamp),
+            pack_cloud_social(self.month(stamp))
+            self._month_versions[stamp] = self.store.publish(f"pm-updown-analysis-{stamp}", self.month(stamp),
                 title=f"Polymarket Updown Analysis {stamp}", description=DESCRIPTION,
                 message="Update completed research results and resumable collection progress")
             self.changed_months.discard(stamp)
+        for stamp, folder in sorted(self.months.items()):
+            version = self._month_versions.get(stamp)
+            if not version or not (folder / "index.json").exists():
+                continue
+            slug = f"pm-updown-analysis-{stamp}"
+            result = render_cloud_month(folder, month=stamp,
+                source_reference={"dataset": self.store.ref(slug), "version": version},
+                rollout_date=date.fromisoformat(self.state["rollout_date_utc"]))
+            if result["changed"]:
+                self.changed_months.add(stamp)
+                pack_cloud_social(folder)
+                self._month_versions[stamp] = self.store.publish(slug, folder,
+                    title=f"Polymarket Updown Analysis {stamp}", description=DESCRIPTION,
+                    message="Save cloud-generated text and resumable publication state")
+                self.changed_months.discard(stamp)
         self._saved_state, self._saved_month = signature, self.current_month
 
     def put_bundle(self, bundle: dict) -> None:
@@ -238,6 +289,7 @@ class Pipeline:
         path = folder / "data.sqlite3"
         if not path.exists():
             if latest:
+                self._restored_snapshots.pop(str(day), None)
                 # Raw publication can succeed before the monthly progress
                 # publication. Resume its latest durable version, not the
                 # possibly stale reference in progress.json. restore waits
@@ -247,9 +299,46 @@ class Pipeline:
                 if reference and (version is None or version < reference["version"]):
                     path.unlink(missing_ok=True)
                     raise KaggleError(f"Cannot resume {day} from an older or missing raw Dataset version")
+                if version and path.exists():
+                    metadata_path = folder / "collection_status.json"
+                    marker_path = folder / "publication.json"
+                    if metadata_path.exists() and marker_path.exists():
+                        metadata = json.loads(metadata_path.read_text())
+                        marker = json.loads(marker_path.read_text())
+                        if (metadata.get("date_utc") == str(day)
+                                and metadata.get("schema_version") == RAW_SCHEMA_VERSION
+                                and marker.get("dataset") == self.store.ref(f"pm-updown-raw-{day}")
+                                and marker.get("publication_id")):
+                            self._restored_snapshots[str(day)] = (version, metadata, self._database_digest(path))
             elif reference:
                 self.store.download_file(reference["slug"], "data.sqlite3", reference["version"], path)
         return path
+
+    @staticmethod
+    def _database_digest(path: Path) -> str:
+        """Compare actual persisted values, independent of SQLite page layout.
+
+        A restored snapshot may have reached Kaggle before progress.json did.
+        Directory proofs must still be refreshed; only identical schema, rows,
+        and collection metadata permit reuse of that confirmed version.
+        """
+        digest = hashlib.sha256()
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as db:
+            digest.update(str(db.execute("PRAGMA user_version").fetchone()[0]).encode())
+            objects = db.execute("SELECT type,name,sql FROM sqlite_master "
+                                 "WHERE sql IS NOT NULL ORDER BY type,name").fetchall()
+            for kind, name, sql in objects:
+                digest.update(repr((kind, name, sql)).encode())
+                if kind != "table":
+                    continue
+                quoted = '"' + name.replace('"', '""') + '"'
+                columns = db.execute(f"PRAGMA table_info({quoted})").fetchall()
+                keys = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
+                order = ','.join('"' + key.replace('"', '""') + '"' for key in keys) or "rowid"
+                for row in db.execute(f"SELECT * FROM {quoted} ORDER BY {order}"):
+                    digest.update(repr(row).encode())
+                    digest.update(b"\n")
+        return digest.hexdigest()
 
     def _first_ends(self) -> dict | None:
         history = self.state.get("history")
@@ -403,8 +492,14 @@ class Pipeline:
                                      collection_error or (str(paused) if paused else None), result)
         write_json(path.parent / "collection_status.json", metadata)
         (path.parent / "README.md").write_text(DESCRIPTION)
-        version = self.store.publish(slug, path.parent, title=f"Polymarket Updown Raw {stamp}",
-                                     description=DESCRIPTION, message=f"{stamp}: {status}")
+        restored = self._restored_snapshots.get(stamp)
+        if (restored and restored[0] >= (reference or {}).get("version", 0)
+                and restored[1] == metadata and restored[2] == self._database_digest(path)):
+            version = restored[0]
+            print(f"Reusing confirmed raw {stamp}: version {version}; snapshot unchanged", flush=True)
+        else:
+            version = self.store.publish(slug, path.parent, title=f"Polymarket Updown Raw {stamp}",
+                                         description=DESCRIPTION, message=f"{stamp}: {status}")
         self._record_raw(day, version, metadata)
         if complete:
             self.state["first_seen"] = dict(labels)
@@ -738,10 +833,20 @@ def main(argv=None) -> int:
         parser.error("The producer runs only on Kaggle; local machines run polymarket_kaggle_reports.py")
     started_at = float(os.environ.get("POLYMARKET_RUN_STARTED_MONOTONIC", time.monotonic()))
     client = core.Client(None)
+    pipeline = None
+    summary = {"schema_version": 1, "run_id": uuid.uuid4().hex,
+               "started_at_utc": datetime.now(timezone.utc).isoformat(), "status": "starting",
+               "source_commit": os.environ.get("POLYMARKET_SOURCE_COMMIT"),
+               "authentication_source": os.environ.get("POLYMARKET_KAGGLE_AUTH_SOURCE"),
+               "trigger": os.environ.get("KAGGLE_KERNEL_RUN_TYPE")}
     try:
         pipeline = Pipeline(KaggleStore(args.owner, args.work_dir / "downloads"), args.work_dir,
             client=client, started_at=started_at, checkpoint_seconds=args.checkpoint_minutes * 60,
             stop_after_seconds=args.stop_after_hours * 3600, session_seconds=args.session_hours * 3600)
+        summary["resume_history_date"] = (pipeline.state.get("history") or {}).get("next_date_utc")
+        summary["status"] = "running"
+        pipeline.state["last_run"] = dict(summary)
+        pipeline.prepare_cloud_text()
         signal.signal(signal.SIGTERM, lambda *_: setattr(pipeline, "stopping", True))
         try:
             from polymarket_kaggle_migration import migrate_existing
@@ -750,14 +855,29 @@ def main(argv=None) -> int:
                 pipeline.run(max_days=args.max_days)
         except (KeyboardInterrupt, core.CollectionPaused):
             pipeline.save()
+        summary["status"] = "complete"
+        summary["history_next_date"] = (pipeline.state.get("history") or {}).get("next_date_utc")
+        summary["ended_at_utc"] = datetime.now(timezone.utc).isoformat()
+        pipeline.state["last_run"] = dict(summary)
+        pipeline.save()
     except core.RateLimitError as exc:
+        summary.update(status="rate_limited", error=describe_exception(exc))
         print(f"Polymarket collection paused after sustained rate limiting: {exc}", flush=True)
         return 0
     except (KaggleError, DiscoveryBlocked) as exc:
+        summary.update(status="failed", error=describe_exception(exc))
         print(f"Producer stopped without advancing unconfirmed work: {describe_exception(exc)}", flush=True)
         return 1
+    except Exception as exc:
+        summary.update(status="failed", error=describe_exception(exc))
+        raise
     finally:
         client.close()
+        summary.setdefault("ended_at_utc", datetime.now(timezone.utc).isoformat())
+        try:
+            write_json(args.work_dir / "run-summary.json", summary)
+        except OSError as exc:
+            print(f"Cannot retain run summary: {type(exc).__name__}", flush=True)
     return 0
 
 

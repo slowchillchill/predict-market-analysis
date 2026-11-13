@@ -547,6 +547,7 @@ class PipelineTests(unittest.TestCase):
 class ProducerMainTests(unittest.TestCase):
     def invoke(self, pipeline, *, initialization_error=None):
         client = Mock()
+        pipeline.state = {}
         stream = io.StringIO()
         with patch.object(producer.Path, 'is_dir', return_value=True), \
                 patch.object(producer.core, 'Client', return_value=client), \
@@ -554,6 +555,7 @@ class ProducerMainTests(unittest.TestCase):
                 patch.object(producer, 'Pipeline', return_value=pipeline,
                              side_effect=initialization_error) as constructor, \
                 patch.object(producer.signal, 'signal'), \
+                patch.object(producer, 'write_json'), \
                 patch('polymarket_kaggle_migration.migrate_existing'), \
                 contextlib.redirect_stdout(stream):
             result = producer.main([])

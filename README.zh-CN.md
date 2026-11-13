@@ -318,4 +318,6 @@ v2 实现版本 [`c16edb8`](https://github.com/slowchillchill/predict-market-ana
 - 整理数据采用 CC0 1.0，声明仅适用于贡献者拥有的权利。数据来自 [Polymarket Gamma API](https://gamma-api.polymarket.com) 和 [Data API](https://data-api.polymarket.com)，仍应查看 [上游来源条款](https://polymarket.com/tos)。软件许可不授予额外的第三方数据或服务权利。
 - 发现缺口、字段问题或口径差异时，请提交 Issue，并提供数据集版本、日期、市场标识、最小 SQL 或复现步骤及预期结果。请勿提交访问凭据。
 
-进一步阅读：[市场发现与日报](docs/updown_daily.md)、[BUY 分布方法](docs/updown_bot_price_poster.md)、[海报指标](docs/updown_poster.md)、[部署与维护](docs/kaggle_migration.md)。
+进一步阅读：[市场发现与日报](docs/updown_daily.md)、[BUY 分布方法](docs/updown_bot_price_poster.md)、[X 与 LinkedIn 文字稿生成](docs/updown_publishing.md)、[部署与维护](docs/kaggle_migration.md)。
+
+云端生产程序从已确认的 Kaggle 统计 JSON 生成英文 X 串联推文和 LinkedIn 动态。每个月度分析 Dataset 通过 `social.zip` 保存文字稿和生成状态，新会话先恢复已有内容，再生成缺少的周期。本地 `outputs/social/` 入口保留用于预览。LinkedIn 使用纵向指标块。旧图文和已发布记录保留；实际发布由用户另行签发给发布 AGENT。

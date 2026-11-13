@@ -1,4 +1,5 @@
 -r requirements-btc5m.txt
 -r requirements-poster.txt
 kaggle==2.2.5
+kagglesdk==0.1.38
 six==1.17.0

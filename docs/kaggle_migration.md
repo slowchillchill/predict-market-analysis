@@ -1,19 +1,21 @@
-# Kaggle 采集、存储与本地图文生成
+# Kaggle 云端采集、恢复与文字稿生成
 
-生产流程将原始数据采集、SQL 统计和历史补采放在 Kaggle。本地只下载完成的统计 JSON，生成现有日、周、月海报、推文和发布清单。
+生产流程将原始数据采集、SQL 统计、历史补采，以及日、周、月 X 串联推文和 LinkedIn 文字稿生成放在 Kaggle。进度、文字稿和生成状态随云端 Dataset 保存；关闭本地 Codex 会话不会中断已启动的云端任务，也不影响后续原生 Daily 调度。当前不再生成图片、抖音或 TikTok 内容，详见[文字发布说明](updown_publishing.md)。本地入口保留为可选预览工具，生产不依赖本地定时器。
 
 项目名称为 **Polymarket Crypto Updown Markets Analysis**。公开入口使用 `qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis`。部署版本和实际运行结果以部署记录为准。
 
-v3 历史恢复修复已完成代码、云端验收和有限生产恢复。原生 Daily 与本地四个报表定时器已恢复。本文末尾记录实际版本、验收范围和剩余缺口。已发布的 2026-11-09 v2 日库与原报告仍可读取；历史范围尚未补齐。
+本文前半部分说明当前云端方案；后半部分保留 v3 迁移与旧部署的实际验收记录。旧记录中的 Secret 绑定和本地四个报表定时器属于当时部署，不是当前方案的必要条件。已发布的 2026-11-09 v2 日库与原报告仍可读取；历史范围尚未补齐。新方案的生产发布和 Daily 验收状态以准确版本的部署记录为准。
 
 ## 数据与代码
 
 | 位置 | 内容 |
 | --- | --- |
 | `pm-updown-raw-YYYY-MM-DD` | 按 API 市场结束时间所属 UTC 日保存的 `data.sqlite3`、`collection_status.json` 和来源说明；本次工作格式为 v3，旧 v2 仍可读 |
-| `pm-updown-analysis-YYYY-MM` | `features.sqlite3`、完成的日周月结果、`index.json`，以及当前月份的全局 `progress.json` |
-| 本地 `outputs/posters` | 现有格式的图文、配套 JSON 和发布清单 |
-| 本地 `outputs/kaggle_reports/state.json` | 首次部署日期、固定目标周期及其待处理、已生成或已保留状态 |
+| `pm-updown-analysis-YYYY-MM` | `features.sqlite3`、完成的日周月结果、`index.json`、可恢复文字包 `social.zip`，以及当前月份的全局 `progress.json` |
+| 云端 `social.zip` | `social/state.json`、X 逐条文字、LinkedIn 正文、固定来源 JSON 和文字发布清单 |
+| 本地 `outputs/social` | 可选预览的 X 逐条文字、LinkedIn 正文、结果 JSON 和文字发布清单 |
+| 本地 `outputs/posters` | 切换前已生成的历史图片与发布产物，当前入口不再写入 |
+| 本地 `outputs/kaggle_reports/state.json` | 旧本地调度状态；迁移时保留原部署日期、固定目标周期及其待处理、已生成或已保留状态 |
 
 完成的 v2、v3 日库都只有三个实体表：
 
@@ -53,7 +55,7 @@ python scripts/polymarket_kaggle_pipeline.py --migrate-only
 
 ## Kaggle 任务
 
-代码入口为 `kaggle/notebook.py`，配置为 `kaggle/kernel-metadata.json`。Notebook 启用 Internet，使用 CPU，按固定 Git 提交加载项目代码。
+代码入口为 `kaggle/notebook.py`，配置为 `kaggle/kernel-metadata.json`。Notebook 启用 Internet，使用 CPU。固定 bootstrap 每次读取 GitHub `kaggle-release` 分支的 `config/kaggle-release.json`，校验 `schema_version`、40 位 `source_commit` 和 `auth_mode`，再以 detached checkout 加载该准确提交。读取或校验失败就停止，不退回移动的开发分支。日常更新发布清单即可选择已验证代码；bootstrap 自身变化才需要重新上传 Notebook。
 
 先将 Python 入口打包为标准 Notebook，再用已配置的 Kaggle CLI 上传。必须加 `--no-run`，不执行采集代码：
 
@@ -65,14 +67,15 @@ kaggle kernels status qiuqiuslowchillchill/polymarket-crypto-updown-markets-anal
 
 2026-11-11 云端验收发现，直接以 script 类型 Quick Save 上传 `.py`，虽然 CLI 返回已保存，平台转换预览时仍会出现 `NotJSONError`。打包脚本只生成临时上传文件，保持项目源码和 Notebook 单元一致；不包含 Token。
 
-上传后，在网页完成以下操作：
+### 认证来源
 
-1. 打开 Notebook 编辑页，在 Secrets 界面创建名为 `KAGGLE_API_TOKEN` 的 Secret。
-2. 勾选该 Secret，允许当前 Notebook 访问；已有 Secret 也须确认已勾选。
-3. 选择 **Save Version → Save & Run All**，运行带有 Secret 授权的版本。
-4. 确认该版本能够读取 Secret，完成一次采集、迁移和统计验收。手动实例结束后，再启用原生 **Daily** 调度，使后续任务沿用该版本。
+平台原生凭据已通过真实云端读写探针：`qiuqiuslowchillchill/pm-cloud-auth-probe-20261113` 第 2 版为 `COMPLETE`，独立 QA Dataset `qiuqiuslowchillchill/qa-cloud-auth-20261113-1794538912` 已产生第 1、2 版。证据保存在 `outputs/cloud-autonomy/auth-probe-result-v2/auth_probe.json`。探针第 1 版曾因 Notebook 缺少 `kernelspec` 在代码启动前失败，修正包装后才取得上述结果。这证明该云端环境提供的凭据可完成已测操作；完整 producer 和原生 Daily 仍需单独验收。
 
-2026-11-10 的 v2 部署曾实测，直接通过 CLI `push` 运行的新版本未携带 Secret 授权，在 `get_secret` 处返回 HTTP 400，尚未发送采集请求。因此，CLI 上传或运行成功不代表 Secret 已授权；代码更新后仍需通过上述网页步骤保存运行版本。Token 不写入代码、数据集或日志。
+新方案可以使用平台凭据运行，无须绑定 `KAGGLE_API_TOKEN` Secret。`auth_mode=platform` 只接受 Kaggle 运行环境提供的凭据文件；缺失或校验失败就停止。`auto` 按平台凭据、个人环境变量或凭据文件、最后 Secret 的顺序选择可用来源；选中后验证失败不切换身份。`personal` 显式排除平台凭据，供有需要的独立部署使用。
+
+启动时通过只读接口核对凭据有效且属于预期 owner，再进入采集。日志只记录实际来源，不输出凭据值。`bootstrap.json` 保存发布清单和认证来源，`run-summary.json` 保存 producer 的源码提交、触发方式、恢复位置和最终状态。凭据不写入源码或 Dataset。
+
+早期 v17、v19 的 HTTP 400 发生在强制读取未绑定 Secret 时，尚未启动 producer。它们说明旧版本的 Secret 授权缺失，不说明 Kaggle 必须使用个人 Secret。下面的历史记录保留当时的修复过程。
 
 生产 Notebook 每次启动先恢复最后成功确认的云端进度。本次恢复顺序为：
 
@@ -94,7 +97,9 @@ kaggle kernels status qiuqiuslowchillchill/polymarket-crypto-updown-markets-anal
 
 采集每页仍先将明细、组映射和游标提交到同一个数据库事务。默认每 **30 分钟**检查一次是否有新的已提交状态；有变化才发布一致的 `incomplete` 日库检查点，不在每一页后上传。正常日期完成、日更抢占或可处理错误退出时，也保存需要发布的变化。
 
-任务默认在运行 **11 小时 30 分钟**后停止后续采集，为 [Kaggle 当前 12 小时 CPU 会话上限](https://www.kaggle.com/docs/notebooks)预留发布与处理时间。从 bootstrap 开始计时，安装依赖和恢复数据也计入本次运行。`--checkpoint-minutes`、`--stop-after-hours` 和 `--session-hours` 可调整检查点、停采及整次运行截止时间。检查点间隔与停采时间是可调整的工程参数，不是平台规则，也不是防封要求；预留时间不保证网络上传和平台处理必定完成。
+任务默认在运行 **11 小时 30 分钟**后停止后续采集，整次运行默认截止时间为 **12 小时**，余量用于发布与处理。从 bootstrap 开始计时，安装依赖和恢复数据也计入本次运行。`--checkpoint-minutes`、`--stop-after-hours` 和 `--session-hours` 可调整检查点、停采及整次运行截止时间。这些时间是工程参数，不能替代对当前 [Kaggle 会话限制](https://www.kaggle.com/docs/notebooks)的确认；预留时间不保证网络上传和平台处理必定完成。
+
+原生 **Daily** 表示每天由 Kaggle 再启动一次任务，不表示进程连续运行 24 小时，也不保证精确启动时刻。每次运行在截止前退出，下一次从已确认的 Dataset 继续。关闭本地电脑或 Codex 会话不影响这一调度；仍须保持单个生产实例。
 
 只有 Kaggle 已处理完成并确认成功的版本才是跨会话恢复点。下次从该版本续采，而不是从上次计划检查的时刻恢复。上传失败、平台强制终止或处理未确认时，可能重采超过 30 分钟的未发布部分，不能承诺最多只丢 30 分钟进度。
 
@@ -104,7 +109,11 @@ kaggle kernels status qiuqiuslowchillchill/polymarket-crypto-updown-markets-anal
 
 恢复修复发布的快照带有小型 `publication.json` 标记。遇到 HTTP 499 等上传结果不确定的响应，先查询平台版本及处理状态，再读取标记确认是否为本次快照；已成功发布则复用该版本，避免盲目重复上传。未确认成功时不将其作为新的持久恢复点。
 
-发布确认查询失败时，日志会记录 Dataset、目标版本、发布标记、提交阶段和脱敏后的底层异常链。成功的状态查询会清零连续读取失败次数；永久权限错误仍立即退出，总操作和会话截止时间不变。不能将 `Cannot determine Dataset publication result` 解释为上传已经失败。
+发布确认查询失败时，日志会记录 Dataset、目标版本、发布标记、提交阶段和脱敏后的底层异常链。生产 v20、v21 曾在 create 已获接受后，第一次状态查询收到 403；后续固定版本的 `publication.json` 与提交标记吻合，说明不能将该错误直接解释为上传失败。403 的上游原因仍未确定。
+
+修复只对“本次 create 已明确获接受、目标属于当前 owner、预期版本为 1”的确认过程放宽：遇到状态读取 403，每约 **15 秒**只读核对一次，最多 **120 秒**，同时受原有总操作和会话截止时间约束。成功仍须同时满足平台 ready 和固定版本发布标记一致。它不会重新提交 create，也不会全局重试 403。version 上传、不确定是否获接受的写入、owner 列表认证失败、401、配额错误和标记不符均不使用这一窗口；持续 403 到期后停止并保留 journal。
+
+如果 raw 已成功发布、月度进度尚未保存，新会话会读取该日最新固定版本。它重新检查目录覆盖、分页和统计，再比较状态元数据及数据库的 schema、全部表记录和覆盖视图。内容完全一致才复用 raw 版本并补写月度引用；统计缺口继续保持 `incomplete`。这允许在没有本地 journal 的情况下恢复孤立 raw 版本，也避免仅凭记录数相同就误认数据未变。
 
 默认工作目录为 `/kaggle/working/polymarket-pipeline`。未确认发布会保留 `downloads/pending-publications/<publication_id>.json`，其中记录目标版本、源目录和发布标记，不包含认证凭据。原始检查点的不可变副本仅在 raw 发布确认且月度进度保存成功后删除；失败时保留在 `checkpoints/`。这些文件是故障核对材料，程序不会自动重放 journal。它们是否可下载取决于 Kaggle 是否保留该次运行的输出，不能保证强制终止后仍存在；下一次新会话仍从已处理成功的云端 Dataset 恢复。
 
@@ -114,7 +123,7 @@ kaggle kernels status qiuqiuslowchillchill/polymarket-crypto-updown-markets-anal
 python3 tests/kaggle_publication_acceptance.py --work-dir /tmp/kaggle-publication-acceptance
 ```
 
-验收先确认一次正常发布，再在第二次真实上传后模拟状态查询 403，检查诊断和 journal 保留，并通过固定版本标记只读核对结果。它不会将模拟的 403 当作线上故障根因，也不代替生产 Notebook 的 Secret 授权、单实例恢复和 Daily 验收。工作目录必须不存在，结果写入该目录的 `acceptance.json`。
+当前验收在真实 create 后模拟一次状态查询 403，检查读取恢复后仅 create 一次；随后在真实 version 后模拟持续 403，检查立即停止、journal 保留和没有再次上传，最后通过固定版本标记只读核对。它不会将模拟的 403 当作线上故障根因，也不代替生产认证、单实例恢复和 Daily 验收。工作目录必须不存在，结果写入该目录的 `acceptance.json`。以下 2026-11-12 记录使用的是修复前的验收脚本。
 
 2026-11-12 的发布确认修复通过全部 437 项回归和独立代码审查。真实验收 Dataset 为 `qiuqiuslowchillchill/qa-publication-20261112-003858`：第 1 版正常确认，第 2 版上传后模拟查询 403，再通过相同发布标记只读确认；总共只有一次 create 和一次 version。另行下载的云端 metadata 确认 `info.isPrivate = true`。这次验收没有修改生产 Dataset，也不能单独证明生产 Notebook 的 Secret 和 Daily 设置有效；后续生产运行结果见下文。
 
@@ -128,7 +137,7 @@ python3 tests/kaggle_publication_acceptance.py --work-dir /tmp/kaggle-publicatio
 
 随后通过已授权的浏览器操作，在同一 Notebook 的 Secret 中恢复本机已有 Token，确认勾选后 **Save & Run All**，生成[第 20 版](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis?scriptVersionId=368646498)。拉回源码确认仍固定 `4663a5c044ad70c9f1371fadbf54ba848dea27bd`，生产参数无日期数量限制。该版通过认证，运行日志在 **94.8 秒**记录 2025-07-06 保留异常、继续其他日期，紧接着出现 `Collecting 2025-07-07 (historical)` 并取得该日交易。固定版本核对确认 [07-06 raw 第 2 版](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2025-07-06/versions/2)仍为 `incomplete`、100/101 个市场、131 页，错误保留；[月库第 205 版](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/205)在 03:37:45 UTC 保存 `next_date_utc = 2025-07-07`、对应 raw v2 引用及 07-06 缺口。验收时第 20 版仍在运行，未把启动与越过故障点等同于全历史采集完成。网页原生计划仍为 Daily，活动面板显示下一次计划运行日期为 2026-11-13；本次未修改计划。
 
-这一步可以由已授权的浏览器自动化完成，不要求操作者亲自点击，也不需要生成新 Token。已有可用草稿只更新源码提交时，可直接在网页保存运行并核对 Secret。若先用 CLI 上传，应使用 `--no-run`，再核对刷新后的草稿源码和 Secret，最后通过网页保存运行。过去的第 13、15 版部署也采用网页步骤；本机 CLI 认证和云端运行时 Secret 是两种不同的授权来源。
+上述步骤是旧版强制使用 Secret 时的操作记录。过去的第 13、15 版也采用网页授权；本机 CLI 认证不能替代该授权。当前平台认证方案不需要重复这些 Secret 步骤，日常代码更新通过固定 bootstrap 读取发布清单完成。
 
 这个标记用于生产程序核对发布身份，不要求数据使用者读取整个数据库计算 SHA，也不改变报告的 `source_versions` 引用方式。
 
@@ -151,16 +160,28 @@ python scripts/polymarket_kaggle_pipeline.py --max-days 2
 
 ### 版本发布与恢复顺序
 
-1. 保持云端运行、Daily 和本地四个 timer 暂停，先完成代码与旧格式兼容回归。
-2. 在本次修复 PR 中固定最终源码提交，将 bootstrap 的 `SOURCE_COMMIT` 指向该准确提交；保留上次 Notebook、源码和数据集版本记录。
-3. 使用 CLI `--no-run` 上传，通过网页授权 Secret 后，只启动一个手动验收实例。
-4. 验收真实开始时间未知时仍按 API 结束日纳入、旧 v2 读取和工作副本升级、跨会话续采、变化检查点及不确定发布核对。确认正式结果引用处理完成的日库准确版本，不强制重发既有完成 v2 日库。
-5. 本地从固定版本下载统计 JSON，在新预览目录生成图文，确认未读取原始数据库，已有图文也未被覆盖。
-6. 手动实例结束后恢复云端 Daily，最后恢复本地日、周、月和每 30 分钟重试四个 timer。
+1. 暂停 Daily，确认没有生产实例，再完成代码和旧格式兼容回归。停止旧本地日、周、月和重试定时器，保留已有状态与产物。
+2. 用独立私有 QA Dataset 验收实际认证、create 确认恢复和两次独立云端会话续采。两个会话共享固定 QA 名称，但不共享本地工作目录；不得写生产数据集。
+3. 将旧文字稿和调度状态制作成固定版本的私有迁移 seed。`config/kaggle-social-seed.json` 固定其 Dataset 和版本；云端核对 archive 和文件摘要后导入，所有受影响月库确认成功后才记录采用完成。当前 seed 为 `qiuqiuslowchillchill/pm-updown-social-seed-20261113` 第 1 版。
+4. 固定最终源码提交，将发布清单指向该准确提交和已经验收的 `auth_mode`。首次部署新 bootstrap 时，使用 CLI `--no-run` 上传，核对准确源码和配置，再用临时 `--max-days 1` 启动一个有限生产验收实例。保留上次 Notebook、发布清单、源码和 Dataset 版本，供回退核对。
+5. 核对完整新日期、历史续采、raw 孤立版本恢复、月库准确引用和云端文字包。保留既有 v2 完整日库及统计缺口，不为统一格式强制重发。检查 `bootstrap.json`、`run-summary.json` 和发布 journal，不把进程启动视为验收完成。
+6. 有限验收结束后，以 CLI `--no-run` 保存 `RUN_ARGUMENTS = []` 的正式版本，核对完成后恢复原生 Daily，并等待一次真实计划触发的运行完成必要验收。本地四个定时器保持停用；需要预览时可手动运行本地读取工具。
 
-运行失败时先停止新实例并暂停 Daily 和本地四个 timer，保留已发布版本与图文。回退代码前确认它能够读取并续写相应日库格式，特别是未知开始日的可空字段、结算规则列和新的覆盖策略；不能假设旧代码可以续写所有 v3 工作库。需要回退时使用兼容的日库版本和对应分析进度；若没有兼容恢复点，采集保持暂停，本地仍可读取已经完成的旧结果 JSON。不要通过伪造开始日期或删除数据集历史版本来强行回退。
+运行失败时先暂停 Daily，确认旧实例结束，保留已发布版本、文字稿与故障证据。`run-summary.json` 将发布或发现失败记为 `failed`，持续限流记为 `rate_limited`；未知异常保留摘要并继续抛出。远端 `progress.json` 的 `last_run` 可能停在上一已确认快照，故障核对应同时读取本次运行输出和 journal。回退发布清单前确认旧代码能够读取并续写相应日库格式，特别是未知开始日的可空字段、结算规则列和新的覆盖策略；不能假设旧代码可以续写所有 v3 工作库。若没有兼容恢复点，采集保持暂停，已完成的旧结果 JSON 仍可读取。不要伪造开始日期或删除 Dataset 历史版本。
 
-## 本地安装与定时出图
+## 云端文字稿与跨会话状态
+
+每次保存先确认月度统计快照，再用它的固定 Dataset 版本生成文字稿。文字中的来源链接指向包含该报告的已确认版本；生成完成后再次发布含文字稿和状态的月库。例如，v1 已保存报告，文字稿引用 v1，v2 再保存这些文字稿。后续保存和重启不会仅因版本号变化重新生成旧稿。
+
+云端把 `social/` 打包为平面文件 `social.zip`，随月库完整上传。新会话下载后恢复相对路径清单、逐条 X `.txt`、LinkedIn `.txt`、固定来源 JSON 和 `social/state.json`。文字稿只读取已完成的报告 JSON，不需要把原始 raw Dataset 下载到本地。
+
+目标周期沿用原部署日期和东京时区规则：日报为已到期的 UTC 昨天，周报为上一个完整 UTC 周，月报为上一个完整 UTC 自然月。到期但统计未完成的周期保持 `pending`，后续云端保存或新会话重试；跨日不会覆盖旧目标。Daily 不提供精确到分钟的文字稿生成时间。
+
+迁移保留已有文字稿和 `generated`、`preserved` 状态，不覆盖旧图片、旧文字或已发布记录，也不生成部署以前的全部历史文案。已有文字包损坏或缺失时保留错误供核对。这里的 `generated` 只表示文字稿已生成；程序不会自动向 X、LinkedIn 或其他社交平台发帖。
+
+## 可选本地安装与文字预览
+
+以下保留原本地读取入口和 systemd 单元的使用方法。它们适用于独立本地方案；当前云端生产不安装或恢复这些定时器。已有本地状态与文字稿只作为迁移来源和历史证据保留。
 
 Kaggle CLI 2.2.5 需要 Python 3.11 或更新版本。在现有项目目录安装依赖：
 
@@ -177,7 +198,7 @@ Kaggle CLI 2.2.5 需要 Python 3.11 或更新版本。在现有项目目录安�
   --rollout-date 2026-11-10 --kind all
 ```
 
-`--rollout-date` 使用 Asia/Tokyo 日历日期。省略时，以首次运行的东京日期初始化。任务只补齐部署日以后已经到期的图文周期，不自动生成部署以前的全部历史图文。
+`--rollout-date` 使用 Asia/Tokyo 日历日期。省略时，以首次运行的东京日期初始化。任务只补齐部署日以后已经到期的文字稿周期，不自动生成部署以前的全部历史文案。
 
 | 首次检查时间（Asia/Tokyo） | 目标周期 |
 | --- | --- |
@@ -185,11 +206,11 @@ Kaggle CLI 2.2.5 需要 Python 3.11 或更新版本。在现有项目目录安�
 | 周一 11:30 | 上一个完整 UTC 周，周一至周日 |
 | 每月 1 日 12:30 | 上一个完整 UTC 自然月 |
 
-尚未就绪的目标保存为 `pending`，每 30 分钟重试。即使跨日，原目标也不会被新日期替换。电脑错过定时时间后，后续运行会补登记部署以来到期的目标。`generated` 和 `preserved` 为终态，不再保留已过时的 `last_error`；已有终态在下一次结果检查时同样清理旧错误，而不重新生成图文或改变原部署日期。
+尚未就绪的目标保存为 `pending`，每 30 分钟重试。即使跨日，原目标也不会被新日期替换。电脑错过定时时间后，后续运行会补登记部署以来到期的目标。`generated` 和 `preserved` 为终态，不再保留已过时的 `last_error`；已有终态在下一次结果检查时同样清理旧错误，而不重新生成内容或改变原部署日期。切换文字格式不会重置这些状态，也不会自动重新发布旧周期。
 
 任务先读取月度数据集状态，固定已处理完成的版本，再从同一版本下载 `index.json` 和指定结果文件。它不下载原始日库，也不打开本地原始 SQLite。
 
-现成的 systemd 用户单元位于 `config/systemd/`。以下命令供云端验收通过后安装或恢复本地任务使用；执行前先按部署步骤确认单实例状态。在本项目位于 `~/poly-market-analysis` 时安装：
+现成的 systemd 用户单元位于 `config/systemd/`。以下命令仅供明确选择独立本地调度的部署使用，不属于当前云端生产步骤。在本项目位于 `~/poly-market-analysis` 时安装：
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -215,10 +236,12 @@ systemctl --user list-timers --all
 ```bash
 .venv-btc5m/bin/python scripts/polymarket_kaggle_reports.py \
   --result-json /path/to/daily_2026-11-09.json \
+  --source-dataset qiuqiuslowchillchill/pm-updown-analysis-2026-11 \
+  --source-version 100 \
   --output-dir outputs/previews/kaggle_daily_2026-11-09
 ```
 
-已有总览、分布或发布文件会被保留，定时任务不覆盖已生成、已提交或已发布的图文。历史统计修订需要手动预览并另行处理替换。本流程不向社交平台自动发帖，也不自动补发历史帖子。
+示例中的分析版本须填写结果实际来源；日报若没有分析来源引用，可省略这两个参数并使用目标日的固定原始日库引用。周报、月报需要固定分析版本，不能用某一天的原始日库代表整个周期。默认文字目录为 `outputs/social/`，包含原结果、逐条 X `.txt`、LinkedIn `.txt` 与 `format: text` 的本地清单 v2，不要求 Pillow 或图片资源。已有同周期文字文件会保留；旧海报目录和已发布记录不覆盖。历史统计修订需要手动预览并另行处理替换。本流程不向社交平台自动发帖，也不自动补发历史帖子。
 
 ## 统计覆盖与结果接口
 

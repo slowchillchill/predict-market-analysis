@@ -283,6 +283,8 @@ For reproducible analysis, record the **raw and analysis dataset versions**, the
 
 Market discovery comes from the [Polymarket Gamma API](https://gamma-api.polymarket.com); trade records come from the [public trade API](https://docs.polymarket.com/api-reference/feeds/list-trades). Coverage can be affected by upstream availability and API changes. If you find an issue, [open an issue](https://github.com/slowchillchill/predict-market-analysis/issues) with the dataset/version, date, affected market or query, and expected versus observed result.
 
+The cloud producer generates English X threads and LinkedIn posts from confirmed Kaggle result JSON. Each monthly analysis Dataset saves the text and generation state in `social.zip`; a fresh session restores them before generating missing periods. Local generation under `outputs/social/` remains available for previews. LinkedIn uses vertical metric blocks. Existing assets and publication records remain preserved. Publishing is a separate user-authorized task. See the [publishing guide](docs/updown_publishing.md).
+
 ## License and further documentation
 
 Repository code is [MIT licensed](LICENSE). Published dataset metadata declares **CC0-1.0** for the contributed compilation. This does not remove upstream rights, notices, or applicable [Polymarket terms](https://polymarket.com/tos); see [CC0](https://creativecommons.org/publicdomain/zero/1.0/).
@@ -291,7 +293,7 @@ Repository code is [MIT licensed](LICENSE). Published dataset metadata declares 
 | --- | --- |
 | [Daily analysis](docs/updown_daily.md) | Detailed discovery, coverage, and reporting rules |
 | [BUY distribution definitions](docs/updown_bot_price_poster.md) | Reconstruction and distribution denominators |
-| [Daily](docs/updown_poster.md), [weekly](docs/updown_weekly_poster.md), [monthly](docs/updown_monthly_poster.md) poster guides | Rendering reports and post text from project tools |
+| [Daily](docs/updown_poster.md), [weekly](docs/updown_weekly_poster.md), [monthly](docs/updown_monthly_poster.md) poster guides | Historical image workflows; the scheduled consumer now generates text only |
 | [Kaggle operations](docs/kaggle_migration.md) | Running your own collector, scheduling, and report consumer |
-| [Publishing guide](docs/updown_publishing.md) | Generated image and caption packages |
+| [Publishing guide](docs/updown_publishing.md) | Current text-only X threads and LinkedIn posts from completed Kaggle JSON |
 | [Legacy BTC 5-minute workflow](README_BTC5M.md) | Earlier start-date-based summaries; different from the all-series dataset |

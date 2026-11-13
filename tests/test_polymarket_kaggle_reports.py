@@ -12,7 +12,6 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import polymarket_kaggle_reports as reports
-import polymarket_updown_distribution_assets as assets
 import polymarket_updown_price_distribution as distribution
 import test_polymarket_updown_poster_distribution as daily_fixtures
 import test_polymarket_updown_period_package as period_fixtures
@@ -55,25 +54,50 @@ class KaggleReportTests(unittest.TestCase):
                             "volume_basis": "taker_only", "bot_volume_basis": "wallet_buys_only"},
                 "distribution": stats}
 
-    def test_render_all_kinds_from_json_without_opening_raw_database(self):
+    def test_render_all_kinds_from_json_without_raw_database_or_images(self):
         for kind in reports.KINDS:
             with self.subTest(kind=kind):
                 bundle = self.daily_bundle() if kind == "daily" else self.period_bundle(kind)
                 output = self.root / kind
-                with patch("sqlite3.connect", side_effect=AssertionError("Local renderer opened SQLite")):
+                with patch("sqlite3.connect", side_effect=AssertionError("Local renderer opened SQLite")), \
+                        patch.dict(sys.modules, {"PIL": None}):
                     paths = reports.render_bundle(bundle, output, source_reference={"dataset": "owner/analysis", "version": 3})
-                payload = json.loads(paths["source"].read_text())
-                self.assertEqual(payload["current"], bundle["payload"]["current"])
-                self.assertEqual(payload["kaggle_source"]["version"], 3)
+                saved = json.loads(paths["source"].read_text())
+                self.assertEqual(saved["payload"], bundle["payload"])
+                self.assertEqual(saved["distribution"], bundle["distribution"])
+                self.assertEqual(saved["source_reference"]["version"], 3)
                 manifest = json.loads(paths["manifest"].read_text())
                 self.assertEqual(Path(manifest["source_path"]), paths["source"])
+                self.assertEqual(manifest["format"], "text")
+                self.assertEqual(manifest["schema_version"], 2)
+                self.assertEqual(set(manifest["platforms"]), {"x", "linkedin"})
                 self.assertTrue(all(Path(path).exists() for item in manifest["platforms"].values()
-                                    for path in item["image_paths"]))
+                                    for path in item["text_paths"]))
                 self.assertTrue(all(Path(path).parent == output for item in manifest["platforms"].values()
-                                    for path in item["image_paths"]))
-                self.assertLessEqual(len(paths["tweet"].read_text()), 280)
-                stats = assets.load_distribution(paths["source"], payload)
-                self.assertEqual(stats, bundle["distribution"])
+                                    for path in item["text_paths"]))
+                from polymarket_social_text import x_weighted_length
+                self.assertTrue(all(x_weighted_length(path.read_text()) <= 280 for path in paths["x"]))
+                self.assertEqual([path.read_text() for path in paths["x"]], manifest["platforms"]["x"]["posts"])
+                self.assertEqual(paths["linkedin"].read_text(), manifest["platforms"]["linkedin"]["body"])
+                self.assertFalse(any(path.suffix == ".png" for path in output.iterdir()))
+                self.assertNotIn("image_path", manifest)
+                self.assertNotIn("music_config", manifest)
+
+    def test_offline_cli_preserves_fixed_analysis_reference(self):
+        bundle = self.daily_bundle()
+        source = self.root / "daily.json"
+        source.write_text(json.dumps(bundle))
+        output = self.root / "offline"
+        with patch("sqlite3.connect", side_effect=AssertionError("Offline CLI opened SQLite")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            status = reports.main(["--result-json", str(source), "--output-dir", str(output),
+                                   "--source-dataset", "owner/analysis", "--source-version", "7"])
+        self.assertEqual(status, 0)
+        manifest = json.loads(next(output.glob("*_publish.json")).read_text())
+        self.assertEqual(manifest["source_reference"],
+                         {"dataset": "owner/analysis", "version": 7, "filename": "daily.json"})
+        first = Path(manifest["platforms"]["x"]["text_paths"][0]).read_text()
+        self.assertIn("https://www.kaggle.com/datasets/owner/analysis/versions/7", first)
 
     def test_existing_assets_are_never_overwritten(self):
         bundle = self.daily_bundle()
