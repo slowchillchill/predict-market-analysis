@@ -56,35 +56,181 @@ def window_start(today: date) -> date:
                          day=min(today.day, calendar.monthrange(today.year - 3, today.month)[1]))
 
 
-DESCRIPTION = """Public Polymarket Crypto Updown Markets Analysis research data.
-Source: https://gamma-api.polymarket.com and https://data-api.polymarket.com/v2/trades.
-Markets are grouped by UTC market end date, retaining all available trades of each market.
-All valid conditions in the 38 target series are retained, including distinct
-contracts sharing an interval. markets.resolution_source and description preserve
-available upstream settlement rules; unknown values remain NULL.
-The collector requests taker_only=false once and retains every returned wallet row.
-Completed SQLite files store short group_id values, scoped to each market, instead
-of transaction hash strings. Unfinished markets alone retain a pending hash mapping
-for cursor recovery; completed files contain markets, collection_progress and trades.
-Market volume is computed from each group's first stored page/row, not collected
-through a second API request or stored in a market_volume table. This project rule
-matched the old taker API amounts for the validated 2026-11-09 sample; it is not an
-official guarantee of future row ordering. collection_status.json records the format
-and calculation method. Old Dataset versions remain historical snapshots.
-Amounts use exact decimal prices and sizes with the project's existing rounding rules.
-Source code, schema, methodology and reproducible analysis:
-https://github.com/slowchillchill/predict-market-analysis
-Upstream source terms: https://polymarket.com/tos . Source notices remain applicable.
-The CC0 dedication applies to the contributor's rights in this arranged research dataset.
-An incomplete daily version is a recovery point, not a finished statistical report.
-coverage_policy identifies the collection rule. The official-series policy requires
-complete directory pagination, every planned slot, and finished trade pagination
-for every discovered condition. Older completed snapshots retain their legacy rule.
-Raw schema v3 permits unknown market start times and start dates to remain NULL;
-the source market end time still determines the UTC daily partition.
-Changed work is checkpointed about every 30 minutes. Collection stops after
-11.5 hours to leave time for publication within the session limit. These are
-configurable engineering defaults, not a promise that every checkpoint succeeds.
+DESCRIPTION = """# Polymarket Crypto Up/Down Data: Contents and Query Guide
+
+Public, versioned research data for 38 Polymarket crypto Up/Down market series.
+Use it to study market activity, wallet participation, BUY price distributions,
+and rule-based high-frequency activity. Historical collection is still incomplete;
+check the selected snapshot before drawing conclusions about a whole period.
+
+**Start here:** [Runnable user guide and multi-month query examples](https://www.kaggle.com/code/qiuqiuslowchillchill/polymarket-updown-data-user-guide).
+See also the [source, schema and methodology](https://github.com/slowchillchill/predict-market-analysis)
+and [Chinese documentation](https://github.com/slowchillchill/predict-market-analysis/blob/main/README.zh-CN.md).
+
+## Which dataset should I use?
+
+All datasets below belong to `qiuqiuslowchillchill`.
+
+| Dataset name | Contents | Best for |
+| --- | --- | --- |
+| `pm-updown-raw-YYYY-MM-DD` | One raw SQLite snapshot for markets ending on that UTC date | Market-level or wallet-level research and custom trade queries |
+| `pm-updown-analysis-YYYY-MM` | Completed daily features and available report JSON files | Trends, wallet rankings, and statistics across days or months |
+
+Each raw daily dataset contains:
+
+- `data.sqlite3`: `markets` metadata, `collection_progress` pagination state,
+  and `trades` wallet-perspective records; also `updown_*` coverage and summary views.
+- `collection_status.json`: completeness, coverage, errors, schema and calculation method.
+- `README.md`: the documentation shipped with that particular snapshot.
+- Some versions also include `publication.json` or `migration_summary.json`.
+
+Monthly analysis datasets can contain the following files. `features.sqlite3`,
+`index.json`, and daily reports appear after completed daily results are available;
+an initial snapshot may contain recovery state only.
+
+- `features.sqlite3`: three tables. `days` stores completed daily feature/report JSON;
+  `wallet_days` stores per-day wallet activity and BUY amounts; `daily_hits` records
+  wallets that satisfy the behavior rule on that day.
+- `index.json`: the reports available in this snapshot. Only completed report periods appear.
+- `daily_YYYY-MM-DD.json`, and completed weekly/monthly report JSON when available.
+- Some months also contain global `progress.json`, publication markers, and
+  `social.archive.json` with generated text and generation state.
+
+Historical features go into the month of the data date. Global progress can be
+stored in the current operating month; it does not make that month's feature
+database an archive of every historical month. A cross-month weekly report is
+stored in the month containing its last included date.
+
+## Query inside Kaggle
+
+Create your own Notebook, choose **Add Input**, and attach the required datasets.
+Select and record their versions. SQLite is queried inside the Notebook; this
+project does not provide a remotely connectable SQL endpoint. Do not run the
+collection Notebook just to read the data.
+
+For one raw daily dataset, attach only that daily dataset and run:
+
+```python
+import json
+import sqlite3
+from pathlib import Path
+from contextlib import closing
+
+paths = list(Path('/kaggle/input').rglob('data.sqlite3'))
+assert len(paths) == 1, 'Attach exactly one raw daily snapshot for this example'
+db = paths[0].resolve()
+status = json.loads((db.parent / 'collection_status.json').read_text())
+assert status['status'] == 'complete', status.get('error', 'Incomplete snapshot')
+with closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True)) as conn:
+    print(conn.execute('SELECT * FROM updown_coverage').fetchall())
+    print(conn.execute(
+        'SELECT date_utc, market_volume_micro_usdc '
+        'FROM updown_market_volume_daily'
+    ).fetchall())
+```
+
+Inspect fields with `PRAGMA table_info(markets)` and `PRAGMA table_info(trades)`.
+The raw `updown_wallet_daily` and `updown_wallet_ranked` views use BUY + SELL
+wallet amounts. This differs from the BUY-only amount in analysis `wallet_days`.
+
+For prepared statistics, read `index.json` and the selected report JSON.
+For custom period statistics, query the monthly `features.sqlite3` tables:
+
+```sql
+SELECT date_utc,
+       json_extract(features_json, '$.market_volume.volume_micro_usdc')
+         AS market_volume_micro_usdc
+FROM days
+WHERE date_utc >= '2026-11-09' AND date_utc < '2026-11-13'
+ORDER BY date_utc;
+```
+
+This example uses the half-open interval `[2026-11-09, 2026-11-13)`, including
+November 9 through 12. It does not assert that any arbitrary range is complete.
+
+## Query a quarter, a year, or a custom date range
+
+1. Attach or download each required month's `features.sqlite3`, choosing exactly
+   one snapshot version per month. Avoid scanning all raw trade files for metrics
+   already available as daily features.
+2. Select daily rows in `[start_date, end_date)`. Compare the returned dates with
+   every expected date. Missing dates are unknown, not zero. The linked guide
+   refuses to emit full-period totals if a date is missing or duplicated.
+3. Sum daily market amounts and per-asset amounts. Group wallet BUY amounts by
+   address, then rank the interval totals. Count distinct wallet addresses across
+   the entire interval rather than adding daily wallet counts.
+4. Recalculate shares and averages from combined numerators and denominators.
+   Do not average daily percentages or sum daily Top 200 lists.
+5. Keep input Dataset versions and each report's `source_versions` with the result.
+
+`wallet_days.amount_micro_usdc` is an integer stored as TEXT and represents BUY
+amount only. Use Python `int` for accumulation and decimal/integer conversion for
+display. Its `trade_count`, first timestamp and last timestamp describe BUY + SELL
+wallet records. These counts are not reconstructed fills. `daily_hits` is neither
+the full historically classified bot population nor exclusively first-time hits.
+Bot analysis must use consistent label rules and history across all input dates.
+
+The standard report generator supports complete UTC weeks and calendar months.
+The user guide supplies a separate read-only example for arbitrary date ranges.
+Detailed series filters, individual markets and transaction-time analysis require
+the relevant raw daily databases; aggregated wallet features cannot recover every
+trade-level dimension.
+
+## Download a fixed version
+
+After configuring the official Kaggle CLI, this command downloads only the
+feature database from a known snapshot, rather than all raw trade files:
+
+```bash
+kaggle datasets download \\
+  qiuqiuslowchillchill/pm-updown-analysis-2026-11/383 \\
+  -f features.sqlite3 -p ./analysis-2026-11-v383 --unzip
+```
+
+The final `/383` pins the Dataset version. Choose appropriate versions for your
+research; omitting it requests the latest snapshot. Keep each month's files in a
+separate folder. Kaggle Dataset versions and SQLite schema versions are different.
+
+## Completeness and measurement rules
+
+- Dates mean the UTC date of the upstream market `end_time`, not the trade's
+  timestamp or market start date. All available trades of those markets are
+  retained, including trades on other dates. For transaction-time research, filter
+  `trades.timestamp` and include the necessary cross-date market partitions.
+- Use raw `collection_status.json.status == 'complete'` for complete-day work.
+  Pagination can be complete while statistical reconstruction still fails, so
+  `coverage.is_complete == 1` alone is insufficient. Incomplete files are recovery
+  snapshots. Check errors and coverage before using them as partial samples.
+- Only completed daily results enter `days`. Missing days are not zero-activity
+  days. Historical progress advancing does not mean all earlier days are complete.
+- `coverage_policy` records the coverage rule. The current official-series rule
+  requires complete directory pagination, planned slots and trade pagination for
+  all discovered conditions. Older completed inputs can use a legacy rule.
+  Completeness is an API/project check, not full on-chain reconciliation.
+- Each `trades` row is a wallet-perspective record, not necessarily an independent
+  fill. `group_id` is scoped to one market and one daily snapshot version; it is
+  neither a transaction hash nor a global fill identifier. Do not deduplicate by
+  price/size, sum wallet rows as single-sided market volume, or divide them by two.
+- Project market volume uses `wallet_group_first_row_v1`: the earliest stored
+  page/row amount in each `(market_slug, group_id)` group, then summed. It is a
+  project method, not a guarantee of upstream ordering. Wallet BUY amounts and
+  reconstructed BUY-event Up-equivalent notional are different measures.
+- One USDC equals 1,000,000 micro USDC. Raw prices and sizes are decimal strings;
+  row amounts use ROUND_HALF_UP before summation. Preserve integer/Decimal precision.
+- Raw schema v3 permits unknown actual market start times/dates and settlement
+  metadata to remain NULL. Check the selected file's schema before querying optional
+  columns. Distinct real conditions sharing an interval are retained.
+
+## Sources and attribution
+
+Sources: https://gamma-api.polymarket.com and
+https://data-api.polymarket.com/v2/trades, collected with `taker_only=false`.
+Source terms and notices remain applicable: https://polymarket.com/tos .
+The CC0 dedication applies to the contributor's rights in this arranged research
+dataset. Code, definitions and issue reporting:
+https://github.com/slowchillchill/predict-market-analysis .
+When reporting a problem, include the dataset version, date, market identifier
+and minimal query; never include credentials.
 """
 
 
