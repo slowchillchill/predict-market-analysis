@@ -4,6 +4,8 @@
 
 Public, versioned datasets of Polymarket crypto Up/Down markets, with wallet-level trade records in SQLite and daily, weekly, and monthly analysis in JSON. Collection and analysis run on Kaggle. You can query the data in a Kaggle Notebook without downloading the database to your computer.
 
+**Scheduler recovery, November 17, 2026:** the [external scheduler](docs/kaggle_external_scheduler.md) is running on the replacement Hong Kong server. It submits at **00:05 UTC** daily; the next trigger recorded at recovery was November 18. Production v30 remained running, and raw data, daily statistics, and text for November 15 and 16 were verified complete. Report text generation does not confirm publication to social platforms.
+
 **Start here:** [open a completed daily dataset](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-raw-2026-11-09/versions/2), attach it to a Kaggle Notebook, and run the SQL examples below. For prepared statistics, use the [analysis dataset](https://www.kaggle.com/datasets/qiuqiuslowchillchill/pm-updown-analysis-2026-11/versions/3).
 
 ## Where to find the data
