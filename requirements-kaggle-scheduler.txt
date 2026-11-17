@@ -1,0 +1,8 @@
+# Small control-plane environment; collector/analysis packages stay on Kaggle.
+kagglesdk==0.1.38
+requests==2.34.2
+certifi==2026.10.23
+protobuf==7.36.2
+charset-normalizer==3.5.2
+idna==3.20
+urllib3==2.8.0

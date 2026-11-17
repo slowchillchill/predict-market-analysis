@@ -1,0 +1,33 @@
+[Unit]
+Description=Submit the daily Polymarket Kaggle notebook
+Wants=network-online.target
+After=network-online.target time-sync.target
+ConditionPathExists=/etc/polymarket-kaggle-scheduler/native-daily-disabled
+
+[Service]
+Type=oneshot
+User=polymarket-scheduler
+Group=polymarket-scheduler
+WorkingDirectory=/opt/polymarket-kaggle-scheduler
+EnvironmentFile=/etc/polymarket-kaggle-scheduler/settings.env
+EnvironmentFile=/etc/polymarket-kaggle-scheduler/credentials.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/polymarket-kaggle-scheduler/venv/bin/python /opt/polymarket-kaggle-scheduler/polymarket_kaggle_scheduler.py --bundle-dir /opt/polymarket-kaggle-scheduler/bundle --state-dir /var/lib/polymarket-kaggle-scheduler --expected-kernel qiuqiuslowchillchill/polymarket-crypto-updown-markets-analysis --first-date-utc ${FIRST_DATE_UTC}
+StateDirectory=polymarket-kaggle-scheduler
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=300
+Restart=no
+Nice=10
+CPUQuota=25%
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=32
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
