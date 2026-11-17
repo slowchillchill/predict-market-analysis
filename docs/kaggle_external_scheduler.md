@@ -62,7 +62,7 @@ sudo journalctl -u polymarket-kaggle-scheduler.service --since today --no-pager
 
 `--check-only` 查询身份、版本和恢复结果，不提交 Notebook，也不写入调度状态。该模式仍可能创建本地状态目录和锁文件。
 
-`already_submitted_remote` 表示云端最新版本已有当天、同 bundle 的标记；此路径不写 `state.json`。因此替换主机可能只有 `scheduler.lock`，这是正常状态，不能据此判断生产未提交。不要手工伪造状态文件；结合日志、固定版本标记与当前运行状态核验。服务为 oneshot，成功执行后显示 inactive 属于正常；应检查 timer 为 active/enabled、service 的退出码及 journal。
+`already_submitted_remote` 表示云端最新版本已有当天的外部调度标记；此分支不比较 bundle 摘要，也不写 `state.json`。同一天即使本地 bundle 已更改，也不会通过此路径重复提交。因此替换主机可能只有 `scheduler.lock`，这是正常状态，不能据此判断生产未提交。不要手工伪造状态文件；结合日志、固定版本标记与当前运行状态核验。服务为 oneshot，成功执行后显示 inactive 属于正常；应检查 timer 为 active/enabled、service 的退出码及 journal。
 
 若日志报告 `pending_unresolved` 或 `submission_unconfirmed`，先核对 pending 中的固定版本与源码标记。不要删除状态或重新 push 来绕过这一检查。凭据失效时更新受保护的凭据文件，再做只读检查。
 
